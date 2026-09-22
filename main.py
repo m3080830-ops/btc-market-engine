@@ -1,13 +1,23 @@
+import os
 import time
 import json
 import sqlite3
+import threading
 import urllib.request
+import urllib.parse
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+# ============================================================
+# BTC MARKET ENGINE
+# MEXC FUTURES
+# PAPER / MARKET OBSERVATION ONLY
+# NO REAL ORDERS
+# ============================================================
 
 SYMBOL = "BTC_USDT"
 BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
-
-DB_FILE = "/tmp/market_history.db"
 
 POLL_SECONDS = 30
 
@@ -15,62 +25,58 @@ H1_LIMIT = 200
 M15_LIMIT = 300
 M5_LIMIT = 500
 
+# Persistent inside the container while it is running
+DB_FILE = "/app/market_history.db"
 
-def get_klines(interval, limit):
-    url = f"{BASE_URL}/{SYMBOL}?interval={interval}&limit={limit}"
-
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "btc-market-engine/1.0"}
-    )
-
-    with urllib.request.urlopen(req, timeout=20) as response:
-        data = json.loads(response.read().decode())
-
-    rows = []
-
-    for r in data:
-        rows.append({
-            "ts": int(r[0]),
-            "open": float(r[1]),
-            "close": float(r[2]),
-            "high": float(r[3]),
-            "low": float(r[4]),
-            "volume": float(r[5])
-        })
-
-    rows.sort(key=lambda x: x["ts"])
-    return rows
+# Trailing activates after movement > 1.0R
+TRAIL_ACTIVATION_R = 1.0
 
 
-def ema(values, period):
-    if not values:
-        return []
+# ============================================================
+# LOGGING
+# ============================================================
 
-    result = [None] * len(values)
-
-    if len(values) < period:
-        return result
-
-    first = sum(values[:period]) / period
-    result[period - 1] = first
-
-    multiplier = 2 / (period + 1)
-
-    for i in range(period, len(values)):
-        result[i] = (
-            (values[i] - result[i - 1]) * multiplier
-            + result[i - 1]
-        )
-
-    return result
+def log(message):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[{now}] {message}", flush=True)
 
 
-def now_text():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+# ============================================================
+# HTTP READINESS SERVER
+# DePlexo needs an open application port.
+# The market engine itself runs in the background.
+# ============================================================
 
+PORT = int(os.environ.get("PORT", "3000"))
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        body = b"BTC MARKET ENGINE OK\n"
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    log(f"Health server listening on port {PORT}")
+    server.serve_forever()
+
+
+# ============================================================
+# DATABASE
+# ============================================================
 
 def init_db():
+
     conn = sqlite3.connect(DB_FILE)
 
     conn.execute("""
@@ -88,8 +94,47 @@ def init_db():
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS state (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+
     conn.commit()
+
     return conn
+
+
+def save_state(conn, key, value):
+
+    conn.execute(
+        """
+        INSERT INTO state(key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key)
+        DO UPDATE SET value=excluded.value
+        """,
+        (key, json.dumps(value))
+    )
+
+    conn.commit()
+
+
+def load_state(conn, key, default=None):
+
+    row = conn.execute(
+        "SELECT value FROM state WHERE key=?",
+        (key,)
+    ).fetchone()
+
+    if row is None:
+        return default
+
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return default
 
 
 def log_event(
@@ -103,6 +148,7 @@ def log_event(
     max_r=None,
     details=""
 ):
+
     conn.execute(
         """
         INSERT INTO events
@@ -110,7 +156,7 @@ def log_event(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            now_text(),
+            datetime.now(timezone.utc).isoformat(),
             event,
             direction,
             price,
@@ -124,504 +170,936 @@ def log_event(
 
     conn.commit()
 
-    print(
-        f"[{now_text()}] "
-        f"{event} "
-        f"{direction} "
-        f"price={price} "
-        f"SL={stop} "
-        f"R={r_value} "
-        f"maxR={max_r}"
+    log(
+        f"EVENT={event} "
+        f"DIRECTION={direction} "
+        f"PRICE={price} "
+        f"STOP={stop}"
     )
 
 
-def h1_setup(h1):
-    if len(h1) < 60:
+# ============================================================
+# MEXC
+# ============================================================
+
+def get_klines(interval, limit):
+
+    params = urllib.parse.urlencode({
+        "interval": interval,
+        "limit": limit
+    })
+
+    url = f"{BASE_URL}/{SYMBOL}?{params}"
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "btc-market-engine/1.0"
+        }
+    )
+
+    try:
+
+        with urllib.request.urlopen(
+            request,
+            timeout=15
+        ) as response:
+
+            raw = response.read().decode("utf-8")
+
+    except Exception as e:
+
+        raise RuntimeError(
+            f"MEXC connection error: {e}"
+        )
+
+    try:
+
+        payload = json.loads(raw)
+
+    except Exception:
+
+        raise RuntimeError(
+            f"MEXC returned non-JSON response: {raw[:300]}"
+        )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # MEXC Futures returns:
+    #
+    # {
+    #   "success": true,
+    #   "code": 0,
+    #   "data": {
+    #       "time": [...],
+    #       "open": [...],
+    #       "close": [...],
+    #       "high": [...],
+    #       "low": [...],
+    #       "vol": [...]
+    #   }
+    # }
+    #
+    # The old code expected a list and caused int("s").
+    # --------------------------------------------------------
+
+    if not isinstance(payload, dict):
+
+        raise RuntimeError(
+            f"Unexpected MEXC response type: {type(payload)}"
+        )
+
+    if payload.get("success") is False:
+
+        raise RuntimeError(
+            f"MEXC API error: {payload}"
+        )
+
+    data = payload.get("data")
+
+    if not isinstance(data, dict):
+
+        raise RuntimeError(
+            f"MEXC returned invalid data: {payload}"
+        )
+
+    times = data.get("time", [])
+    opens = data.get("open", [])
+    closes = data.get("close", [])
+    highs = data.get("high", [])
+    lows = data.get("low", [])
+    volumes = data.get("vol", [])
+
+    lengths = [
+        len(times),
+        len(opens),
+        len(closes),
+        len(highs),
+        len(lows),
+        len(volumes)
+    ]
+
+    if not lengths or min(lengths) == 0:
+
+        raise RuntimeError(
+            f"MEXC returned empty candle data: {payload}"
+        )
+
+    count = min(lengths)
+
+    rows = []
+
+    for i in range(count):
+
+        rows.append({
+            "ts": int(float(times[i])),
+            "open": float(opens[i]),
+            "close": float(closes[i]),
+            "high": float(highs[i]),
+            "low": float(lows[i]),
+            "volume": float(volumes[i])
+        })
+
+    rows.sort(key=lambda x: x["ts"])
+
+    return rows
+
+
+# ============================================================
+# INDICATORS
+# ============================================================
+
+def ema(values, period):
+
+    if not values:
+        return []
+
+    result = [None] * len(values)
+
+    if len(values) < period:
+        return result
+
+    first = sum(values[:period]) / period
+
+    result[period - 1] = first
+
+    multiplier = 2 / (period + 1)
+
+    for i in range(period, len(values)):
+
+        result[i] = (
+            (values[i] - result[i - 1])
+            * multiplier
+            + result[i - 1]
+        )
+
+    return result
+
+
+def atr(rows, period=14):
+
+    if len(rows) < period + 1:
+        return [None] * len(rows)
+
+    tr = [None] * len(rows)
+
+    for i in range(1, len(rows)):
+
+        high = rows[i]["high"]
+        low = rows[i]["low"]
+        previous_close = rows[i - 1]["close"]
+
+        tr[i] = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close)
+        )
+
+    result = [None] * len(rows)
+
+    first_values = [
+        x for x in tr[1:period + 1]
+        if x is not None
+    ]
+
+    if len(first_values) < period:
+        return result
+
+    result[period] = sum(first_values) / period
+
+    for i in range(period + 1, len(rows)):
+
+        result[i] = (
+            (result[i - 1] * (period - 1))
+            + tr[i]
+        ) / period
+
+    return result
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def closed_candles(rows):
+
+    if len(rows) < 3:
+        return []
+
+    # Last candle can still be forming.
+    return rows[:-1]
+
+
+def previous_high(rows, count):
+
+    if len(rows) < count:
         return None
 
-    closed = h1[:-1]
+    return max(
+        x["high"]
+        for x in rows[-count:]
+    )
 
-    closes = [x["close"] for x in closed]
-    highs = [x["high"] for x in closed]
-    lows = [x["low"] for x in closed]
 
-    e20 = ema(closes, 20)
-    e50 = ema(closes, 50)
+def previous_low(rows, count):
 
-    i = len(closed) - 1
-
-    if e20[i] is None or e50[i] is None:
+    if len(rows) < count:
         return None
 
-    current = closed[i]
-
-    previous_5 = closed[i - 5]["close"]
-
-    high10 = max(highs[i - 10:i])
-    low10 = min(lows[i - 10:i])
-
-    slope_up = e20[i] > e20[i - 1]
-    slope_down = e20[i] < e20[i - 1]
-
-    long_setup = (
-        previous_5 < e50[i - 5]
-        and current["close"] > high10
-        and current["close"] > e20[i]
-        and slope_up
+    return min(
+        x["low"]
+        for x in rows[-count:]
     )
 
-    short_setup = (
-        previous_5 > e50[i - 5]
-        and current["close"] < low10
-        and current["close"] < e20[i]
-        and slope_down
+
+# ============================================================
+# H1 SETUP
+# ============================================================
+
+def detect_h1_setup(h1):
+
+    rows = closed_candles(h1)
+
+    if len(rows) < 60:
+        return None
+
+    closes = [x["close"] for x in rows]
+
+    ema20 = ema(closes, 20)
+    ema50 = ema(closes, 50)
+
+    i = len(rows) - 1
+
+    current = rows[i]
+
+    if ema20[i] is None or ema50[i] is None:
+        return None
+
+    previous_5 = rows[i - 5]["close"]
+
+    previous_10_high = max(
+        x["high"]
+        for x in rows[i - 10:i]
     )
 
-    if long_setup:
-        return "LONG"
+    previous_10_low = min(
+        x["low"]
+        for x in rows[i - 10:i]
+    )
 
-    if short_setup:
-        return "SHORT"
+    # LONG
+    if (
+        previous_5 < ema50[i - 5]
+        and current["close"] > previous_10_high
+        and current["close"] > ema20[i]
+        and ema20[i] > ema20[i - 1]
+    ):
+
+        return {
+            "direction": "LONG",
+            "time": current["ts"],
+            "price": current["close"]
+        }
+
+    # SHORT
+    if (
+        previous_5 > ema50[i - 5]
+        and current["close"] < previous_10_low
+        and current["close"] < ema20[i]
+        and ema20[i] < ema20[i - 1]
+    ):
+
+        return {
+            "direction": "SHORT",
+            "time": current["ts"],
+            "price": current["close"]
+        }
 
     return None
 
 
-def m15_confirmation(m15, direction):
-    if len(m15) < 30:
-        return False
+# ============================================================
+# M15 CONFIRMATION
+# ============================================================
 
-    closed = m15[:-1]
+def confirm_m15(m15, direction, setup_time):
 
-    closes = [x["close"] for x in closed]
-    highs = [x["high"] for x in closed]
-    lows = [x["low"] for x in closed]
+    rows = closed_candles(m15)
 
-    e20 = ema(closes, 20)
-
-    i = len(closed) - 1
-
-    if e20[i] is None:
-        return False
-
-    current = closed[i]
-    previous = closed[i - 1]
-
-    if direction == "LONG":
-        pullback = (
-            current["low"] <= e20[i]
-            or previous["low"] <= e20[i - 1]
-        )
-
-        reclaim = current["close"] > e20[i]
-        break_structure = current["close"] > max(highs[i - 5:i])
-        candle_ok = current["close"] > current["open"]
-
-        return pullback and reclaim and break_structure and candle_ok
-
-    if direction == "SHORT":
-        pullback = (
-            current["high"] >= e20[i]
-            or previous["high"] >= e20[i - 1]
-        )
-
-        reclaim = current["close"] < e20[i]
-        break_structure = current["close"] < min(lows[i - 5:i])
-        candle_ok = current["close"] < current["open"]
-
-        return pullback and reclaim and break_structure and candle_ok
-
-    return False
-
-
-def m5_trigger(m5, direction):
-    if len(m5) < 30:
-        return False
-
-    closed = m5[:-1]
-
-    closes = [x["close"] for x in closed]
-
-    e20 = ema(closes, 20)
-
-    i = len(closed) - 1
-
-    if e20[i] is None:
-        return False
-
-    current = closed[i]
-
-    previous_high = max(x["high"] for x in closed[i - 3:i])
-    previous_low = min(x["low"] for x in closed[i - 3:i])
-
-    if direction == "LONG":
-        return (
-            current["close"] > previous_high
-            and current["close"] > e20[i]
-            and current["close"] > current["open"]
-        )
-
-    if direction == "SHORT":
-        return (
-            current["close"] < previous_low
-            and current["close"] < e20[i]
-            and current["close"] < current["open"]
-        )
-
-    return False
-
-
-def calculate_sl(m15, direction, entry):
-    closed = m15[:-1]
-
-    if len(closed) < 10:
+    if len(rows) < 30:
         return None
 
-    recent = closed[-6:]
+    # Look only at candles after the H1 setup.
+    candidates = [
+        x for x in rows
+        if x["ts"] > setup_time
+    ]
 
-    if direction == "LONG":
-        structural = min(x["low"] for x in recent)
-        return structural
+    candidates = candidates[-16:]
 
-    if direction == "SHORT":
-        structural = max(x["high"] for x in recent)
-        return structural
+    if not candidates:
+        return None
+
+    closes = [x["close"] for x in rows]
+
+    ema20 = ema(closes, 20)
+
+    for idx in range(len(rows)):
+
+        candle = rows[idx]
+
+        if candle not in candidates:
+            continue
+
+        if ema20[idx] is None:
+            continue
+
+        previous = rows[max(0, idx - 5):idx]
+
+        if len(previous) < 5:
+            continue
+
+        high5 = max(x["high"] for x in previous)
+        low5 = min(x["low"] for x in previous)
+
+        if direction == "LONG":
+
+            if (
+                candle["low"] <= ema20[idx]
+                and candle["close"] > ema20[idx]
+                and candle["close"] > high5
+                and candle["close"] > candle["open"]
+            ):
+
+                return {
+                    "direction": direction,
+                    "time": candle["ts"]
+                }
+
+        if direction == "SHORT":
+
+            if (
+                candle["high"] >= ema20[idx]
+                and candle["close"] < ema20[idx]
+                and candle["close"] < low5
+                and candle["close"] < candle["open"]
+            ):
+
+                return {
+                    "direction": direction,
+                    "time": candle["ts"]
+                }
 
     return None
 
 
-def candle_time(candle):
-    return datetime.fromtimestamp(
-        candle["ts"] / 1000,
-        timezone.utc
-    ).strftime("%Y-%m-%d %H:%M:%S UTC")
+# ============================================================
+# M5 ENTRY TRIGGER
+# ============================================================
+
+def trigger_m5(m5, direction, confirmation_time):
+
+    rows = closed_candles(m5)
+
+    if len(rows) < 30:
+        return None
+
+    candidates = [
+        x for x in rows
+        if x["ts"] > confirmation_time
+    ]
+
+    candidates = candidates[-8:]
+
+    if not candidates:
+        return None
+
+    closes = [x["close"] for x in rows]
+
+    ema20 = ema(closes, 20)
+
+    for idx in range(len(rows)):
+
+        candle = rows[idx]
+
+        if candle not in candidates:
+            continue
+
+        if ema20[idx] is None:
+            continue
+
+        previous = rows[max(0, idx - 3):idx]
+
+        if len(previous) < 3:
+            continue
+
+        high3 = max(x["high"] for x in previous)
+        low3 = min(x["low"] for x in previous)
+
+        if direction == "LONG":
+
+            if (
+                candle["close"] > high3
+                and candle["close"] > ema20[idx]
+                and candle["close"] > candle["open"]
+            ):
+
+                # Entry = next M5 candle open
+                next_idx = idx + 1
+
+                if next_idx < len(rows):
+
+                    return {
+                        "direction": direction,
+                        "trigger_time": candle["ts"],
+                        "entry_time": rows[next_idx]["ts"],
+                        "entry": rows[next_idx]["open"]
+                    }
+
+        if direction == "SHORT":
+
+            if (
+                candle["close"] < low3
+                and candle["close"] < ema20[idx]
+                and candle["close"] < candle["open"]
+            ):
+
+                next_idx = idx + 1
+
+                if next_idx < len(rows):
+
+                    return {
+                        "direction": direction,
+                        "trigger_time": candle["ts"],
+                        "entry_time": rows[next_idx]["ts"],
+                        "entry": rows[next_idx]["open"]
+                    }
+
+    return None
 
 
-def main():
-    conn = init_db()
+# ============================================================
+# STRUCTURAL STOP
+# ============================================================
 
-    state = {
-        "setup": None,
-        "setup_time": None,
-        "confirmed": False,
+def structural_stop(m15, direction):
 
-        "position": None,
-        "direction": None,
-        "entry": None,
-        "initial_sl": None,
-        "sl": None,
-        "risk": None,
+    rows = closed_candles(m15)
 
+    if len(rows) < 10:
+        return None
+
+    last = rows[-6:]
+
+    atr_values = atr(rows, 14)
+
+    current_atr = atr_values[-1]
+
+    if current_atr is None:
+        return None
+
+    if direction == "LONG":
+
+        swing = min(
+            x["low"]
+            for x in last
+        )
+
+        return swing - current_atr * 0.2
+
+    if direction == "SHORT":
+
+        swing = max(
+            x["high"]
+            for x in last
+        )
+
+        return swing + current_atr * 0.2
+
+    return None
+
+
+# ============================================================
+# POSITION
+# ============================================================
+
+def create_position(direction, entry, stop):
+
+    risk = abs(entry - stop)
+
+    if risk <= 0:
+        return None
+
+    return {
+        "direction": direction,
+        "entry": entry,
+        "initial_stop": stop,
+        "stop": stop,
+        "risk": risk,
         "max_r": 0.0,
         "trailing_active": False,
-
-        "last_h1_setup_time": None,
-        "last_m15_confirmation_time": None,
-        "last_m5_trigger_time": None
+        "entry_time": int(time.time())
     }
 
-    print("")
-    print("======================================")
-    print(" BTC MARKET ENGINE")
-    print(" MEXC FUTURES")
-    print(" PAPER / MARKET OBSERVATION ONLY")
-    print(" NO REAL ORDERS")
-    print("======================================")
-    print("")
+
+def current_r(position, price):
+
+    if position["direction"] == "LONG":
+
+        return (
+            price - position["entry"]
+        ) / position["risk"]
+
+    return (
+        position["entry"] - price
+    ) / position["risk"]
+
+
+def update_position(conn, position, m5, m15):
+
+    rows5 = closed_candles(m5)
+
+    if not rows5:
+        return position
+
+    latest = rows5[-1]
+
+    if position["direction"] == "LONG":
+
+        favorable = latest["high"]
+
+        r = current_r(
+            position,
+            favorable
+        )
+
+        position["max_r"] = max(
+            position["max_r"],
+            r
+        )
+
+        # Trailing starts after > 1.0R
+        if (
+            position["max_r"] > TRAIL_ACTIVATION_R
+            and not position["trailing_active"]
+        ):
+
+            position["trailing_active"] = True
+
+            log_event(
+                conn,
+                "TRAILING_ACTIVATED",
+                position["direction"],
+                latest["close"],
+                position["stop"],
+                position["risk"],
+                position["max_r"],
+                position["max_r"],
+                "Trailing activated above 1.0R"
+            )
+
+        if position["trailing_active"]:
+
+            m15_closed = closed_candles(m15)
+
+            if len(m15_closed) >= 3:
+
+                new_stop = min(
+                    x["low"]
+                    for x in m15_closed[-3:]
+                )
+
+                if new_stop > position["stop"]:
+
+                    position["stop"] = new_stop
+
+                    log_event(
+                        conn,
+                        "TRAILING_STOP_MOVED",
+                        position["direction"],
+                        latest["close"],
+                        new_stop,
+                        position["risk"],
+                        r,
+                        position["max_r"],
+                        "M15 structure"
+                    )
+
+        if latest["low"] <= position["stop"]:
+
+            final_r = current_r(
+                position,
+                position["stop"]
+            )
+
+            log_event(
+                conn,
+                "EXIT_SL",
+                position["direction"],
+                position["stop"],
+                position["stop"],
+                position["risk"],
+                final_r,
+                position["max_r"],
+                "Stop hit"
+            )
+
+            return None
+
+    else:
+
+        favorable = latest["low"]
+
+        r = current_r(
+            position,
+            favorable
+        )
+
+        position["max_r"] = max(
+            position["max_r"],
+            r
+        )
+
+        if (
+            position["max_r"] > TRAIL_ACTIVATION_R
+            and not position["trailing_active"]
+        ):
+
+            position["trailing_active"] = True
+
+            log_event(
+                conn,
+                "TRAILING_ACTIVATED",
+                position["direction"],
+                latest["close"],
+                position["stop"],
+                position["risk"],
+                position["max_r"],
+                position["max_r"],
+                "Trailing activated above 1.0R"
+            )
+
+        if position["trailing_active"]:
+
+            m15_closed = closed_candles(m15)
+
+            if len(m15_closed) >= 3:
+
+                new_stop = max(
+                    x["high"]
+                    for x in m15_closed[-3:]
+                )
+
+                if new_stop < position["stop"]:
+
+                    position["stop"] = new_stop
+
+                    log_event(
+                        conn,
+                        "TRAILING_STOP_MOVED",
+                        position["direction"],
+                        latest["close"],
+                        new_stop,
+                        position["risk"],
+                        r,
+                        position["max_r"],
+                        "M15 structure"
+                    )
+
+        if latest["high"] >= position["stop"]:
+
+            final_r = current_r(
+                position,
+                position["stop"]
+            )
+
+            log_event(
+                conn,
+                "EXIT_SL",
+                position["direction"],
+                position["stop"],
+                position["stop"],
+                position["risk"],
+                final_r,
+                position["max_r"],
+                "Stop hit"
+            )
+
+            return None
+
+    return position
+
+
+# ============================================================
+# ENGINE
+# ============================================================
+
+def engine_loop():
+
+    conn = init_db()
+
+    log_event(
+        conn,
+        "ENGINE_STARTED",
+        details="MEXC Futures BTC_USDT / paper observation only"
+    )
+
+    last_h1_setup_time = load_state(
+        conn,
+        "last_h1_setup_time",
+        0
+    )
+
+    last_confirmation_time = load_state(
+        conn,
+        "last_confirmation_time",
+        0
+    )
+
+    position = load_state(
+        conn,
+        "position",
+        None
+    )
+
+    log("BTC MARKET ENGINE STARTED")
+    log("MEXC FUTURES: BTC_USDT")
+    log("PAPER / MARKET OBSERVATION ONLY")
+    log("NO REAL ORDERS")
+    log(f"Trailing activation: > {TRAIL_ACTIVATION_R}R")
 
     while True:
 
         try:
-            h1 = get_klines("Min60", H1_LIMIT)
-            m15 = get_klines("Min15", M15_LIMIT)
-            m5 = get_klines("Min5", M5_LIMIT)
 
-            # ==========================================
-            # 1. NOWY H1 SETUP
-            # ==========================================
+            h1 = get_klines(
+                "Min60",
+                H1_LIMIT
+            )
 
-            if state["position"] is None and state["setup"] is None:
+            m15 = get_klines(
+                "Min15",
+                M15_LIMIT
+            )
 
-                direction = h1_setup(h1)
+            m5 = get_klines(
+                "Min5",
+                M5_LIMIT
+            )
 
-                if direction is not None:
+            log(
+                f"DATA OK | H1={len(h1)} "
+                f"M15={len(m15)} "
+                f"M5={len(m5)}"
+            )
 
-                    setup_candle = h1[-2]
-                    setup_time = setup_candle["ts"]
+            # ------------------------------------------------
+            # MANAGEMENT FIRST
+            # ------------------------------------------------
 
-                    if setup_time != state["last_h1_setup_time"]:
+            if position is not None:
 
-                        state["setup"] = direction
-                        state["setup_time"] = setup_time
-                        state["confirmed"] = False
-                        state["last_h1_setup_time"] = setup_time
-
-                        price = setup_candle["close"]
-
-                        log_event(
-                            conn,
-                            "H1_SETUP",
-                            direction=direction,
-                            price=price,
-                            details=f"H1 candle {candle_time(setup_candle)}"
-                        )
-
-            # ==========================================
-            # 2. M15 CONFIRMATION
-            # ==========================================
-
-            if (
-                state["setup"] is not None
-                and state["position"] is None
-                and not state["confirmed"]
-            ):
-
-                direction = state["setup"]
-
-                if m15_confirmation(m15, direction):
-
-                    confirmation_candle = m15[-2]
-                    confirmation_time = confirmation_candle["ts"]
-
-                    if (
-                        confirmation_time
-                        != state["last_m15_confirmation_time"]
-                    ):
-
-                        state["confirmed"] = True
-                        state["last_m15_confirmation_time"] = confirmation_time
-
-                        log_event(
-                            conn,
-                            "M15_CONFIRMATION",
-                            direction=direction,
-                            price=confirmation_candle["close"],
-                            details=f"M15 candle {candle_time(confirmation_candle)}"
-                        )
-
-            # ==========================================
-            # 3. M5 ENTRY
-            # ==========================================
-
-            if (
-                state["confirmed"]
-                and state["position"] is None
-                and state["setup"] is not None
-            ):
-
-                direction = state["setup"]
-
-                if m5_trigger(m5, direction):
-
-                    trigger_candle = m5[-2]
-                    trigger_time = trigger_candle["ts"]
-
-                    if trigger_time != state["last_m5_trigger_time"]:
-
-                        state["last_m5_trigger_time"] = trigger_time
-
-                        # Entry = OPEN następnej świecy M5
-                        entry_candle = m5[-1]
-                        entry = entry_candle["open"]
-
-                        sl = calculate_sl(
-                            m15,
-                            direction,
-                            entry
-                        )
-
-                        if sl is not None:
-
-                            risk = abs(entry - sl)
-
-                            if risk > 0:
-
-                                state["position"] = True
-                                state["direction"] = direction
-                                state["entry"] = entry
-                                state["initial_sl"] = sl
-                                state["sl"] = sl
-                                state["risk"] = risk
-                                state["max_r"] = 0.0
-                                state["trailing_active"] = False
-
-                                log_event(
-                                    conn,
-                                    "PAPER_ENTRY",
-                                    direction=direction,
-                                    price=entry,
-                                    stop=sl,
-                                    risk=risk,
-                                    details=(
-                                        "SIMULATED ENTRY - "
-                                        "NO REAL ORDER"
-                                    )
-                                )
-
-            # ==========================================
-            # 4. MANAGEMENT
-            # ==========================================
-
-            if state["position"]:
-
-                direction = state["direction"]
-                entry = state["entry"]
-                sl = state["sl"]
-                risk = state["risk"]
-
-                last_price = m5[-1]["close"]
-
-                if direction == "LONG":
-                    current_r = (last_price - entry) / risk
-                else:
-                    current_r = (entry - last_price) / risk
-
-                state["max_r"] = max(
-                    state["max_r"],
-                    current_r
+                position = update_position(
+                    conn,
+                    position,
+                    m5,
+                    m15
                 )
 
-                # --------------------------------------
-                # TRAILING AKTYWUJE SIĘ POWYŻEJ 1.0R
-                # --------------------------------------
+                save_state(
+                    conn,
+                    "position",
+                    position
+                )
 
-                if state["max_r"] > 1.0:
+            # ------------------------------------------------
+            # NEW SETUP ONLY WHEN NO POSITION
+            # ------------------------------------------------
 
-                    if not state["trailing_active"]:
+            if position is None:
 
-                        state["trailing_active"] = True
+                setup = detect_h1_setup(h1)
 
-                        log_event(
-                            conn,
-                            "TRAILING_ACTIVATED",
-                            direction=direction,
-                            price=last_price,
-                            stop=sl,
-                            risk=risk,
-                            r_value=current_r,
-                            max_r=state["max_r"]
-                        )
+                if (
+                    setup is not None
+                    and setup["time"] > last_h1_setup_time
+                ):
 
-                    closed_m5 = m5[:-1]
+                    last_h1_setup_time = setup["time"]
 
-                    if len(closed_m5) >= 3:
-
-                        if direction == "LONG":
-
-                            new_sl = min(
-                                x["low"]
-                                for x in closed_m5[-3:]
-                            )
-
-                            if new_sl > sl and new_sl < last_price:
-
-                                state["sl"] = new_sl
-
-                                log_event(
-                                    conn,
-                                    "TRAILING_MOVE",
-                                    direction=direction,
-                                    price=last_price,
-                                    stop=new_sl,
-                                    risk=risk,
-                                    r_value=current_r,
-                                    max_r=state["max_r"]
-                                )
-
-                        else:
-
-                            new_sl = max(
-                                x["high"]
-                                for x in closed_m5[-3:]
-                            )
-
-                            if new_sl < sl and new_sl > last_price:
-
-                                state["sl"] = new_sl
-
-                                log_event(
-                                    conn,
-                                    "TRAILING_MOVE",
-                                    direction=direction,
-                                    price=last_price,
-                                    stop=new_sl,
-                                    risk=risk,
-                                    r_value=current_r,
-                                    max_r=state["max_r"]
-                                )
-
-                # --------------------------------------
-                # SL
-                # --------------------------------------
-
-                last_closed = m5[-2]
-
-                hit_sl = False
-                exit_price = None
-
-                if direction == "LONG":
-
-                    if last_closed["low"] <= state["sl"]:
-                        hit_sl = True
-                        exit_price = state["sl"]
-
-                else:
-
-                    if last_closed["high"] >= state["sl"]:
-                        hit_sl = True
-                        exit_price = state["sl"]
-
-                if hit_sl:
-
-                    if direction == "LONG":
-                        final_r = (
-                            exit_price - entry
-                        ) / risk
-                    else:
-                        final_r = (
-                            entry - exit_price
-                        ) / risk
+                    save_state(
+                        conn,
+                        "last_h1_setup_time",
+                        last_h1_setup_time
+                    )
 
                     log_event(
                         conn,
-                        "PAPER_EXIT",
-                        direction=direction,
-                        price=exit_price,
-                        stop=state["sl"],
-                        risk=risk,
-                        r_value=final_r,
-                        max_r=state["max_r"],
-                        details="SL / TRAILING EXIT - NO REAL ORDER"
+                        "H1_SETUP",
+                        setup["direction"],
+                        setup["price"],
+                        details="H1 reversal/setup detected"
                     )
 
-                    state["position"] = None
-                    state["direction"] = None
-                    state["entry"] = None
-                    state["initial_sl"] = None
-                    state["sl"] = None
-                    state["risk"] = None
-                    state["max_r"] = 0.0
-                    state["trailing_active"] = False
+                    confirmation = confirm_m15(
+                        m15,
+                        setup["direction"],
+                        setup["time"]
+                    )
 
-                    state["setup"] = None
-                    state["setup_time"] = None
-                    state["confirmed"] = False
+                    if confirmation is not None:
 
-            print(
-                f"[{now_text()}] "
-                f"running | "
-                f"setup={state['setup']} | "
-                f"position={state['position']} | "
-                f"maxR={state['max_r']:.2f}"
-            )
+                        if confirmation["time"] > last_confirmation_time:
+
+                            last_confirmation_time = confirmation["time"]
+
+                            save_state(
+                                conn,
+                                "last_confirmation_time",
+                                last_confirmation_time
+                            )
+
+                            log_event(
+                                conn,
+                                "M15_CONFIRMATION",
+                                setup["direction"],
+                                details="M15 confirmation detected"
+                            )
+
+                            trigger = trigger_m5(
+                                m5,
+                                setup["direction"],
+                                confirmation["time"]
+                            )
+
+                            if trigger is not None:
+
+                                stop = structural_stop(
+                                    m15,
+                                    setup["direction"]
+                                )
+
+                                if stop is not None:
+
+                                    position = create_position(
+                                        setup["direction"],
+                                        trigger["entry"],
+                                        stop
+                                    )
+
+                                    if position is not None:
+
+                                        log_event(
+                                            conn,
+                                            "ENTRY",
+                                            position["direction"],
+                                            position["entry"],
+                                            position["stop"],
+                                            position["risk"],
+                                            0.0,
+                                            0.0,
+                                            "M5 trigger / next candle open"
+                                        )
+
+                                        save_state(
+                                            conn,
+                                            "position",
+                                            position
+                                        )
+
+            time.sleep(POLL_SECONDS)
 
         except Exception as e:
 
-            print(
-                f"[{now_text()}] ERROR: {type(e).__name__}: {e}"
+            log(
+                f"ERROR: {type(e).__name__}: {e}"
             )
 
-        time.sleep(POLL_SECONDS)
+            try:
 
+                log_event(
+                    conn,
+                    "ERROR",
+                    details=f"{type(e).__name__}: {e}"
+                )
+
+            except Exception:
+                pass
+
+            time.sleep(POLL_SECONDS)
+
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
-    main()
+
+    health_thread = threading.Thread(
+        target=start_health_server,
+        daemon=True
+    )
+
+    health_thread.start()
+
+    engine_loop()
