@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 SYMBOL = "BTC_USDT"
 BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
 
-DB_FILE = "market_history.db"
+DB_FILE = "/tmp/market_history.db"
 
 POLL_SECONDS = 30
 
