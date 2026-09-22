@@ -25,15 +25,15 @@ H1_LIMIT = 200
 M15_LIMIT = 300
 M5_LIMIT = 500
 
-# Persistent inside the container while it is running
-DB_FILE = "/app/market_history.db"
+# DePlexo nie pozwala nam bezpiecznie pisać do /app.
+# /tmp jest zapisywalne.
+DB_FILE = "/tmp/market_history.db"
 
-# Trailing activates after movement > 1.0R
 TRAIL_ACTIVATION_R = 1.0
 
 
 # ============================================================
-# LOGGING
+# LOG
 # ============================================================
 
 def log(message):
@@ -42,9 +42,7 @@ def log(message):
 
 
 # ============================================================
-# HTTP READINESS SERVER
-# DePlexo needs an open application port.
-# The market engine itself runs in the background.
+# HEALTH SERVER
 # ============================================================
 
 PORT = int(os.environ.get("PORT", "3000"))
@@ -53,6 +51,7 @@ PORT = int(os.environ.get("PORT", "3000"))
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+
         body = b"BTC MARKET ENGINE OK\n"
 
         self.send_response(200)
@@ -66,8 +65,14 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def start_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+
+    server = HTTPServer(
+        ("0.0.0.0", PORT),
+        HealthHandler
+    )
+
     log(f"Health server listening on port {PORT}")
+
     server.serve_forever()
 
 
@@ -179,7 +184,7 @@ def log_event(
 
 
 # ============================================================
-# MEXC
+# MEXC DATA
 # ============================================================
 
 def get_klines(interval, limit):
@@ -220,33 +225,13 @@ def get_klines(interval, limit):
     except Exception:
 
         raise RuntimeError(
-            f"MEXC returned non-JSON response: {raw[:300]}"
+            f"MEXC returned non-JSON: {raw[:300]}"
         )
-
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # MEXC Futures returns:
-    #
-    # {
-    #   "success": true,
-    #   "code": 0,
-    #   "data": {
-    #       "time": [...],
-    #       "open": [...],
-    #       "close": [...],
-    #       "high": [...],
-    #       "low": [...],
-    #       "vol": [...]
-    #   }
-    # }
-    #
-    # The old code expected a list and caused int("s").
-    # --------------------------------------------------------
 
     if not isinstance(payload, dict):
 
         raise RuntimeError(
-            f"Unexpected MEXC response type: {type(payload)}"
+            f"Unexpected MEXC response: {type(payload)}"
         )
 
     if payload.get("success") is False:
@@ -260,7 +245,7 @@ def get_klines(interval, limit):
     if not isinstance(data, dict):
 
         raise RuntimeError(
-            f"MEXC returned invalid data: {payload}"
+            f"Invalid MEXC data: {payload}"
         )
 
     times = data.get("time", [])
@@ -279,10 +264,10 @@ def get_klines(interval, limit):
         len(volumes)
     ]
 
-    if not lengths or min(lengths) == 0:
+    if min(lengths) == 0:
 
         raise RuntimeError(
-            f"MEXC returned empty candle data: {payload}"
+            f"MEXC returned empty candles: {payload}"
         )
 
     count = min(lengths)
@@ -311,17 +296,14 @@ def get_klines(interval, limit):
 
 def ema(values, period):
 
-    if not values:
-        return []
+    if len(values) < period:
+        return [None] * len(values)
 
     result = [None] * len(values)
 
-    if len(values) < period:
-        return result
-
-    first = sum(values[:period]) / period
-
-    result[period - 1] = first
+    result[period - 1] = (
+        sum(values[:period]) / period
+    )
 
     multiplier = 2 / (period + 1)
 
@@ -357,59 +339,32 @@ def atr(rows, period=14):
 
     result = [None] * len(rows)
 
-    first_values = [
+    first = [
         x for x in tr[1:period + 1]
         if x is not None
     ]
 
-    if len(first_values) < period:
+    if len(first) < period:
         return result
 
-    result[period] = sum(first_values) / period
+    result[period] = sum(first) / period
 
     for i in range(period + 1, len(rows)):
 
         result[i] = (
-            (result[i - 1] * (period - 1))
+            result[i - 1] * (period - 1)
             + tr[i]
         ) / period
 
     return result
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
 def closed_candles(rows):
 
     if len(rows) < 3:
         return []
 
-    # Last candle can still be forming.
     return rows[:-1]
-
-
-def previous_high(rows, count):
-
-    if len(rows) < count:
-        return None
-
-    return max(
-        x["high"]
-        for x in rows[-count:]
-    )
-
-
-def previous_low(rows, count):
-
-    if len(rows) < count:
-        return None
-
-    return min(
-        x["low"]
-        for x in rows[-count:]
-    )
 
 
 # ============================================================
@@ -430,27 +385,26 @@ def detect_h1_setup(h1):
 
     i = len(rows) - 1
 
-    current = rows[i]
-
     if ema20[i] is None or ema50[i] is None:
         return None
 
-    previous_5 = rows[i - 5]["close"]
+    current = rows[i]
 
-    previous_10_high = max(
+    previous_close_5 = rows[i - 5]["close"]
+
+    previous_high_10 = max(
         x["high"]
         for x in rows[i - 10:i]
     )
 
-    previous_10_low = min(
+    previous_low_10 = min(
         x["low"]
         for x in rows[i - 10:i]
     )
 
-    # LONG
     if (
-        previous_5 < ema50[i - 5]
-        and current["close"] > previous_10_high
+        previous_close_5 < ema50[i - 5]
+        and current["close"] > previous_high_10
         and current["close"] > ema20[i]
         and ema20[i] > ema20[i - 1]
     ):
@@ -461,10 +415,9 @@ def detect_h1_setup(h1):
             "price": current["close"]
         }
 
-    # SHORT
     if (
-        previous_5 > ema50[i - 5]
-        and current["close"] < previous_10_low
+        previous_close_5 > ema50[i - 5]
+        and current["close"] < previous_low_10
         and current["close"] < ema20[i]
         and ema20[i] < ema20[i - 1]
     ):
@@ -489,44 +442,43 @@ def confirm_m15(m15, direction, setup_time):
     if len(rows) < 30:
         return None
 
-    # Look only at candles after the H1 setup.
+    closes = [x["close"] for x in rows]
+    ema20 = ema(closes, 20)
+
     candidates = [
-        x for x in rows
+        i for i, x in enumerate(rows)
         if x["ts"] > setup_time
     ]
 
     candidates = candidates[-16:]
 
-    if not candidates:
-        return None
+    for i in candidates:
 
-    closes = [x["close"] for x in rows]
-
-    ema20 = ema(closes, 20)
-
-    for idx in range(len(rows)):
-
-        candle = rows[idx]
-
-        if candle not in candidates:
+        if ema20[i] is None:
             continue
 
-        if ema20[idx] is None:
+        if i < 5:
             continue
 
-        previous = rows[max(0, idx - 5):idx]
+        candle = rows[i]
 
-        if len(previous) < 5:
-            continue
+        previous = rows[i - 5:i]
 
-        high5 = max(x["high"] for x in previous)
-        low5 = min(x["low"] for x in previous)
+        high5 = max(
+            x["high"]
+            for x in previous
+        )
+
+        low5 = min(
+            x["low"]
+            for x in previous
+        )
 
         if direction == "LONG":
 
             if (
-                candle["low"] <= ema20[idx]
-                and candle["close"] > ema20[idx]
+                candle["low"] <= ema20[i]
+                and candle["close"] > ema20[i]
                 and candle["close"] > high5
                 and candle["close"] > candle["open"]
             ):
@@ -539,8 +491,8 @@ def confirm_m15(m15, direction, setup_time):
         if direction == "SHORT":
 
             if (
-                candle["high"] >= ema20[idx]
-                and candle["close"] < ema20[idx]
+                candle["high"] >= ema20[i]
+                and candle["close"] < ema20[i]
                 and candle["close"] < low5
                 and candle["close"] < candle["open"]
             ):
@@ -554,7 +506,7 @@ def confirm_m15(m15, direction, setup_time):
 
 
 # ============================================================
-# M5 ENTRY TRIGGER
+# M5 TRIGGER
 # ============================================================
 
 def trigger_m5(m5, direction, confirmation_time):
@@ -564,76 +516,72 @@ def trigger_m5(m5, direction, confirmation_time):
     if len(rows) < 30:
         return None
 
+    closes = [x["close"] for x in rows]
+    ema20 = ema(closes, 20)
+
     candidates = [
-        x for x in rows
+        i for i, x in enumerate(rows)
         if x["ts"] > confirmation_time
     ]
 
     candidates = candidates[-8:]
 
-    if not candidates:
-        return None
+    for i in candidates:
 
-    closes = [x["close"] for x in rows]
-
-    ema20 = ema(closes, 20)
-
-    for idx in range(len(rows)):
-
-        candle = rows[idx]
-
-        if candle not in candidates:
+        if ema20[i] is None:
             continue
 
-        if ema20[idx] is None:
+        if i < 3:
             continue
 
-        previous = rows[max(0, idx - 3):idx]
+        candle = rows[i]
 
-        if len(previous) < 3:
+        previous = rows[i - 3:i]
+
+        high3 = max(
+            x["high"]
+            for x in previous
+        )
+
+        low3 = min(
+            x["low"]
+            for x in previous
+        )
+
+        next_i = i + 1
+
+        if next_i >= len(rows):
             continue
-
-        high3 = max(x["high"] for x in previous)
-        low3 = min(x["low"] for x in previous)
 
         if direction == "LONG":
 
             if (
                 candle["close"] > high3
-                and candle["close"] > ema20[idx]
+                and candle["close"] > ema20[i]
                 and candle["close"] > candle["open"]
             ):
 
-                # Entry = next M5 candle open
-                next_idx = idx + 1
-
-                if next_idx < len(rows):
-
-                    return {
-                        "direction": direction,
-                        "trigger_time": candle["ts"],
-                        "entry_time": rows[next_idx]["ts"],
-                        "entry": rows[next_idx]["open"]
-                    }
+                return {
+                    "direction": direction,
+                    "trigger_time": candle["ts"],
+                    "entry_time": rows[next_i]["ts"],
+                    "entry": rows[next_i]["open"]
+                }
 
         if direction == "SHORT":
 
             if (
                 candle["close"] < low3
-                and candle["close"] < ema20[idx]
+                and candle["close"] < ema20[i]
                 and candle["close"] < candle["open"]
             ):
 
-                next_idx = idx + 1
-
-                if next_idx < len(rows):
-
-                    return {
-                        "direction": direction,
-                        "trigger_time": candle["ts"],
-                        "entry_time": rows[next_idx]["ts"],
-                        "entry": rows[next_idx]["open"]
-                    }
+                return {
+                    "direction": direction,
+                    "trigger_time": candle["ts"],
+                    "entry_time": rows[next_i]["ts"],
+                    "entry": rows[next_i]["open"]
+                }
 
     return None
 
@@ -646,10 +594,8 @@ def structural_stop(m15, direction):
 
     rows = closed_candles(m15)
 
-    if len(rows) < 10:
+    if len(rows) < 20:
         return None
-
-    last = rows[-6:]
 
     atr_values = atr(rows, 14)
 
@@ -658,11 +604,13 @@ def structural_stop(m15, direction):
     if current_atr is None:
         return None
 
+    last6 = rows[-6:]
+
     if direction == "LONG":
 
         swing = min(
             x["low"]
-            for x in last
+            for x in last6
         )
 
         return swing - current_atr * 0.2
@@ -671,7 +619,7 @@ def structural_stop(m15, direction):
 
         swing = max(
             x["high"]
-            for x in last
+            for x in last6
         )
 
         return swing + current_atr * 0.2
@@ -697,8 +645,7 @@ def create_position(direction, entry, stop):
         "stop": stop,
         "risk": risk,
         "max_r": 0.0,
-        "trailing_active": False,
-        "entry_time": int(time.time())
+        "trailing_active": False
     }
 
 
@@ -715,6 +662,10 @@ def current_r(position, price):
     ) / position["risk"]
 
 
+# ============================================================
+# POSITION MANAGEMENT
+# ============================================================
+
 def update_position(conn, position, m5, m15):
 
     rows5 = closed_candles(m5)
@@ -722,15 +673,13 @@ def update_position(conn, position, m5, m15):
     if not rows5:
         return position
 
-    latest = rows5[-1]
+    candle5 = rows5[-1]
 
     if position["direction"] == "LONG":
 
-        favorable = latest["high"]
-
         r = current_r(
             position,
-            favorable
+            candle5["high"]
         )
 
         position["max_r"] = max(
@@ -738,7 +687,6 @@ def update_position(conn, position, m5, m15):
             r
         )
 
-        # Trailing starts after > 1.0R
         if (
             position["max_r"] > TRAIL_ACTIVATION_R
             and not position["trailing_active"]
@@ -749,24 +697,24 @@ def update_position(conn, position, m5, m15):
             log_event(
                 conn,
                 "TRAILING_ACTIVATED",
-                position["direction"],
-                latest["close"],
+                "LONG",
+                candle5["close"],
                 position["stop"],
                 position["risk"],
+                r,
                 position["max_r"],
-                position["max_r"],
-                "Trailing activated above 1.0R"
+                "> 1.0R"
             )
 
         if position["trailing_active"]:
 
-            m15_closed = closed_candles(m15)
+            rows15 = closed_candles(m15)
 
-            if len(m15_closed) >= 3:
+            if len(rows15) >= 3:
 
                 new_stop = min(
                     x["low"]
-                    for x in m15_closed[-3:]
+                    for x in rows15[-3:]
                 )
 
                 if new_stop > position["stop"]:
@@ -776,8 +724,8 @@ def update_position(conn, position, m5, m15):
                     log_event(
                         conn,
                         "TRAILING_STOP_MOVED",
-                        position["direction"],
-                        latest["close"],
+                        "LONG",
+                        candle5["close"],
                         new_stop,
                         position["risk"],
                         r,
@@ -785,7 +733,7 @@ def update_position(conn, position, m5, m15):
                         "M15 structure"
                     )
 
-        if latest["low"] <= position["stop"]:
+        if candle5["low"] <= position["stop"]:
 
             final_r = current_r(
                 position,
@@ -795,7 +743,7 @@ def update_position(conn, position, m5, m15):
             log_event(
                 conn,
                 "EXIT_SL",
-                position["direction"],
+                "LONG",
                 position["stop"],
                 position["stop"],
                 position["risk"],
@@ -808,11 +756,9 @@ def update_position(conn, position, m5, m15):
 
     else:
 
-        favorable = latest["low"]
-
         r = current_r(
             position,
-            favorable
+            candle5["low"]
         )
 
         position["max_r"] = max(
@@ -830,24 +776,24 @@ def update_position(conn, position, m5, m15):
             log_event(
                 conn,
                 "TRAILING_ACTIVATED",
-                position["direction"],
-                latest["close"],
+                "SHORT",
+                candle5["close"],
                 position["stop"],
                 position["risk"],
+                r,
                 position["max_r"],
-                position["max_r"],
-                "Trailing activated above 1.0R"
+                "> 1.0R"
             )
 
         if position["trailing_active"]:
 
-            m15_closed = closed_candles(m15)
+            rows15 = closed_candles(m15)
 
-            if len(m15_closed) >= 3:
+            if len(rows15) >= 3:
 
                 new_stop = max(
                     x["high"]
-                    for x in m15_closed[-3:]
+                    for x in rows15[-3:]
                 )
 
                 if new_stop < position["stop"]:
@@ -857,8 +803,8 @@ def update_position(conn, position, m5, m15):
                     log_event(
                         conn,
                         "TRAILING_STOP_MOVED",
-                        position["direction"],
-                        latest["close"],
+                        "SHORT",
+                        candle5["close"],
                         new_stop,
                         position["risk"],
                         r,
@@ -866,7 +812,7 @@ def update_position(conn, position, m5, m15):
                         "M15 structure"
                     )
 
-        if latest["high"] >= position["stop"]:
+        if candle5["high"] >= position["stop"]:
 
             final_r = current_r(
                 position,
@@ -876,7 +822,7 @@ def update_position(conn, position, m5, m15):
             log_event(
                 conn,
                 "EXIT_SL",
-                position["direction"],
+                "SHORT",
                 position["stop"],
                 position["stop"],
                 position["risk"],
@@ -891,18 +837,20 @@ def update_position(conn, position, m5, m15):
 
 
 # ============================================================
-# ENGINE
+# MAIN ENGINE
 # ============================================================
 
 def engine_loop():
 
     conn = init_db()
 
-    log_event(
-        conn,
-        "ENGINE_STARTED",
-        details="MEXC Futures BTC_USDT / paper observation only"
-    )
+    log("========================================")
+    log("BTC MARKET ENGINE")
+    log("MEXC FUTURES")
+    log("BTC_USDT")
+    log("PAPER / MARKET OBSERVATION ONLY")
+    log("NO REAL ORDERS")
+    log("========================================")
 
     last_h1_setup_time = load_state(
         conn,
@@ -921,12 +869,6 @@ def engine_loop():
         "position",
         None
     )
-
-    log("BTC MARKET ENGINE STARTED")
-    log("MEXC FUTURES: BTC_USDT")
-    log("PAPER / MARKET OBSERVATION ONLY")
-    log("NO REAL ORDERS")
-    log(f"Trailing activation: > {TRAIL_ACTIVATION_R}R")
 
     while True:
 
@@ -948,14 +890,15 @@ def engine_loop():
             )
 
             log(
-                f"DATA OK | H1={len(h1)} "
+                f"DATA OK | "
+                f"H1={len(h1)} "
                 f"M15={len(m15)} "
                 f"M5={len(m5)}"
             )
 
-            # ------------------------------------------------
-            # MANAGEMENT FIRST
-            # ------------------------------------------------
+            # --------------------------------------------
+            # MANAGEMENT
+            # --------------------------------------------
 
             if position is not None:
 
@@ -972,9 +915,9 @@ def engine_loop():
                     position
                 )
 
-            # ------------------------------------------------
-            # NEW SETUP ONLY WHEN NO POSITION
-            # ------------------------------------------------
+            # --------------------------------------------
+            # NEW SETUP
+            # --------------------------------------------
 
             if position is None:
 
@@ -998,7 +941,7 @@ def engine_loop():
                         "H1_SETUP",
                         setup["direction"],
                         setup["price"],
-                        details="H1 reversal/setup detected"
+                        details="H1 setup detected"
                     )
 
                     confirmation = confirm_m15(
@@ -1023,7 +966,7 @@ def engine_loop():
                                 conn,
                                 "M15_CONFIRMATION",
                                 setup["direction"],
-                                details="M15 confirmation detected"
+                                details="M15 confirmation"
                             )
 
                             trigger = trigger_m5(
