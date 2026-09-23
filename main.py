@@ -47,118 +47,24 @@ def log(message):
 
 PORT = int(os.environ.get("PORT", "3000"))
 
-
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
 
-        if self.path == "/health":
+        body = b"BTC MARKET ENGINE OK\n"
 
-            body = b"BTC MARKET ENGINE OK\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header(
+            "Content-Length",
+            str(len(body))
+        )
+        self.end_headers()
+        self.wfile.write(body)
 
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+    def log_message(self, format, *args):
+        return
 
-            return
-
-        conn = sqlite3.connect(DB_FILE)
-
-        events = conn.execute("""
-            SELECT time, event, direction, price, stop, r_value, max_r, details
-            FROM events
-            ORDER BY id DESC
-            LIMIT 30
-        """).fetchall()
-
-        position_row = conn.execute("""
-            SELECT value
-            FROM state
-            WHERE key = 'position'
-        """).fetchone()
-
-        conn.close()
-
-        position = None
-
-        if position_row:
-
-            try:
-                position = json.loads(position_row[0])
-            except Exception:
-                position = None
-
-        rows_html = ""
-
-        for event in events:
-
-            event_time = event[0].replace("T", " ")[:19]
-            event_name = event[1]
-            direction = event[2] or ""
-            price = event[3]
-            stop = event[4]
-            r_value = event[5]
-            max_r = event[6]
-
-            rows_html += f"""
-            <tr>
-                <td>{event_time}</td>
-                <td>{event_name}</td>
-                <td>{direction}</td>
-                <td>{price if price is not None else ""}</td>
-                <td>{stop if stop is not None else ""}</td>
-                <td>{r_value if r_value is not None else ""}</td>
-                <td>{max_r if max_r is not None else ""}</td>
-            </tr>
-            """
-
-        if position:
-
-            active = f"""
-            <div class="active">
-                <h2>🟢 AKTYWNA POZYCJA</h2>
-                <p><b>Kierunek:</b> {position.get("direction", "")}</p>
-                <p><b>Entry:</b> {position.get("entry", "")}</p>
-                <p><b>Initial SL:</b> {position.get("initial_stop", "")}</p>
-                <p><b>Aktualny SL:</b> {position.get("stop", "")}</p>
-                <p><b>Max R:</b> {position.get("max_r", 0)}</p>
-                <p><b>Trailing:</b> {"🟢 ON" if position.get("trailing_active") else "⚪ OFF"}</p>
-            </div>
-            """
-
-        else:
-
-            active = """
-            <div class="none">
-                <h2>⚪ BRAK AKTYWNEJ POZYCJI</h2>
-            </div>
-            """
-
-        html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta http-equiv="refresh" content="5">
-
-            <meta name="viewport"
-                  content="width=device-width, initial-scale=1">
-
-            <title>BTC Market Engine</title>
-
-            <style>
-
-                body {{
-                    font-family: Arial, sans-serif;
-                    background: #111;
-                    color: #eee;
-                    margin: 0;
-                    padding: 15
-
-
-def start_health_server():
 
     server = HTTPServer(
         ("0.0.0.0", PORT),
