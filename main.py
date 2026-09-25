@@ -39,6 +39,7 @@ PORT = int(os.environ.get("PORT", "3000"))
 # ============================================================
 
 def log(message):
+
     now = datetime.now(timezone.utc).strftime(
         "%Y-%m-%d %H:%M:%S UTC"
     )
@@ -54,6 +55,7 @@ def log(message):
 # ============================================================
 
 def db_connect():
+
     return sqlite3.connect(
         DB_FILE,
         timeout=10
@@ -121,8 +123,11 @@ def load_state(key, default=None):
         return default
 
     try:
+
         return json.loads(row[0])
+
     except Exception:
+
         return default
 
 
@@ -289,6 +294,7 @@ def get_klines(interval, limit):
 def ema(values, period):
 
     if len(values) < period:
+
         return [None] * len(values)
 
     result = [None] * len(values)
@@ -319,6 +325,7 @@ def ema(values, period):
 def atr(rows, period=14):
 
     if len(rows) < period + 1:
+
         return [None] * len(rows)
 
     tr = [None] * len(rows)
@@ -347,6 +354,7 @@ def atr(rows, period=14):
     ]
 
     if len(first) < period:
+
         return result
 
     result[period] = (
@@ -369,6 +377,7 @@ def atr(rows, period=14):
 def closed_candles(rows):
 
     if len(rows) < 3:
+
         return []
 
     return rows[:-1]
@@ -383,6 +392,7 @@ def detect_h1_setup(h1):
     rows = closed_candles(h1)
 
     if len(rows) < 60:
+
         return None
 
     closes = [
@@ -406,6 +416,7 @@ def detect_h1_setup(h1):
         ema20[i] is None
         or ema50[i] is None
     ):
+
         return None
 
     current = rows[i]
@@ -470,6 +481,7 @@ def confirm_m15(
     rows = closed_candles(m15)
 
     if len(rows) < 30:
+
         return None
 
     closes = [
@@ -493,9 +505,11 @@ def confirm_m15(
     for i in candidates:
 
         if ema20[i] is None:
+
             continue
 
         if i < 5:
+
             continue
 
         candle = rows[i]
@@ -554,6 +568,7 @@ def trigger_m5(
     rows = closed_candles(m5)
 
     if len(rows) < 30:
+
         return None
 
     closes = [
@@ -577,9 +592,11 @@ def trigger_m5(
     for i in candidates:
 
         if ema20[i] is None:
+
             continue
 
         if i < 3:
+
             continue
 
         candle = rows[i]
@@ -599,6 +616,7 @@ def trigger_m5(
         next_i = i + 1
 
         if next_i >= len(rows):
+
             continue
 
         if (
@@ -644,6 +662,7 @@ def structural_stop(
     rows = closed_candles(m15)
 
     if len(rows) < 20:
+
         return None
 
     atr_values = atr(
@@ -654,6 +673,7 @@ def structural_stop(
     current_atr = atr_values[-1]
 
     if current_atr is None:
+
         return None
 
     last6 = rows[-6:]
@@ -696,6 +716,7 @@ def create_position(
     )
 
     if risk <= 0:
+
         return None
 
     return {
@@ -715,6 +736,7 @@ def current_r(
 ):
 
     if position["risk"] <= 0:
+
         return 0.0
 
     if position["direction"] == "LONG":
@@ -726,6 +748,204 @@ def current_r(
     return (
         position["entry"] - price
     ) / position["risk"]
+
+
+# ============================================================
+# H1 SETUP DIAGNOSTICS
+# ============================================================
+
+def create_setup_diagnostic(
+    setup,
+    stop
+):
+
+    if stop is None:
+
+        return {
+            "direction": setup["direction"],
+            "setup_time": setup["time"],
+            "entry": setup["price"],
+            "stop": None,
+            "risk": None,
+            "status": "NIEPOTWIERDZONY",
+            "confirmation_time": None,
+            "max_r": 0.0,
+            "min_r": 0.0,
+            "trailing_active": False,
+            "trailing_stop": None,
+            "trailing_r": None
+        }
+
+    risk = abs(
+        setup["price"] - stop
+    )
+
+    if risk <= 0:
+
+        return {
+            "direction": setup["direction"],
+            "setup_time": setup["time"],
+            "entry": setup["price"],
+            "stop": None,
+            "risk": None,
+            "status": "NIEPOTWIERDZONY",
+            "confirmation_time": None,
+            "max_r": 0.0,
+            "min_r": 0.0,
+            "trailing_active": False,
+            "trailing_stop": None,
+            "trailing_r": None
+        }
+
+    return {
+        "direction": setup["direction"],
+        "setup_time": setup["time"],
+        "entry": setup["price"],
+        "stop": stop,
+        "risk": risk,
+        "status": "NIEPOTWIERDZONY",
+        "confirmation_time": None,
+        "max_r": 0.0,
+        "min_r": 0.0,
+        "trailing_active": False,
+        "trailing_stop": stop,
+        "trailing_r": -1.0
+    }
+
+
+def update_setup_diagnostic(
+    diagnostic,
+    m5,
+    m15
+):
+
+    if diagnostic is None:
+
+        return None
+
+    risk = diagnostic.get("risk")
+
+    if risk is None or risk <= 0:
+
+        return diagnostic
+
+    entry = diagnostic["entry"]
+    direction = diagnostic["direction"]
+    setup_time = diagnostic["setup_time"]
+
+    rows5 = closed_candles(m5)
+
+    for candle in rows5:
+
+        if candle["ts"] <= setup_time:
+
+            continue
+
+        if direction == "LONG":
+
+            favorable_r = (
+                candle["high"] - entry
+            ) / risk
+
+            adverse_r = (
+                candle["low"] - entry
+            ) / risk
+
+        else:
+
+            favorable_r = (
+                entry - candle["low"]
+            ) / risk
+
+            adverse_r = (
+                entry - candle["high"]
+            ) / risk
+
+        diagnostic["max_r"] = max(
+            diagnostic.get("max_r", 0.0),
+            favorable_r
+        )
+
+        diagnostic["min_r"] = min(
+            diagnostic.get("min_r", 0.0),
+            adverse_r
+        )
+
+    if (
+        diagnostic["max_r"] > TRAIL_ACTIVATION_R
+        and not diagnostic.get(
+            "trailing_active",
+            False
+        )
+    ):
+
+        diagnostic["trailing_active"] = True
+
+    if diagnostic.get("trailing_active"):
+
+        rows15 = closed_candles(m15)
+
+        if len(rows15) >= 3:
+
+            if direction == "LONG":
+
+                new_stop = min(
+                    x["low"]
+                    for x in rows15[-3:]
+                )
+
+                old_stop = diagnostic.get(
+                    "trailing_stop"
+                )
+
+                if (
+                    old_stop is None
+                    or new_stop > old_stop
+                ):
+
+                    diagnostic["trailing_stop"] = (
+                        new_stop
+                    )
+
+            else:
+
+                new_stop = max(
+                    x["high"]
+                    for x in rows15[-3:]
+                )
+
+                old_stop = diagnostic.get(
+                    "trailing_stop"
+                )
+
+                if (
+                    old_stop is None
+                    or new_stop < old_stop
+                ):
+
+                    diagnostic["trailing_stop"] = (
+                        new_stop
+                    )
+
+    trailing_stop = diagnostic.get(
+        "trailing_stop"
+    )
+
+    if trailing_stop is not None:
+
+        if direction == "LONG":
+
+            diagnostic["trailing_r"] = (
+                trailing_stop - entry
+            ) / risk
+
+        else:
+
+            diagnostic["trailing_r"] = (
+                entry - trailing_stop
+            ) / risk
+
+    return diagnostic
 
 
 # ============================================================
@@ -741,6 +961,7 @@ def update_position(
     rows5 = closed_candles(m5)
 
     if not rows5:
+
         return position
 
     candle5 = rows5[-1]
@@ -945,6 +1166,11 @@ def make_dashboard():
         None
     )
 
+    setup_diagnostic = load_state(
+        "setup_diagnostic",
+        None
+    )
+
     latest_price = load_state(
         "latest_price",
         None
@@ -954,6 +1180,10 @@ def make_dashboard():
         "last_data_utc",
         "brak danych"
     )
+
+    # ========================================================
+    # ACTIVE POSITION
+    # ========================================================
 
     if position is not None:
 
@@ -1001,6 +1231,112 @@ def make_dashboard():
             "<h2>⚪ BRAK AKTYWNEJ POZYCJI</h2>"
             "</div>"
         )
+
+    # ========================================================
+    # H1 SETUP DIAGNOSTICS
+    # ========================================================
+
+    if setup_diagnostic is not None:
+
+        diagnostic_status = (
+            "🟢 POTWIERDZONY"
+            if setup_diagnostic.get("status")
+            == "POTWIERDZONY"
+            else "🟡 NIEPOTWIERDZONY"
+        )
+
+        diagnostic_stop = (
+            "-"
+            if setup_diagnostic.get("stop") is None
+            else f"{setup_diagnostic.get('stop'):.2f}"
+        )
+
+        diagnostic_risk = (
+            "-"
+            if setup_diagnostic.get("risk") is None
+            else f"{setup_diagnostic.get('risk'):.2f}"
+        )
+
+        diagnostic_max_r = (
+            setup_diagnostic.get(
+                "max_r",
+                0.0
+            )
+        )
+
+        diagnostic_min_r = (
+            setup_diagnostic.get(
+                "min_r",
+                0.0
+            )
+        )
+
+        diagnostic_trailing = (
+            "-"
+            if setup_diagnostic.get(
+                "trailing_r"
+            ) is None
+            else (
+                f"{setup_diagnostic.get('trailing_r'):.2f}R"
+            )
+        )
+
+        confirmation_time = (
+            setup_diagnostic.get(
+                "confirmation_time"
+            )
+        )
+
+        if confirmation_time is None:
+
+            confirmation_text = "brak"
+
+        else:
+
+            confirmation_text = (
+                datetime.fromtimestamp(
+                    confirmation_time,
+                    timezone.utc
+                ).strftime(
+                    "%Y-%m-%d %H:%M UTC"
+                )
+            )
+
+        setup_diagnostic_html = (
+            "<div class='card diagnostic'>"
+            "<h2>📊 H1 SETUP DIAGNOSTYKA</h2>"
+            f"<p><b>Kierunek:</b> "
+            f"{html.escape(str(setup_diagnostic.get('direction', '')))}</p>"
+            f"<p><b>Status:</b> "
+            f"{diagnostic_status}</p>"
+            f"<p><b>Setup price:</b> "
+            f"{setup_diagnostic.get('entry', '')}</p>"
+            f"<p><b>SL:</b> "
+            f"{diagnostic_stop} "
+            f"({diagnostic_risk})</p>"
+            f"<p><b>Max R:</b> "
+            f"{diagnostic_max_r:.2f}R</p>"
+            f"<p><b>Trailing R:</b> "
+            f"{diagnostic_trailing}</p>"
+            f"<p><b>Min R:</b> "
+            f"{diagnostic_min_r:.2f}R</p>"
+            f"<p><b>M15 confirmation:</b> "
+            f"{html.escape(confirmation_text)}</p>"
+            "</div>"
+        )
+
+    else:
+
+        setup_diagnostic_html = (
+            "<div class='card none'>"
+            "<h2>📊 H1 SETUP DIAGNOSTYKA</h2>"
+            "<p>Brak aktywnego H1 setup</p>"
+            "</div>"
+        )
+
+    # ========================================================
+    # EVENTS
+    # ========================================================
 
     event_rows = ""
 
@@ -1056,6 +1392,10 @@ def make_dashboard():
             "</tr>"
         )
 
+    # ========================================================
+    # PRICE
+    # ========================================================
+
     if latest_price is None:
 
         price_text = "brak danych"
@@ -1063,6 +1403,10 @@ def make_dashboard():
     else:
 
         price_text = f"{latest_price:,.2f}"
+
+    # ========================================================
+    # PAGE
+    # ========================================================
 
     page = (
         "<!doctype html>"
@@ -1080,6 +1424,7 @@ def make_dashboard():
         "margin-bottom:14px}"
         ".top{background:#123d20}"
         ".active{background:#16324d}"
+        ".diagnostic{background:#3a2d12}"
         ".none{background:#333}"
         "table{width:100%;border-collapse:collapse;"
         "font-size:12px}"
@@ -1100,6 +1445,7 @@ def make_dashboard():
         "<p>NO REAL ORDERS</p>"
         "</div>"
         f"{active_html}"
+        f"{setup_diagnostic_html}"
         "<div class='card' style='background:#222'>"
         f"<p><b>H1 SETUP:</b> {setup_count}</p>"
         f"<p><b>ENTRY:</b> {entry_count}</p>"
@@ -1260,6 +1606,11 @@ def engine_loop():
         None
     )
 
+    setup_diagnostic = load_state(
+        "setup_diagnostic",
+        None
+    )
+
     while True:
 
         try:
@@ -1308,7 +1659,28 @@ def engine_loop():
                 f"BTC={latest_price}"
             )
 
+            # =================================================
+            # H1 SETUP DIAGNOSTIC UPDATE
+            # =================================================
+
+            if setup_diagnostic is not None:
+
+                setup_diagnostic = (
+                    update_setup_diagnostic(
+                        setup_diagnostic,
+                        m5,
+                        m15
+                    )
+                )
+
+                save_state(
+                    "setup_diagnostic",
+                    setup_diagnostic
+                )
+
+            # =================================================
             # POSITION MANAGEMENT
+            # =================================================
 
             if position is not None:
 
@@ -1323,7 +1695,9 @@ def engine_loop():
                     position
                 )
 
+            # =================================================
             # NEW SETUP
+            # =================================================
 
             if position is None:
 
@@ -1355,81 +1729,148 @@ def engine_loop():
                         )
                     )
 
-                    confirmation = (
-                        confirm_m15(
+                    diagnostic_stop = (
+                        structural_stop(
                             m15,
-                            setup["direction"],
-                            setup["time"]
+                            setup["direction"]
                         )
                     )
 
-                    if (
-                        confirmation is not None
-                        and confirmation["time"]
-                        > last_confirmation_time
-                    ):
+                    setup_diagnostic = (
+                        create_setup_diagnostic(
+                            setup,
+                            diagnostic_stop
+                        )
+                    )
 
-                        last_confirmation_time = (
+                    save_state(
+                        "setup_diagnostic",
+                        setup_diagnostic
+                    )
+
+                # =================================================
+                # WAIT FOR M15 CONFIRMATION
+                # =================================================
+
+                if (
+                    setup_diagnostic is not None
+                    and setup_diagnostic.get("status")
+                    != "POTWIERDZONY"
+                ):
+
+                    confirmation = (
+                        confirm_m15(
+                            m15,
+                            setup_diagnostic["direction"],
+                            setup_diagnostic["setup_time"]
+                        )
+                    )
+
+                    if confirmation is not None:
+
+                        confirmation_time = (
                             confirmation["time"]
                         )
 
-                        save_state(
-                            "last_confirmation_time",
-                            last_confirmation_time
-                        )
+                        if (
+                            confirmation_time
+                            > last_confirmation_time
+                        ):
 
-                        log_event(
-                            "M15_CONFIRMATION",
-                            setup["direction"],
-                            details=(
-                                "M15 confirmation"
+                            last_confirmation_time = (
+                                confirmation_time
                             )
-                        )
 
-                        trigger = (
-                            trigger_m5(
-                                m5,
-                                setup["direction"],
-                                confirmation["time"]
+                            save_state(
+                                "last_confirmation_time",
+                                last_confirmation_time
                             )
-                        )
 
-                        if trigger is not None:
+                            setup_diagnostic[
+                                "status"
+                            ] = "POTWIERDZONY"
 
-                            stop = (
-                                structural_stop(
-                                    m15,
-                                    setup["direction"]
+                            setup_diagnostic[
+                                "confirmation_time"
+                            ] = confirmation_time
+
+                            save_state(
+                                "setup_diagnostic",
+                                setup_diagnostic
+                            )
+
+                            log_event(
+                                "M15_CONFIRMATION",
+                                setup_diagnostic[
+                                    "direction"
+                                ],
+                                details=(
+                                    "M15 confirmation"
                                 )
                             )
 
-                            if stop is not None:
+                            # =================================
+                            # M5 TRIGGER
+                            # =================================
 
-                                position = (
-                                    create_position(
-                                        setup["direction"],
-                                        trigger["entry"],
-                                        stop
+                            trigger = (
+                                trigger_m5(
+                                    m5,
+                                    setup_diagnostic[
+                                        "direction"
+                                    ],
+                                    confirmation_time
+                                )
+                            )
+
+                            if trigger is not None:
+
+                                stop = (
+                                    structural_stop(
+                                        m15,
+                                        setup_diagnostic[
+                                            "direction"
+                                        ]
                                     )
                                 )
 
-                                if position is not None:
+                                if stop is not None:
 
-                                    log_event(
-                                        "ENTRY",
-                                        position["direction"],
-                                        position["entry"],
-                                        position["stop"],
-                                        position["risk"],
-                                        0.0,
-                                        0.0,
-                                        "M5 trigger / next candle open"
+                                    position = (
+                                        create_position(
+                                            setup_diagnostic[
+                                                "direction"
+                                            ],
+                                            trigger["entry"],
+                                            stop
+                                        )
                                     )
 
-                                    save_state(
-                                        "position",
-                                        position
-                                    )
+                                    if position is not None:
+
+                                        log_event(
+                                            "ENTRY",
+                                            position[
+                                                "direction"
+                                            ],
+                                            position[
+                                                "entry"
+                                            ],
+                                            position[
+                                                "stop"
+                                            ],
+                                            position[
+                                                "risk"
+                                            ],
+                                            0.0,
+                                            0.0,
+                                            "M5 trigger / next candle open"
+                                        )
+
+                                        save_state(
+                                            "position",
+                                            position
+                                        )
 
             time.sleep(
                 POLL_SECONDS
@@ -1452,6 +1893,7 @@ def engine_loop():
                 )
 
             except Exception:
+
                 pass
 
             time.sleep(
