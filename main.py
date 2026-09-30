@@ -1,2043 +1,1515 @@
 import os
 import time
 import json
+import html
 import sqlite3
 import threading
 import urllib.request
 import urllib.parse
-import html
-import traceback
-
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-
-# ============================================================
-# BTC MARKET ENGINE
-# MEXC FUTURES
-# PAPER / MARKET OBSERVATION ONLY
-# NO REAL ORDERS
-# ============================================================
-
 SYMBOL = "BTC_USDT"
 BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
-
 POLL_SECONDS = 30
-
-H1_LIMIT = 200
-M15_LIMIT = 300
-M5_LIMIT = 500
-
-HISTORY_H1_LIMIT = 200
-HISTORY_M15_LIMIT = 300
-HISTORY_M5_LIMIT = 2000
-
 DB_FILE = "/tmp/market_history.db"
-
 TRAIL_ACTIVATION_R = 1.0
-
+H1_HISTORY = 200
+M15_HISTORY = 2000
+M5_HISTORY = 2000
 PORT = int(os.environ.get("PORT", "3000"))
 
-MEXC_RETRIES = 3
-MEXC_TIMEOUT = 10
+M15_CONFIRM_CANDLES = 16
+M5_ENTRY_CANDLES = 8
 
 
-# ============================================================
-# LOG
-# ============================================================
-
-def log(message):
-
-    now = datetime.now(timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
-
-    print(
-        f"[{now}] {message}",
-        flush=True
-    )
+def now_ts():
+    return int(time.time())
 
 
-# ============================================================
-# DATABASE
-# ============================================================
+def fmt_ts(ts):
+    if not ts:
+        return "—"
+    return datetime.fromtimestamp(
+        int(ts), tz=timezone.utc
+    ).strftime("%Y-%m-%d %H:%M UTC")
 
-def db_connect():
 
-    return sqlite3.connect(
-        DB_FILE,
-        timeout=10
-    )
+def fmt_num(v, digits=2):
+    if v is None:
+        return "—"
+    return f"{float(v):,.{digits}f}"
+
+
+def fmt_r(v):
+    if v is None:
+        return "—"
+    return f"{float(v):+.2f}R"
+
+
+def db_conn():
+    c = sqlite3.connect(DB_FILE, timeout=30)
+    c.row_factory = sqlite3.Row
+    return c
 
 
 def init_db():
-
-    conn = db_connect()
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS events ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "time TEXT,"
-        "event TEXT,"
-        "direction TEXT,"
-        "price REAL,"
-        "stop REAL,"
-        "risk REAL,"
-        "r_value REAL,"
-        "max_r REAL,"
-        "details TEXT)"
-    )
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS state ("
-        "key TEXT PRIMARY KEY,"
-        "value TEXT)"
-    )
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS setups ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "setup_time INTEGER UNIQUE,"
-        "direction TEXT NOT NULL,"
-        "setup_price REAL NOT NULL,"
-        "status TEXT NOT NULL,"
-        "confirmation_time INTEGER,"
-        "entry_time INTEGER,"
-        "entry_price REAL,"
-        "exit_time INTEGER,"
-        "exit_price REAL,"
-        "exit_r REAL,"
-        "stop REAL,"
-        "risk REAL,"
-        "max_r REAL NOT NULL DEFAULT 0,"
-        "min_r REAL NOT NULL DEFAULT 0,"
-        "trailing_active INTEGER NOT NULL DEFAULT 0,"
-        "trailing_stop REAL,"
-        "trailing_r REAL,"
-        "updated_at TEXT)"
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def save_state(key, value):
-
-    conn = db_connect()
-
-    conn.execute(
-        "INSERT INTO state(key,value) VALUES(?,?) "
-        "ON CONFLICT(key) DO UPDATE SET "
-        "value=excluded.value",
-        (
-            key,
-            json.dumps(value)
+    with db_conn() as c:
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS setups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            setup_time INTEGER NOT NULL UNIQUE,
+            direction TEXT NOT NULL,
+            setup_price REAL NOT NULL,
+            setup_sl REAL,
+            status TEXT NOT NULL DEFAULT 'NIEPOTWIERDZONY',
+            confirm_time INTEGER,
+            confirm_price REAL,
+            entry_time INTEGER,
+            entry_price REAL,
+            position_sl REAL,
+            exit_time INTEGER,
+            exit_price REAL,
+            exit_reason TEXT,
+            exit_r REAL,
+            setup_max_r REAL,
+            setup_min_r REAL,
+            position_max_r REAL,
+            position_min_r REAL,
+            trail_r REAL,
+            last_update INTEGER NOT NULL DEFAULT 0
         )
-    )
+        """)
 
-    conn.commit()
-    conn.close()
-
-
-def load_state(key, default=None):
-
-    conn = db_connect()
-
-    row = conn.execute(
-        "SELECT value FROM state WHERE key=?",
-        (key,)
-    ).fetchone()
-
-    conn.close()
-
-    if row is None:
-        return default
-
-    try:
-        return json.loads(row[0])
-    except Exception:
-        return default
-
-
-def log_event(
-    event,
-    direction="",
-    price=None,
-    stop=None,
-    risk=None,
-    r_value=None,
-    max_r=None,
-    details=""
-):
-
-    conn = db_connect()
-
-    conn.execute(
-        "INSERT INTO events("
-        "time,event,direction,price,stop,"
-        "risk,r_value,max_r,details"
-        ") VALUES(?,?,?,?,?,?,?,?,?)",
-        (
-            datetime.now(timezone.utc).isoformat(),
-            event,
-            direction,
-            price,
-            stop,
-            risk,
-            r_value,
-            max_r,
-            details
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS state (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
-    )
+        """)
 
-    conn.commit()
-    conn.close()
-
-    log(
-        f"EVENT={event} "
-        f"DIRECTION={direction} "
-        f"PRICE={price} "
-        f"STOP={stop}"
-    )
+        c.commit()
 
 
-# ============================================================
-# MEXC
-# ============================================================
+def state_get(key, default=None):
+    with db_conn() as c:
+        row = c.execute(
+            "SELECT value FROM state WHERE key=?",
+            (key,)
+        ).fetchone()
 
-def get_klines(interval, limit):
+        return row[0] if row else default
 
-    params = urllib.parse.urlencode({
-        "interval": interval,
-        "limit": limit
-    })
 
-    url = (
-        f"{BASE_URL}/{SYMBOL}?"
-        f"{params}"
-    )
-
-    last_error = None
-
-    for attempt in range(
-        1,
-        MEXC_RETRIES + 1
-    ):
-
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "btc-market-engine/2.0",
-                "Accept": "application/json"
-            }
+def state_set(key, value):
+    with db_conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO state(key,value) VALUES(?,?)",
+            (key, str(value))
         )
+        c.commit()
 
-        try:
 
-            with urllib.request.urlopen(
-                request,
-                timeout=MEXC_TIMEOUT
-            ) as response:
-
-                raw = response.read().decode(
-                    "utf-8"
-                )
-
-            payload = json.loads(raw)
-
-            if not isinstance(payload, dict):
-
-                raise RuntimeError(
-                    "Unexpected MEXC response type"
-                )
-
-            if payload.get("success") is False:
-
-                raise RuntimeError(
-                    f"MEXC API error: {payload}"
-                )
-
-            data = payload.get("data")
-
-            if not isinstance(data, dict):
-
-                raise RuntimeError(
-                    f"Invalid MEXC data: {payload}"
-                )
-
-            times = data.get("time", [])
-            opens = data.get("open", [])
-            closes = data.get("close", [])
-            highs = data.get("high", [])
-            lows = data.get("low", [])
-            volumes = data.get("vol", [])
-
-            lengths = [
-                len(times),
-                len(opens),
-                len(closes),
-                len(highs),
-                len(lows),
-                len(volumes)
-            ]
-
-            if min(lengths) == 0:
-
-                raise RuntimeError(
-                    "MEXC returned empty candles"
-                )
-
-            count = min(lengths)
-
-            rows = []
-
-            for i in range(count):
-
-                rows.append({
-                    "ts": int(float(times[i])),
-                    "open": float(opens[i]),
-                    "close": float(closes[i]),
-                    "high": float(highs[i]),
-                    "low": float(lows[i]),
-                    "volume": float(volumes[i])
-                })
-
-            rows.sort(
-                key=lambda item: item["ts"]
-            )
-
-            return rows
-
-        except Exception as exc:
-
-            last_error = exc
-
-            if attempt < MEXC_RETRIES:
-
-                time.sleep(
-                    1.5 * attempt
-                )
-
-    raise RuntimeError(
-        f"MEXC connection failed after "
-        f"{MEXC_RETRIES} attempts: "
-        f"{type(last_error).__name__}: "
-        f"{last_error}"
+def api_get(url):
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "btc-market-engine/1.0"}
     )
 
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode("utf-8"))
 
-# ============================================================
-# INDICATORS
-# ============================================================
 
-def ema(values, period):
+def parse_klines(payload):
+    data = payload.get("data", payload) if isinstance(payload, dict) else payload
 
-    if len(values) < period:
+    if not isinstance(data, dict):
+        return []
 
-        return [None] * len(values)
+    times = data.get("time", [])
+    opens = data.get("open", [])
+    closes = data.get("close", [])
+    highs = data.get("high", [])
+    lows = data.get("low", [])
+    vols = data.get("vol", [0] * len(times))
 
-    result = [None] * len(values)
-
-    result[period - 1] = (
-        sum(values[:period]) / period
-    )
-
-    multiplier = 2 / (period + 1)
+    out = []
 
     for i in range(
-        period,
-        len(values)
+        min(
+            len(times),
+            len(opens),
+            len(closes),
+            len(highs),
+            len(lows)
+        )
     ):
+        out.append({
+            "time": int(times[i]),
+            "open": float(opens[i]),
+            "close": float(closes[i]),
+            "high": float(highs[i]),
+            "low": float(lows[i]),
+            "vol": float(vols[i]) if i < len(vols) else 0.0,
+        })
 
-        result[i] = (
-            (
-                values[i]
-                - result[i - 1]
-            )
-            * multiplier
-            + result[i - 1]
+    out.sort(key=lambda x: x["time"])
+
+    return out
+
+
+def get_klines(interval, total):
+    """
+    Fetch historical candles using pages of max 2000 candles.
+    """
+    total = min(int(total), 12000)
+
+    result = []
+    end = now_ts()
+    pages = 0
+
+    while len(result) < total and pages < 20:
+        limit = min(2000, total - len(result))
+
+        qs = urllib.parse.urlencode({
+            "interval": interval,
+            "limit": limit,
+            "end": end
+        })
+
+        url = f"{BASE_URL}/{SYMBOL}?{qs}"
+
+        page = parse_klines(api_get(url))
+
+        if not page:
+            break
+
+        result.extend(page)
+
+        oldest = min(x["time"] for x in page)
+
+        if len(page) < limit:
+            break
+
+        end = oldest - 1
+        pages += 1
+
+    unique = {
+        x["time"]: x
+        for x in result
+    }
+
+    return sorted(
+        unique.values(),
+        key=lambda x: x["time"]
+    )[-total:]
+
+
+def closed(rows):
+    return rows[:-1] if len(rows) > 1 else []
+
+
+def ema(values, period):
+    if not values:
+        return []
+
+    k = 2.0 / (period + 1)
+
+    out = [values[0]]
+
+    for v in values[1:]:
+        out.append(
+            v * k + out[-1] * (1 - k)
         )
 
-    return result
+    return out
 
 
 def atr(rows, period=14):
-
-    if len(rows) < period + 1:
-
-        return [None] * len(rows)
-
-    tr = [None] * len(rows)
-
-    for i in range(
-        1,
-        len(rows)
-    ):
-
-        high = rows[i]["high"]
-        low = rows[i]["low"]
-
-        previous_close = (
-            rows[i - 1]["close"]
-        )
-
-        tr[i] = max(
-            high - low,
-            abs(high - previous_close),
-            abs(low - previous_close)
-        )
-
-    result = [None] * len(rows)
-
-    first = [
-        x
-        for x in tr[1:period + 1]
-        if x is not None
-    ]
-
-    if len(first) < period:
-
-        return result
-
-    result[period] = (
-        sum(first) / period
-    )
-
-    for i in range(
-        period + 1,
-        len(rows)
-    ):
-
-        result[i] = (
-            result[i - 1] * (period - 1)
-            + tr[i]
-        ) / period
-
-    return result
-
-
-def closed_candles(rows):
-
-    if len(rows) < 3:
-
+    if not rows:
         return []
 
-    return rows[:-1]
+    tr = []
+
+    prev = rows[0]["close"]
+
+    for r in rows:
+        tr.append(
+            max(
+                r["high"] - r["low"],
+                abs(r["high"] - prev),
+                abs(r["low"] - prev)
+            )
+        )
+
+        prev = r["close"]
+
+    out = []
+
+    for i in range(len(tr)):
+        if i < period:
+            out.append(
+                sum(tr[:i + 1]) / (i + 1)
+            )
+        else:
+            out.append(
+                sum(
+                    tr[i - period + 1:i + 1]
+                ) / period
+            )
+
+    return out
 
 
-# ============================================================
-# H1 SETUP
-# ============================================================
+def h1_setup(rows):
+    r = closed(rows)
 
-def detect_h1_setup(h1):
-
-    rows = closed_candles(h1)
-
-    if len(rows) < 60:
-
+    if len(r) < 60:
         return None
 
-    closes = [
-        x["close"]
-        for x in rows
-    ]
+    closes = [x["close"] for x in r]
 
-    ema20 = ema(
-        closes,
-        20
-    )
+    e20 = ema(closes, 20)
+    e50 = ema(closes, 50)
 
-    ema50 = ema(
-        closes,
-        50
-    )
+    i = len(r) - 1
 
-    i = len(rows) - 1
-
-    if (
-        ema20[i] is None
-        or ema50[i] is None
-    ):
-
+    if i < 11:
         return None
 
-    current = rows[i]
+    prev_close_5 = r[i - 5]["close"]
 
-    previous_close_5 = (
-        rows[i - 5]["close"]
-    )
-
-    previous_high_10 = max(
+    prev_high_10 = max(
         x["high"]
-        for x in rows[i - 10:i]
+        for x in r[i - 10:i]
     )
 
-    previous_low_10 = min(
+    prev_low_10 = min(
         x["low"]
-        for x in rows[i - 10:i]
+        for x in r[i - 10:i]
     )
 
-    # LONG
+    cur = r[i]
 
     if (
-        previous_close_5 < ema50[i - 5]
-        and current["close"] > previous_high_10
-        and current["close"] > ema20[i]
-        and ema20[i] > ema20[i - 1]
+        prev_close_5 < e50[i - 5]
+        and cur["close"] > prev_high_10
+        and cur["close"] > e20[i]
+        and e20[i] > e20[i - 1]
     ):
-
         return {
+            "time": cur["time"],
             "direction": "LONG",
-            "time": current["ts"],
-            "price": current["close"]
+            "price": cur["close"]
         }
 
-    # SHORT
-
     if (
-        previous_close_5 > ema50[i - 5]
-        and current["close"] < previous_low_10
-        and current["close"] < ema20[i]
-        and ema20[i] < ema20[i - 1]
+        prev_close_5 > e50[i - 5]
+        and cur["close"] < prev_low_10
+        and cur["close"] < e20[i]
+        and e20[i] < e20[i - 1]
     ):
-
         return {
+            "time": cur["time"],
             "direction": "SHORT",
-            "time": current["ts"],
-            "price": current["close"]
+            "price": cur["close"]
         }
 
     return None
 
 
-def find_h1_setups(h1):
+def find_h1_setups(rows):
+    r = closed(rows)
 
-    rows = closed_candles(h1)
-
-    if len(rows) < 60:
-
+    if len(r) < 60:
         return []
 
-    closes = [
-        x["close"]
-        for x in rows
-    ]
+    closes = [x["close"] for x in r]
 
-    ema20 = ema(
-        closes,
-        20
-    )
+    e20 = ema(closes, 20)
+    e50 = ema(closes, 50)
 
-    ema50 = ema(
-        closes,
-        50
-    )
+    out = []
 
-    setups = []
+    for i in range(11, len(r)):
+        cur = r[i]
 
-    for i in range(
-        60,
-        len(rows)
-    ):
+        prev_close_5 = r[i - 5]["close"]
 
-        if (
-            ema20[i] is None
-            or ema50[i] is None
-        ):
-
-            continue
-
-        current = rows[i]
-
-        previous_close_5 = (
-            rows[i - 5]["close"]
-        )
-
-        previous_high_10 = max(
+        prev_high_10 = max(
             x["high"]
-            for x in rows[i - 10:i]
+            for x in r[i - 10:i]
         )
 
-        previous_low_10 = min(
+        prev_low_10 = min(
             x["low"]
-            for x in rows[i - 10:i]
+            for x in r[i - 10:i]
         )
 
-        if (
-            previous_close_5 < ema50[i - 5]
-            and current["close"] > previous_high_10
-            and current["close"] > ema20[i]
-            and ema20[i] > ema20[i - 1]
-        ):
-
-            setups.append({
-                "direction": "LONG",
-                "time": current["ts"],
-                "price": current["close"]
-            })
-
-            continue
+        direction = None
 
         if (
-            previous_close_5 > ema50[i - 5]
-            and current["close"] < previous_low_10
-            and current["close"] < ema20[i]
-            and ema20[i] < ema20[i - 1]
+            prev_close_5 < e50[i - 5]
+            and cur["close"] > prev_high_10
+            and cur["close"] > e20[i]
+            and e20[i] > e20[i - 1]
         ):
+            direction = "LONG"
 
-            setups.append({
-                "direction": "SHORT",
-                "time": current["ts"],
-                "price": current["close"]
+        elif (
+            prev_close_5 > e50[i - 5]
+            and cur["close"] < prev_low_10
+            and cur["close"] < e20[i]
+            and e20[i] < e20[i - 1]
+        ):
+            direction = "SHORT"
+
+        if direction:
+            out.append({
+                "time": cur["time"],
+                "direction": direction,
+                "price": cur["close"]
             })
 
-    return setups
+    return out
 
 
-# ============================================================
-# M15 CONFIRMATION
-# ============================================================
+def structural_sl(m15_rows, direction, end_time=None):
+    r = closed(m15_rows)
 
-def confirm_m15(
-    m15,
-    direction,
-    setup_time
-):
+    if end_time is not None:
+        r = [
+            x for x in r
+            if x["time"] <= end_time
+        ]
 
-    rows = closed_candles(m15)
-
-    if len(rows) < 30:
-
+    if len(r) < 20:
         return None
 
-    closes = [
-        x["close"]
-        for x in rows
-    ]
+    a = atr(r, 14)[-1]
 
-    ema20 = ema(
-        closes,
-        20
+    last6 = r[-6:]
+
+    if direction == "LONG":
+        return (
+            min(x["low"] for x in last6)
+            - a * 0.2
+        )
+
+    return (
+        max(x["high"] for x in last6)
+        + a * 0.2
     )
 
-    candidates = [
-        i
-        for i, row in enumerate(rows)
-        if row["ts"] > setup_time
+
+def confirm_m15(m15_rows, setup):
+    r = closed(m15_rows)
+
+    after = [
+        x for x in r
+        if x["time"] > setup["time"]
     ]
 
-    candidates = candidates[-16:]
+    # TYLKO pierwsze 16 świec po konkretnym H1 setupie.
+    candidates = after[:M15_CONFIRM_CANDLES]
 
-    for i in candidates:
+    if not candidates:
+        return None
 
-        if ema20[i] is None:
+    closes = [x["close"] for x in r]
 
-            continue
+    e20 = ema(closes, 20)
+
+    by_time = {
+        x["time"]: i
+        for i, x in enumerate(r)
+    }
+
+    for c in candidates:
+        i = by_time[c["time"]]
 
         if i < 5:
-
             continue
-
-        candle = rows[i]
-
-        previous = rows[i - 5:i]
 
         high5 = max(
             x["high"]
-            for x in previous
+            for x in r[i - 5:i]
         )
 
         low5 = min(
             x["low"]
-            for x in previous
+            for x in r[i - 5:i]
         )
 
-        if (
-            direction == "LONG"
-            and candle["low"] <= ema20[i]
-            and candle["close"] > ema20[i]
-            and candle["close"] > high5
-            and candle["close"] > candle["open"]
-        ):
+        if setup["direction"] == "LONG":
+            if (
+                c["low"] <= e20[i]
+                and c["close"] > e20[i]
+                and c["close"] > high5
+                and c["close"] > c["open"]
+            ):
+                return {
+                    "time": c["time"],
+                    "price": c["close"]
+                }
 
-            return {
-                "direction": direction,
-                "time": candle["ts"]
-            }
-
-        if (
-            direction == "SHORT"
-            and candle["high"] >= ema20[i]
-            and candle["close"] < ema20[i]
-            and candle["close"] < low5
-            and candle["close"] < candle["open"]
-        ):
-
-            return {
-                "direction": direction,
-                "time": candle["ts"]
-            }
+        else:
+            if (
+                c["high"] >= e20[i]
+                and c["close"] < e20[i]
+                and c["close"] < low5
+                and c["close"] < c["open"]
+            ):
+                return {
+                    "time": c["time"],
+                    "price": c["close"]
+                }
 
     return None
 
 
-# ============================================================
-# M5 TRIGGER
-# ============================================================
+def find_m5_entry(m5_rows, setup, confirmation):
+    r = closed(m5_rows)
 
-def trigger_m5(
-    m5,
-    direction,
-    confirmation_time
-):
-
-    rows = closed_candles(m5)
-
-    if len(rows) < 30:
-
-        return None
-
-    closes = [
-        x["close"]
-        for x in rows
+    after = [
+        x for x in r
+        if x["time"] > confirmation["time"]
     ]
 
-    ema20 = ema(
-        closes,
-        20
-    )
+    candidates = after[:M5_ENTRY_CANDLES]
 
-    candidates = [
-        i
-        for i, row in enumerate(rows)
-        if row["ts"] > confirmation_time
-    ]
+    closes = [x["close"] for x in r]
 
-    candidates = candidates[-8:]
+    e20 = ema(closes, 20)
 
-    for i in candidates:
+    by_time = {
+        x["time"]: i
+        for i, x in enumerate(r)
+    }
 
-        if ema20[i] is None:
-
-            continue
+    for c in candidates:
+        i = by_time[c["time"]]
 
         if i < 3:
-
             continue
-
-        candle = rows[i]
-
-        previous = rows[i - 3:i]
 
         high3 = max(
             x["high"]
-            for x in previous
+            for x in r[i - 3:i]
         )
 
         low3 = min(
             x["low"]
-            for x in previous
+            for x in r[i - 3:i]
         )
 
-        next_i = i + 1
+        if setup["direction"] == "LONG":
+            if (
+                c["close"] > high3
+                and c["close"] > e20[i]
+                and c["close"] > c["open"]
+            ):
+                idx = i + 1
 
-        if next_i >= len(rows):
+                if idx < len(r):
+                    return {
+                        "signal_time": c["time"],
+                        "time": r[idx]["time"],
+                        "price": r[idx]["open"]
+                    }
 
-            continue
+        else:
+            if (
+                c["close"] < low3
+                and c["close"] < e20[i]
+                and c["close"] < c["open"]
+            ):
+                idx = i + 1
 
-        if (
-            direction == "LONG"
-            and candle["close"] > high3
-            and candle["close"] > ema20[i]
-            and candle["close"] > candle["open"]
-        ):
-
-            return {
-                "direction": direction,
-                "trigger_time": candle["ts"],
-                "entry_time": rows[next_i]["ts"],
-                "entry": rows[next_i]["open"]
-            }
-
-        if (
-            direction == "SHORT"
-            and candle["close"] < low3
-            and candle["close"] < ema20[i]
-            and candle["close"] < candle["open"]
-        ):
-
-            return {
-                "direction": direction,
-                "trigger_time": candle["ts"],
-                "entry_time": rows[next_i]["ts"],
-                "entry": rows[next_i]["open"]
-            }
+                if idx < len(r):
+                    return {
+                        "signal_time": c["time"],
+                        "time": r[idx]["time"],
+                        "price": r[idx]["open"]
+                    }
 
     return None
 
 
-# ============================================================
-# STRUCTURAL STOP
-# ============================================================
-
-def structural_stop(
-    m15,
-    direction
-):
-
-    rows = closed_candles(m15)
-
-    if len(rows) < 20:
-
-        return None
-
-    atr_values = atr(
-        rows,
-        14
-    )
-
-    current_atr = atr_values[-1]
-
-    if current_atr is None:
-
-        return None
-
-    last6 = rows[-6:]
-
-    if direction == "LONG":
-
-        return (
-            min(
-                x["low"]
-                for x in last6
-            )
-            - current_atr * 0.2
-        )
-
-    if direction == "SHORT":
-
-        return (
-            max(
-                x["high"]
-                for x in last6
-            )
-            + current_atr * 0.2
-        )
-
-    return None
-
-
-def structural_stop_at_time(
-    m15_rows,
-    direction,
-    timestamp
-):
-
-    rows = [
-        row
-        for row in m15_rows
-        if row["ts"] <= timestamp
-    ]
-
-    if len(rows) < 20:
-
-        return None
-
-    atr_values = atr(
-        rows,
-        14
-    )
-
-    current_atr = atr_values[-1]
-
-    if current_atr is None:
-
-        return None
-
-    last6 = rows[-6:]
-
-    if direction == "LONG":
-
-        return (
-            min(
-                x["low"]
-                for x in last6
-            )
-            - current_atr * 0.2
-        )
-
-    if direction == "SHORT":
-
-        return (
-            max(
-                x["high"]
-                for x in last6
-            )
-            + current_atr * 0.2
-        )
-
-    return None
-
-
-# ============================================================
-# POSITION
-# ============================================================
-
-def create_position(
-    direction,
-    entry,
-    stop
-):
-
-    risk = abs(
-        entry - stop
-    )
+def r_value(direction, entry, sl, price):
+    risk = abs(entry - sl)
 
     if risk <= 0:
-
-        return None
-
-    return {
-        "direction": direction,
-        "entry": entry,
-        "initial_stop": stop,
-        "stop": stop,
-        "risk": risk,
-        "max_r": 0.0,
-        "trailing_active": False
-    }
-
-
-def current_r(
-    position,
-    price
-):
-
-    if position["risk"] <= 0:
-
         return 0.0
 
-    if position["direction"] == "LONG":
+    if direction == "LONG":
+        return (price - entry) / risk
 
-        return (
-            price - position["entry"]
-        ) / position["risk"]
-
-    return (
-        position["entry"] - price
-    ) / position["risk"]
+    return (entry - price) / risk
 
 
-# ============================================================
-# SETUP DATABASE
-# ============================================================
-
-def upsert_setup(setup):
-
-    conn = db_connect()
-
-    conn.execute(
-        "INSERT INTO setups("
-        "setup_time,direction,setup_price,"
-        "status,updated_at"
-        ") VALUES(?,?,?,?,?) "
-        "ON CONFLICT(setup_time) DO UPDATE SET "
-        "direction=excluded.direction,"
-        "setup_price=excluded.setup_price,"
-        "updated_at=excluded.updated_at",
-        (
-            setup["time"],
-            setup["direction"],
-            setup["price"],
-            "NIEPOTWIERDZONY",
-            datetime.now(
-                timezone.utc
-            ).isoformat()
-        )
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def update_setup_record(
-    setup_time,
-    **fields
-):
-
-    if not fields:
-
-        return
-
-    allowed = {
-        "direction",
-        "setup_price",
-        "status",
-        "confirmation_time",
-        "entry_time",
-        "entry_price",
-        "exit_time",
-        "exit_price",
-        "exit_r",
-        "stop",
-        "risk",
-        "max_r",
-        "min_r",
-        "trailing_active",
-        "trailing_stop",
-        "trailing_r"
-    }
-
-    fields = {
-        key: value
-        for key, value in fields.items()
-        if key in allowed
-    }
-
-    if not fields:
-
-        return
-
-    fields["updated_at"] = (
-        datetime.now(
-            timezone.utc
-        ).isoformat()
-    )
-
-    assignments = ", ".join(
-        f"{key}=?"
-        for key in fields
-    )
-
-    values = list(
-        fields.values()
-    )
-
-    values.append(
-        setup_time
-    )
-
-    conn = db_connect()
-
-    conn.execute(
-        f"UPDATE setups SET {assignments} "
-        "WHERE setup_time=?",
-        values
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def get_setup_rows(
-    limit=30
-):
-
-    conn = db_connect()
-
-    rows = conn.execute(
-        "SELECT "
-        "setup_time,direction,setup_price,status,"
-        "confirmation_time,entry_time,entry_price,"
-        "exit_time,exit_price,exit_r,"
-        "stop,risk,max_r,min_r,"
-        "trailing_active,trailing_stop,trailing_r "
-        "FROM setups "
-        "ORDER BY setup_time DESC "
-        "LIMIT ?",
-        (
-            limit,
-        )
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
-
-# ============================================================
-# HISTORICAL SIMULATION
-# ============================================================
-
-def simulate_setup(
-    setup,
-    m15_rows,
-    m5_rows
-):
-
-    setup_time = setup["time"]
-    direction = setup["direction"]
-    setup_price = setup["price"]
-
-    stop = structural_stop_at_time(
-        m15_rows,
-        direction,
-        setup_time
-    )
-
-    if stop is None:
-
-        return {
-            "status": "NIEPOTWIERDZONY",
-            "stop": None,
-            "risk": None,
-            "max_r": 0.0,
-            "min_r": 0.0,
-            "trailing_active": False,
-            "trailing_stop": None,
-            "trailing_r": None,
-            "confirmation_time": None,
-            "entry_time": None,
-            "entry_price": None,
-            "exit_time": None,
-            "exit_price": None,
-            "exit_r": None
-        }
-
-    risk = abs(
-        setup_price - stop
-    )
+def excursion(rows, start_time, direction, entry, sl):
+    risk = abs(entry - sl)
 
     if risk <= 0:
+        return None, None
 
-        return {
-            "status": "NIEPOTWIERDZONY",
-            "stop": None,
-            "risk": None,
-            "max_r": 0.0,
-            "min_r": 0.0,
-            "trailing_active": False,
-            "trailing_stop": None,
-            "trailing_r": None,
-            "confirmation_time": None,
-            "entry_time": None,
-            "entry_price": None,
-            "exit_time": None,
-            "exit_price": None,
-            "exit_r": None
-        }
+    rs = [
+        r_value(
+            direction,
+            entry,
+            sl,
+            x["high"]
+        )
+        for x in rows
+        if x["time"] >= start_time
+    ]
 
-    confirmation = confirm_m15(
-        m15_rows,
-        direction,
-        setup_time
-    )
-
-    if confirmation is None:
-
-        status = "NIEPOTWIERDZONY"
-
+    if direction == "LONG":
+        rs += [
+            r_value(
+                direction,
+                entry,
+                sl,
+                x["low"]
+            )
+            for x in rows
+            if x["time"] >= start_time
+        ]
     else:
+        rs += [
+            r_value(
+                direction,
+                entry,
+                sl,
+                x["low"]
+            )
+            for x in rows
+            if x["time"] >= start_time
+        ]
 
-        status = "POTWIERDZONY"
+    if not rs:
+        return None, None
 
-    confirmation_time = (
-        confirmation["time"]
-        if confirmation is not None
-        else None
+    return max(rs), min(rs)
+
+
+def simulate_position(m5_rows, m15_rows, setup, entry):
+    sl = structural_sl(
+        m15_rows,
+        setup["direction"],
+        entry["time"]
     )
+
+    if sl is None:
+        return None
+
+    entry_price = entry["price"]
+
+    risk = abs(entry_price - sl)
+
+    if risk <= 0:
+        return None
 
     max_r = 0.0
     min_r = 0.0
+    trail_r = None
 
-    setup_m5 = [
-        row
-        for row in m5_rows
-        if row["ts"] > setup_time
-    ]
+    current_sl = sl
 
-    for candle in setup_m5:
+    exit_time = None
+    exit_price = None
+    reason = None
 
-        if direction == "LONG":
+    m5 = closed(m5_rows)
+    m15 = closed(m15_rows)
 
-            favorable = (
-                candle["high"]
-                - setup_price
-            ) / risk
+    for c in m5:
+        if c["time"] < entry["time"]:
+            continue
 
-            adverse = (
-                candle["low"]
-                - setup_price
-            ) / risk
+        hi_r = r_value(
+            setup["direction"],
+            entry_price,
+            sl,
+            c["high"]
+        )
 
-        else:
-
-            favorable = (
-                setup_price
-                - candle["low"]
-            ) / risk
-
-            adverse = (
-                setup_price
-                - candle["high"]
-            ) / risk
+        lo_r = r_value(
+            setup["direction"],
+            entry_price,
+            sl,
+            c["low"]
+        )
 
         max_r = max(
             max_r,
-            favorable
+            hi_r,
+            lo_r
         )
 
         min_r = min(
             min_r,
-            adverse
+            hi_r,
+            lo_r
         )
 
-    entry_time = None
-    entry_price = None
-    exit_time = None
-    exit_price = None
-    exit_r = None
+        if setup["direction"] == "LONG":
+            if c["low"] <= current_sl:
+                exit_time = c["time"]
+                exit_price = current_sl
+                reason = "SL"
+                break
 
-    trailing_active = False
-    trailing_stop = stop
+        else:
+            if c["high"] >= current_sl:
+                exit_time = c["time"]
+                exit_price = current_sl
+                reason = "SL"
+                break
 
-    if direction == "LONG":
+        if max_r > TRAIL_ACTIVATION_R:
+            recent = [
+                x for x in m15
+                if (
+                    x["time"] >= entry["time"]
+                    and x["time"] <= c["time"]
+                )
+            ][-3:]
 
-        trailing_r = (
-            trailing_stop - setup_price
-        ) / risk
+            if len(recent) == 3:
+                if setup["direction"] == "LONG":
+                    ns = min(
+                        x["low"]
+                        for x in recent
+                    )
 
-    else:
+                    if (
+                        ns > current_sl
+                        and ns < c["close"]
+                    ):
+                        current_sl = ns
 
-        trailing_r = (
-            setup_price - trailing_stop
-        ) / risk
+                else:
+                    ns = max(
+                        x["high"]
+                        for x in recent
+                    )
 
-    if confirmation is not None:
+                    if (
+                        ns < current_sl
+                        and ns > c["close"]
+                    ):
+                        current_sl = ns
 
-        trigger = trigger_m5(
-            m5_rows,
-            direction,
-            confirmation_time
-        )
-
-        if trigger is not None:
-
-            entry_time = trigger[
-                "entry_time"
-            ]
-
-            entry_price = trigger[
-                "entry"
-            ]
-
-            trade_risk = abs(
-                entry_price - stop
+            trail_r = r_value(
+                setup["direction"],
+                entry_price,
+                sl,
+                c["close"]
             )
 
-            if trade_risk > 0:
-
-                current_stop = stop
-                trade_max_r = 0.0
-
-                future_m5 = [
-                    row
-                    for row in m5_rows
-                    if row["ts"] >= entry_time
-                ]
-
-                for candle in future_m5:
-
-                    if direction == "LONG":
-
-                        favorable = (
-                            candle["high"]
-                            - entry_price
-                        ) / trade_risk
-
-                        trade_max_r = max(
-                            trade_max_r,
-                            favorable
-                        )
-
-                        if (
-                            trade_max_r
-                            > TRAIL_ACTIVATION_R
-                            and not trailing_active
-                        ):
-
-                            trailing_active = True
-
-                        if trailing_active:
-
-                            closed15 = [
-                                row
-                                for row in m15_rows
-                                if row["ts"]
-                                <= candle["ts"]
-                            ]
-
-                            if len(closed15) >= 3:
-
-                                new_stop = min(
-                                    x["low"]
-                                    for x in closed15[-3:]
-                                )
-
-                                if (
-                                    new_stop
-                                    > current_stop
-                                ):
-
-                                    current_stop = (
-                                        new_stop
-                                    )
-
-                        trailing_r = (
-                            current_stop
-                            - setup_price
-                        ) / risk
-
-                        if (
-                            candle["low"]
-                            <= current_stop
-                        ):
-
-                            exit_time = candle["ts"]
-
-                            exit_price = (
-                                current_stop
-                            )
-
-                            exit_r = (
-                                exit_price
-                                - entry_price
-                            ) / trade_risk
-
-                            break
-
-                    else:
-
-                        favorable = (
-                            entry_price
-                            - candle["low"]
-                        ) / trade_risk
-
-                        trade_max_r = max(
-                            trade_max_r,
-                            favorable
-                        )
-
-                        if (
-                            trade_max_r
-                            > TRAIL_ACTIVATION_R
-                            and not trailing_active
-                        ):
-
-                            trailing_active = True
-
-                        if trailing_active:
-
-                            closed15 = [
-                                row
-                                for row in m15_rows
-                                if row["ts"]
-                                <= candle["ts"]
-                            ]
-
-                            if len(closed15) >= 3:
-
-                                new_stop = max(
-                                    x["high"]
-                                    for x in closed15[-3:]
-                                )
-
-                                if (
-                                    new_stop
-                                    < current_stop
-                                ):
-
-                                    current_stop = (
-                                        new_stop
-                                    )
-
-                        trailing_r = (
-                            setup_price
-                            - current_stop
-                        ) / risk
-
-                        if (
-                            candle["high"]
-                            >= current_stop
-                        ):
-
-                            exit_time = candle["ts"]
-
-                            exit_price = (
-                                current_stop
-                            )
-
-                            exit_r = (
-                                entry_price
-                                - exit_price
-                            ) / trade_risk
-
-                            break
+    if exit_time is not None:
+        exit_r = r_value(
+            setup["direction"],
+            entry_price,
+            sl,
+            exit_price
+        )
+    else:
+        exit_r = None
 
     return {
-        "status": status,
-        "stop": stop,
-        "risk": risk,
-        "max_r": max_r,
-        "min_r": min_r,
-        "trailing_active": trailing_active,
-        "trailing_stop": trailing_stop,
-        "trailing_r": trailing_r,
-        "confirmation_time": confirmation_time,
-        "entry_time": entry_time,
-        "entry_price": entry_price,
+        "sl": sl,
         "exit_time": exit_time,
         "exit_price": exit_price,
-        "exit_r": exit_r
+        "reason": reason,
+        "exit_r": exit_r,
+        "max_r": max_r,
+        "min_r": min_r,
+        "trail_r": trail_r,
     }
 
 
-def rebuild_setup_history():
+def get_setups(limit=200):
+    with db_conn() as c:
+        return c.execute(
+            """
+            SELECT *
+            FROM setups
+            ORDER BY setup_time DESC
+            LIMIT ?
+            """,
+            (limit,)
+        ).fetchall()
 
-    log(
-        "HISTORY: downloading MEXC candles"
+
+def upsert_setup(setup):
+    with db_conn() as c:
+        c.execute(
+            """
+            INSERT OR IGNORE INTO setups(
+                setup_time,
+                direction,
+                setup_price,
+                last_update
+            )
+            VALUES(?,?,?,?)
+            """,
+            (
+                setup["time"],
+                setup["direction"],
+                setup["price"],
+                now_ts()
+            )
+        )
+
+        c.commit()
+
+
+def update_setup(setup_time, **fields):
+    if not fields:
+        return
+
+    fields["last_update"] = now_ts()
+
+    keys = list(fields.keys())
+
+    sql = (
+        "UPDATE setups SET "
+        + ",".join(f"{k}=?" for k in keys)
+        + " WHERE setup_time=?"
     )
 
+    values = [
+        fields[k]
+        for k in keys
+    ]
+
+    values.append(setup_time)
+
+    with db_conn() as c:
+        c.execute(sql, values)
+        c.commit()
+
+
+def rebuild_history():
+    try:
+        h1 = get_klines(
+            "Min60",
+            H1_HISTORY
+        )
+
+        m15 = get_klines(
+            "Min15",
+            M15_HISTORY
+        )
+
+        m5 = get_klines(
+            "Min5",
+            M5_HISTORY
+        )
+
+        setups = find_h1_setups(h1)
+
+        with db_conn() as c:
+            c.execute("DELETE FROM setups")
+            c.commit()
+
+        for s in setups:
+            upsert_setup(s)
+
+            setup_sl = structural_sl(
+                m15,
+                s["direction"],
+                s["time"]
+            )
+
+            fields = {
+                "setup_sl": setup_sl
+            }
+
+            if setup_sl:
+                mx, mn = excursion(
+                    m5,
+                    s["time"],
+                    s["direction"],
+                    s["price"],
+                    setup_sl
+                )
+
+                fields.update({
+                    "setup_max_r": mx,
+                    "setup_min_r": mn
+                })
+
+            confirmation = confirm_m15(
+                m15,
+                s
+            )
+
+            if confirmation:
+                fields.update({
+                    "status": "POTWIERDZONY",
+                    "confirm_time": confirmation["time"],
+                    "confirm_price": confirmation["price"]
+                })
+
+                entry = find_m5_entry(
+                    m5,
+                    s,
+                    confirmation
+                )
+
+                if entry:
+                    sim = simulate_position(
+                        m5,
+                        m15,
+                        s,
+                        entry
+                    )
+
+                    fields.update({
+                        "entry_time": entry["time"],
+                        "entry_price": entry["price"]
+                    })
+
+                    if sim:
+                        fields.update({
+                            "position_sl": sim["sl"],
+                            "exit_time": sim["exit_time"],
+                            "exit_price": sim["exit_price"],
+                            "exit_reason": sim["reason"],
+                            "exit_r": sim["exit_r"],
+                            "position_max_r": sim["max_r"],
+                            "position_min_r": sim["min_r"],
+                            "trail_r": sim["trail_r"]
+                        })
+
+            update_setup(
+                s["time"],
+                **fields
+            )
+
+        state_set(
+            "history_rebuilt",
+            now_ts()
+        )
+
+        state_set(
+            "latest_error",
+            ""
+        )
+
+        return None
+
+    except Exception as e:
+        state_set(
+            "latest_error",
+            repr(e)
+        )
+
+        return repr(e)
+
+
+def live_refresh():
     h1 = get_klines(
         "Min60",
-        HISTORY_H1_LIMIT
+        H1_HISTORY
     )
 
     m15 = get_klines(
         "Min15",
-        HISTORY_M15_LIMIT
+        500
     )
 
     m5 = get_klines(
         "Min5",
-        HISTORY_M5_LIMIT
+        1000
     )
 
-    setups = find_h1_setups(
-        h1
-    )
+    latest_h1 = h1_setup(h1)
 
-    log(
-        f"HISTORY: found {len(setups)} H1 setups"
-    )
+    if latest_h1:
+        upsert_setup(latest_h1)
 
-    conn = db_connect()
+    rows = get_setups(200)
 
-    conn.execute(
-        "DELETE FROM setups"
-    )
+    for row in rows:
+        s = {
+            "time": row["setup_time"],
+            "direction": row["direction"],
+            "price": row["setup_price"]
+        }
 
-    conn.commit()
-    conn.close()
-
-    for setup in setups:
-
-        upsert_setup(
-            setup
-        )
-
-        result = simulate_setup(
-            setup,
+        setup_sl = structural_sl(
             m15,
-            m5
+            s["direction"],
+            s["time"]
         )
 
-        update_setup_record(
-            setup["time"],
-            status=result["status"],
-            confirmation_time=result[
-                "confirmation_time"
-            ],
-            entry_time=result[
-                "entry_time"
-            ],
-            entry_price=result[
-                "entry_price"
-            ],
-            exit_time=result[
-                "exit_time"
-            ],
-            exit_price=result[
-                "exit_price"
-            ],
-            exit_r=result[
-                "exit_r"
-            ],
-            stop=result[
-                "stop"
-            ],
-            risk=result[
-                "risk"
-            ],
-            max_r=result[
-                "max_r"
-            ],
-            min_r=result[
-                "min_r"
-            ],
-            trailing_active=(
-                1
-                if result[
-                    "trailing_active"
-                ]
-                else 0
-            ),
-            trailing_stop=result[
-                "trailing_stop"
-            ],
-            trailing_r=result[
-                "trailing_r"
-            ]
-        )
+        fields = {
+            "setup_sl": setup_sl
+        }
 
-    save_state(
-        "history_rebuilt_at",
-        datetime.now(
-            timezone.utc
-        ).isoformat()
-    )
-
-    log(
-        "HISTORY: rebuild complete"
-    )
-
-
-# ============================================================
-# POSITION MANAGEMENT
-# ============================================================
-
-def update_position(
-    position,
-    m5,
-    m15
-):
-
-    rows5 = closed_candles(
-        m5
-    )
-
-    if not rows5:
-
-        return position
-
-    candle5 = rows5[-1]
-
-    if position["direction"] == "LONG":
-
-        r = current_r(
-            position,
-            candle5["high"]
-        )
-
-        position["max_r"] = max(
-            position["max_r"],
-            r
-        )
-
-        if (
-            position["max_r"]
-            > TRAIL_ACTIVATION_R
-            and not position["trailing_active"]
-        ):
-
-            position["trailing_active"] = True
-
-            log_event(
-                "TRAILING_ACTIVATED",
-                "LONG",
-                candle5["close"],
-                position["stop"],
-                position["risk"],
-                r,
-                position["max_r"],
-                "Trailing activated above 1.0R"
+        if setup_sl:
+            mx, mn = excursion(
+                m5,
+                s["time"],
+                s["direction"],
+                s["price"],
+                setup_sl
             )
 
-        if position["trailing_active"]:
+            fields.update({
+                "setup_max_r": mx,
+                "setup_min_r": mn
+            })
 
-            rows15 = closed_candles(
-                m15
+        if row["entry_time"] is None:
+            confirmation = confirm_m15(
+                m15,
+                s
             )
 
-            if len(rows15) >= 3:
+            if confirmation:
+                fields.update({
+                    "status": "POTWIERDZONY",
+                    "confirm_time": confirmation["time"],
+                    "confirm_price": confirmation["price"]
+                })
 
-                new_stop = min(
-                    x["low"]
-                    for x in rows15[-3:]
+                entry = find_m5_entry(
+                    m5,
+                    s,
+                    confirmation
                 )
 
-                if new_stop > position["stop"]:
+                if entry:
+                    active = False
 
-                    position["stop"] = new_stop
+                    for x in get_setups(200):
+                        if (
+                            x["entry_time"]
+                            and x["exit_time"] is None
+                            and x["setup_time"] != row["setup_time"]
+                        ):
+                            active = True
+                            break
 
-                    log_event(
-                        "TRAILING_STOP_MOVED",
-                        "LONG",
-                        candle5["close"],
-                        new_stop,
-                        position["risk"],
-                        r,
-                        position["max_r"],
-                        "M15 structure"
-                    )
+                    if not active:
+                        fields.update({
+                            "entry_time": entry["time"],
+                            "entry_price": entry["price"]
+                        })
 
-        if candle5["low"] <= position["stop"]:
+                        position_sl = structural_sl(
+                            m15,
+                            s["direction"],
+                            entry["time"]
+                        )
 
-            final_r = current_r(
-                position,
-                position["stop"]
-            )
+                        fields["position_sl"] = position_sl
 
-            log_event(
-                "EXIT_SL",
-                "LONG",
-                position["stop"],
-                position["stop"],
-                position["risk"],
-                final_r,
-                position["max_r"],
-                "Stop hit"
-            )
-
-            return None
-
-    else:
-
-        r = current_r(
-            position,
-            candle5["low"]
-        )
-
-        position["max_r"] = max(
-            position["max_r"],
-            r
-        )
-
-        if (
-            position["max_r"]
-            > TRAIL_ACTIVATION_R
-            and not position["trailing_active"]
-        ):
-
-            position["trailing_active"] = True
-
-            log_event(
-                "TRAILING_ACTIVATED",
-                "SHORT",
-                candle5["close"],
-                position["stop"],
-                position["risk"],
-                r,
-                position["max_r"],
-                "Trailing activated above 1.0R"
-            )
-
-        if position["trailing_active"]:
-
-            rows15 = closed_candles(
-                m15
-            )
-
-            if len(rows15) >= 3:
-
-                new_stop = max(
-                    x["high"]
-                    for x in rows15[-3:]
+            else:
+                fields.setdefault(
+                    "status",
+                    "NIEPOTWIERDZONY"
                 )
 
-                if new_stop < position["stop"]:
-
-                    position["stop"] = new_stop
-
-                    log_event(
-                        "TRAILING_STOP_MOVED",
-                        "SHORT",
-                        candle5["close"],
-                        new_stop,
-                        position["risk"],
-                        r,
-                        position["max_r"],
-                        "M15 structure"
-                    )
-
-        if candle5["high"] >= position["stop"]:
-
-            final_r = current_r(
-                position,
-                position["stop"]
-            )
-
-            log_event(
-                "EXIT_SL",
-                "SHORT",
-                position["stop"],
-                position["stop"],
-                position["risk"],
-                final_r,
-                position["max_r"],
-                "Stop hit"
-            )
-
-            return None
-
-    return position
-
-
-# ============================================================
-# DASHBOARD HELPERS
-# ============================================================
-
-def fmt_time(ts):
-
-    if ts is None:
-
-        return "—"
-
-    try:
-
-        return datetime.fromtimestamp(
-            int(ts),
-            timezone.utc
-        ).strftime(
-            "%d.%m %H:%M"
+        update_setup(
+            row["setup_time"],
+            **fields
         )
 
-    except Exception:
-
-        return "—"
-
-
-def fmt_price(value):
-
-    if value is None:
-
-        return "—"
-
-    return f"{value:,.2f}"
-
-
-def fmt_r(value):
-
-    if value is None:
-
-        return "—"
-
-    return f"{value:+.2f}R"
-
-
-# ============================================================
-# LIVE PANEL
-# ============================================================
-
-def make_dashboard():
-
-    setup_rows = get_setup_rows(
-        30
+    manage_open_positions(
+        m5,
+        m15
     )
 
-    latest_price = load_state(
-        "latest_price",
-        None
+    state_set(
+        "last_live_update",
+        now_ts()
     )
 
-    last_data = load_state(
-        "last_data_utc",
-        "brak danych"
-    )
-
-    position = load_state(
-        "position",
-        None
-    )
-
-    latest_error = load_state(
+    state_set(
         "latest_error",
-        None
+        ""
     )
 
-    if latest_error is not None:
 
-        error_text = html.escape(
-            str(
-                latest_error.get(
-                    "message",
-                    ""
+def manage_open_positions(m5, m15):
+    r = closed(m5)
+
+    with db_conn() as c:
+        open_rows = c.execute(
+            """
+            SELECT *
+            FROM setups
+            WHERE entry_time IS NOT NULL
+              AND exit_time IS NULL
+            ORDER BY entry_time
+            """
+        ).fetchall()
+
+    for row in open_rows:
+        direction = row["direction"]
+        entry = row["entry_price"]
+        sl = row["position_sl"]
+
+        if entry is None or sl is None:
+            continue
+
+        max_r = (
+            row["position_max_r"]
+            if row["position_max_r"] is not None
+            else 0.0
+        )
+
+        min_r = (
+            row["position_min_r"]
+            if row["position_min_r"] is not None
+            else 0.0
+        )
+
+        trail_r = row["trail_r"]
+
+        current_sl = sl
+
+        exit_time = None
+        exit_price = None
+        reason = None
+
+        m15_closed = closed(m15)
+
+        for candle in r:
+            if candle["time"] < row["entry_time"]:
+                continue
+
+            hi_r = r_value(
+                direction,
+                entry,
+                sl,
+                candle["high"]
+            )
+
+            lo_r = r_value(
+                direction,
+                entry,
+                sl,
+                candle["low"]
+            )
+
+            max_r = max(
+                max_r,
+                hi_r,
+                lo_r
+            )
+
+            min_r = min(
+                min_r,
+                hi_r,
+                lo_r
+            )
+
+            if direction == "LONG":
+                if candle["low"] <= current_sl:
+                    exit_time = candle["time"]
+                    exit_price = current_sl
+                    reason = "SL"
+                    break
+
+            else:
+                if candle["high"] >= current_sl:
+                    exit_time = candle["time"]
+                    exit_price = current_sl
+                    reason = "SL"
+                    break
+
+            if max_r > TRAIL_ACTIVATION_R:
+                recent = [
+                    x for x in m15_closed
+                    if (
+                        row["entry_time"]
+                        <= x["time"]
+                        <= candle["time"]
+                    )
+                ][-3:]
+
+                if len(recent) == 3:
+                    if direction == "LONG":
+                        ns = min(
+                            x["low"]
+                            for x in recent
+                        )
+
+                        if (
+                            ns > current_sl
+                            and ns < candle["close"]
+                        ):
+                            current_sl = ns
+
+                    else:
+                        ns = max(
+                            x["high"]
+                            for x in recent
+                        )
+
+                        if (
+                            ns < current_sl
+                            and ns > candle["close"]
+                        ):
+                            current_sl = ns
+
+                trail_r = r_value(
+                    direction,
+                    entry,
+                    sl,
+                    candle["close"]
                 )
-            )
-        )
 
-        error_time = html.escape(
-            str(
-                latest_error.get(
-                    "time",
-                    ""
-                )
-            )
-        )
+        fields = {
+            "position_max_r": max_r,
+            "position_min_r": min_r,
+            "trail_r": trail_r,
+            "position_sl": current_sl
+        }
 
-        error_html = (
-            "<div class='status warn'>"
-            "<b>🟠 MEXC / ENGINE:</b> "
-            f"{error_text} "
-            f"<span>{error_time}</span>"
-            "</div>"
-        )
-
-    else:
-
-        error_html = ""
-
-    if latest_price is None:
-
-        price_text = "—"
-
-    else:
-
-        price_text = (
-            f"{latest_price:,.2f}"
-        )
-
-    if position is not None:
-
-        current_price = (
-            latest_price
-            if latest_price is not None
-            else position["entry"]
-        )
-
-        live_r = current_r(
-            position,
-            current_price
-        )
-
-        position_html = (
-            "<div class='position'>"
-            "<b>AKTYWNA POZYCJA</b> · "
-            f"{position['direction']} · "
-            f"Entry {fmt_price(position['entry'])} · "
-            f"SL {fmt_price(position['stop'])} · "
-            f"R {live_r:+.2f}R · "
-            f"Max {position.get('max_r', 0):+.2f}R"
-            "</div>"
-        )
-
-    else:
-
-        position_html = ""
-
-    rows_html = ""
-
-    for row in setup_rows:
-
-        (
-            setup_time,
-            direction,
-            setup_price,
-            status,
-            confirmation_time,
-            entry_time,
-            entry_price,
-            exit_time,
-            exit_price,
-            exit_r,
-            stop,
-            risk,
-            max_r,
-            min_r,
-            trailing_active,
-            trailing_stop,
-            trailing_r
-        ) = row
-
-        if status == "POTWIERDZONY":
-
-            status_html = (
-                "<span class='confirmed'>"
-                "POTW."
-                "</span>"
+        if exit_time is not None:
+            exit_r = r_value(
+                direction,
+                entry,
+                sl,
+                exit_price
             )
 
-        else:
+            fields.update({
+                "exit_time": exit_time,
+                "exit_price": exit_price,
+                "exit_reason": reason,
+                "exit_r": exit_r,
+                "trail_r": exit_r
+            })
 
-            status_html = (
-                "<span class='unconfirmed'>"
-                "NIEPOTW."
-                "</span>"
-            )
-
-        rows_html += (
-            "<tr>"
-            f"<td>{fmt_time(setup_time)}</td>"
-            f"<td>{direction}</td>"
-            f"<td>{fmt_price(setup_price)}</td>"
-            f"<td>{status_html}</td>"
-            f"<td>{fmt_time(confirmation_time)}</td>"
-            f"<td>{fmt_price(entry_price)}</td>"
-            f"<td>{fmt_time(exit_time)}</td>"
-            f"<td>{fmt_price(exit_price)}</td>"
-            f"<td>{fmt_r(exit_r)}</td>"
-            f"<td>{fmt_r(max_r)}</td>"
-            f"<td>{fmt_r(min_r)}</td>"
-            f"<td>{fmt_r(trailing_r)}</td>"
-            "</tr>"
+        update_setup(
+            row["setup_time"],
+            **fields
         )
 
-    if not rows_html:
 
-        rows_html = (
-            "<tr>"
-            "<td colspan='12'>"
-            "Brak setupów"
-            "</td>"
-            "</tr>"
-        )
+def dashboard():
+    rows = get_setups(200)
 
-    page = (
+    latest_error = state_get(
+        "latest_error",
+        ""
+    )
+
+    last_update = state_get(
+        "last_live_update"
+    )
+
+    body = []
+
+    body.append(
         "<!doctype html>"
         "<html>"
         "<head>"
         "<meta charset='utf-8'>"
-        "<meta http-equiv='refresh' content='10'>"
         "<meta name='viewport' "
         "content='width=device-width,initial-scale=1'>"
-        "<title>BTC SETUPS</title>"
-        "<style>"
-        "*{box-sizing:border-box}"
-        "body{font-family:Arial,sans-serif;"
-        "background:#0d1117;color:#e6edf3;"
-        "margin:0;padding:12px}"
-        ".header{background:#161b22;"
-        "border-radius:10px;"
-        "padding:12px;"
-        "margin-bottom:10px}"
-        ".header h1{font-size:20px;"
-        "margin:0 0 6px}"
-        ".header p{margin:3px 0;"
-        "font-size:13px}"
-        ".status{padding:9px 11px;"
-        "border-radius:8px;"
-        "margin-bottom:10px;"
-        "background:#2d1b05;"
-        "font-size:12px}"
-        ".status span{float:right;"
-        "opacity:.7}"
-        ".position{background:#12351f;"
-        "border-radius:8px;"
-        "padding:9px;"
-        "margin-bottom:10px;"
-        "font-size:12px}"
-        ".table-wrap{overflow-x:auto;"
-        "background:#161b22;"
-        "border-radius:10px}"
-        "table{border-collapse:collapse;"
-        "width:100%;"
-        "min-width:1100px;"
-        "font-size:12px}"
-        "th{background:#21262d;"
-        "position:sticky;"
-        "top:0;"
-        "text-align:left}"
-        "th,td{padding:8px 7px;"
-        "border-bottom:1px solid #30363d;"
-        "white-space:nowrap}"
-        ".confirmed{color:#3fb950;"
-        "font-weight:bold}"
-        ".unconfirmed{color:#d29922;"
-        "font-weight:bold}"
-        ".footer{font-size:11px;"
-        "opacity:.55;"
-        "margin-top:8px}"
-        "</style>"
-        "</head>"
-        "<body>"
-        "<div class='header'>"
-        "<h1>BTC SETUPS</h1>"
-        "<p><b>BTC_USDT · MEXC Futures</b></p>"
-        f"<p>BTC: <b>{price_text}</b></p>"
-        f"<p>Ostatnie dane: "
-        f"{html.escape(str(last_data))}</p>"
-        "</div>"
-        f"{error_html}"
-        f"{position_html}"
-        "<div class='table-wrap'>"
-        "<table>"
-        "<thead>"
-        "<tr>"
-        "<th>Setup</th>"
-        "<th>Kierunek</th>"
-        "<th>Cena</th>"
-        "<th>Status</th>"
-        "<th>M15</th>"
-        "<th>Entry</th>"
-        "<th>Exit</th>"
-        "<th>Exit R</th>"
-        "<th>Max R</th>"
-        "<th>Min R</th>"
-        "<th>Trail R</th>"
-        "</tr>"
-        "</thead>"
-        "<tbody>"
-        f"{rows_html}"
-        "</tbody>"
-        "</table>"
-        "</div>"
-        "<div class='footer'>"
-        "Odświeżanie 10 s · tylko setupy · "
-        "PAPER / MARKET OBSERVATION ONLY · "
-        "NO REAL ORDERS"
-        "</div>"
-        "</body>"
-        "</html>"
     )
 
-    return page
+    body.append(
+        "<title>BTC Market Engine</title>"
+    )
+
+    body.append("""
+    <style>
+      body{
+        font-family:Arial,sans-serif;
+        background:#111;
+        color:#eee;
+        margin:16px
+      }
+
+      h1{
+        font-size:20px
+      }
+
+      .meta{
+        color:#aaa;
+        margin-bottom:12px
+      }
+
+      .err{
+        background:#5b1717;
+        padding:10px;
+        border-radius:8px;
+        margin-bottom:12px
+      }
+
+      .table-wrap{
+        overflow:auto;
+        max-height:72vh;
+        border:1px solid #333;
+        border-radius:8px
+      }
+
+      table{
+        border-collapse:collapse;
+        width:max-content;
+        min-width:1500px
+      }
+
+      th,td{
+        padding:8px 10px;
+        border-bottom:1px solid #292929;
+        white-space:nowrap;
+        font-size:13px
+      }
+
+      th{
+        position:sticky;
+        top:0;
+        background:#1c1c1c;
+        z-index:2
+      }
+
+      .long{
+        color:#7ee787
+      }
+
+      .short{
+        color:#ff7b72
+      }
+
+      .ok{
+        color:#7ee787
+      }
+
+      .no{
+        color:#aaa
+      }
+    </style>
+    </head>
+    <body>
+    """)
+
+    body.append(
+        "<h1>BTC MARKET ENGINE</h1>"
+    )
+
+    body.append(
+        "<div class='meta'>"
+        f"Ostatnia aktualizacja: {fmt_ts(last_update)} UTC "
+        "· auto refresh 10 s"
+        "</div>"
+    )
+
+    if latest_error:
+        body.append(
+            "<div class='err'>"
+            f"{html.escape(latest_error)}"
+            "</div>"
+        )
+
+    body.append("""
+    <div class='table-wrap' id='tableWrap'>
+    <table>
+    <thead>
+    <tr>
+      <th>Setup</th>
+      <th>Kierunek</th>
+      <th>Setup price</th>
+      <th>Status</th>
+      <th>M15</th>
+      <th>Entry</th>
+      <th>SL</th>
+      <th>Exit</th>
+      <th>Exit R</th>
+      <th>Max R</th>
+      <th>Min R</th>
+      <th>Trail R</th>
+      <th>Powód</th>
+    </tr>
+    </thead>
+    <tbody>
+    """)
+
+    for r in rows:
+        cls = (
+            "long"
+            if r["direction"] == "LONG"
+            else "short"
+        )
+
+        status_cls = (
+            "ok"
+            if r["status"] == "POTWIERDZONY"
+            else "no"
+        )
+
+        if r["entry_time"]:
+            max_display = r["position_max_r"]
+            min_display = r["position_min_r"]
+        else:
+            max_display = r["setup_max_r"]
+            min_display = r["setup_min_r"]
+
+        body.append("<tr>")
+
+        body.append(
+            f"<td>{html.escape(fmt_ts(r['setup_time']))}</td>"
+        )
+
+        body.append(
+            f"<td class='{cls}'>{r['direction']}</td>"
+        )
+
+        body.append(
+            f"<td>{fmt_num(r['setup_price'], 2)}</td>"
+        )
+
+        body.append(
+            f"<td class='{status_cls}'>"
+            f"{html.escape(r['status'])}"
+            "</td>"
+        )
+
+        body.append(
+            f"<td>{fmt_ts(r['confirm_time'])}</td>"
+        )
+
+        body.append(
+            f"<td>{fmt_num(r['entry_price'], 2)}</td>"
+        )
+
+        if r["entry_time"]:
+            sl_display = r["position_sl"]
+        else:
+            sl_display = r["setup_sl"]
+
+        body.append(
+            f"<td>{fmt_num(sl_display, 2)}</td>"
+        )
+
+        body.append(
+            f"<td>{fmt_num(r['exit_price'], 2)}</td>"
+        )
+
+        body.append(
+            f"<td>{fmt_r(r['exit_r'])}</td>"
+        )
+
+        body.append(
+            f"<td>{fmt_r(max_display)}</td>"
+        )
+
+        body.append(
+            f"<td>{fmt_r(min_display)}</td>"
+        )
+
+        body.append(
+            f"<td>{fmt_r(r['trail_r'])}</td>"
+        )
+
+        body.append(
+            f"<td>{html.escape(r['exit_reason'] or '—')}</td>"
+        )
+
+        body.append("</tr>")
+
+    body.append("""
+    </tbody>
+    </table>
+    </div>
+
+    <script>
+    const KEY_X = 'btc_table_scroll_left';
+    const KEY_Y = 'btc_table_scroll_top';
+
+    const wrap = document.getElementById('tableWrap');
+
+    const savedX = sessionStorage.getItem(KEY_X);
+    const savedY = sessionStorage.getItem(KEY_Y);
+
+    if (savedX !== null) {
+        wrap.scrollLeft = parseInt(savedX, 10) || 0;
+    }
+
+    if (savedY !== null) {
+        wrap.scrollTop = parseInt(savedY, 10) || 0;
+    }
+
+    wrap.addEventListener('scroll', () => {
+        sessionStorage.setItem(
+            KEY_X,
+            String(wrap.scrollLeft)
+        );
+
+        sessionStorage.setItem(
+            KEY_Y,
+            String(wrap.scrollTop)
+        );
+    });
+
+    setTimeout(() => {
+        location.reload();
+    }, 10000);
+    </script>
+
+    </body>
+    </html>
+    """)
+
+    return "".join(body)
 
 
-# ============================================================
-# WEB SERVER
-# ============================================================
-
-class HealthHandler(
-    BaseHTTPRequestHandler
-):
+class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+        path = self.path.split("?")[0]
 
-        if self.path == "/health":
+        if path == "/health":
+            payload = {
+                "ok": True,
+                "last_update": state_get(
+                    "last_live_update"
+                ),
+                "error": state_get(
+                    "latest_error",
+                    ""
+                )
+            }
 
-            body = (
-                b"BTC MARKET ENGINE OK\n"
-            )
+            raw = json.dumps(
+                payload
+            ).encode()
 
-            self.send_response(
-                200
-            )
+            self.send_response(200)
 
             self.send_header(
                 "Content-Type",
-                "text/plain"
+                "application/json; charset=utf-8"
             )
 
             self.send_header(
                 "Content-Length",
-                str(len(body))
+                str(len(raw))
             )
 
             self.end_headers()
 
-            self.wfile.write(
-                body
-            )
+            self.wfile.write(raw)
 
             return
 
-        body = make_dashboard().encode(
+        raw = dashboard().encode(
             "utf-8"
         )
 
-        self.send_response(
-            200
-        )
+        self.send_response(200)
 
         self.send_header(
             "Content-Type",
@@ -2045,769 +1517,54 @@ class HealthHandler(
         )
 
         self.send_header(
+            "Cache-Control",
+            "no-store"
+        )
+
+        self.send_header(
             "Content-Length",
-            str(len(body))
+            str(len(raw))
         )
 
         self.end_headers()
 
-        self.wfile.write(
-            body
-        )
+        self.wfile.write(raw)
 
-    def log_message(
-        self,
-        format,
-        *args
-    ):
-
+    def log_message(self, *_):
         return
 
 
-def start_health_server():
-
-    server = HTTPServer(
-        (
-            "0.0.0.0",
-            PORT
-        ),
-        HealthHandler
-    )
-
-    log(
-        f"Health server listening "
-        f"on port {PORT}"
-    )
-
-    server.serve_forever()
-
-
-# ============================================================
-# ENGINE
-# ============================================================
-
 def engine_loop():
-
     init_db()
 
-    log(
-        "========================================"
-    )
-
-    log(
-        "BTC MARKET ENGINE"
-    )
-
-    log(
-        "MEXC FUTURES"
-    )
-
-    log(
-        "BTC_USDT"
-    )
-
-    log(
-        "PAPER / MARKET OBSERVATION ONLY"
-    )
-
-    log(
-        "NO REAL ORDERS"
-    )
-
-    log(
-        "========================================"
-    )
-
-    # --------------------------------------------------------
-    # Rebuild setup history from MEXC.
-    # --------------------------------------------------------
-
-    try:
-
-        rebuild_setup_history()
-
-    except Exception as exc:
-
-        error_trace = traceback.format_exc()
-
-        save_state(
-            "latest_error",
-            {
-                "time": datetime.now(
-                    timezone.utc
-                ).strftime(
-                    "%Y-%m-%d %H:%M:%S UTC"
-                ),
-                "type": type(exc).__name__,
-                "message": str(exc),
-                "traceback": error_trace
-            }
-        )
-
-        log(
-            "HISTORY REBUILD FAILED"
-        )
-
-        log(
-            error_trace
-        )
-
-    last_h1_setup_time = load_state(
-        "last_h1_setup_time",
-        0
-    )
-
-    last_confirmation_time = load_state(
-        "last_confirmation_time",
-        0
-    )
-
-    position = load_state(
-        "position",
-        None
-    )
+    rebuild_history()
 
     while True:
-
         try:
+            live_refresh()
 
-            h1 = get_klines(
-                "Min60",
-                H1_LIMIT
-            )
-
-            m15 = get_klines(
-                "Min15",
-                M15_LIMIT
-            )
-
-            m5 = get_klines(
-                "Min5",
-                M5_LIMIT
-            )
-
-            latest_price = (
-                m5[-1]["close"]
-            )
-
-            last_data_utc = (
-                datetime.now(
-                    timezone.utc
-                ).strftime(
-                    "%Y-%m-%d %H:%M:%S UTC"
-                )
-            )
-
-            save_state(
-                "latest_price",
-                latest_price
-            )
-
-            save_state(
-                "last_data_utc",
-                last_data_utc
-            )
-
-            save_state(
+        except Exception as e:
+            state_set(
                 "latest_error",
-                None
+                repr(e)
             )
 
-            log(
-                f"DATA OK | "
-                f"H1={len(h1)} "
-                f"M15={len(m15)} "
-                f"M5={len(m5)} "
-                f"BTC={latest_price}"
-            )
+        time.sleep(
+            POLL_SECONDS
+        )
 
-            # =================================================
-            # POSITION MANAGEMENT
-            # =================================================
-
-            if position is not None:
-
-                old_position = position
-
-                position = update_position(
-                    position,
-                    m5,
-                    m15
-                )
-
-                if (
-                    old_position is not None
-                    and position is None
-                ):
-
-                    setup_rows = (
-                        get_setup_rows(30)
-                    )
-
-                    for row in setup_rows:
-
-                        if (
-                            row[6] is not None
-                            and abs(
-                                row[6]
-                                - old_position[
-                                    "entry"
-                                ]
-                            ) < 0.01
-                            and row[7] is None
-                        ):
-
-                            exit_price = (
-                                old_position[
-                                    "stop"
-                                ]
-                            )
-
-                            if (
-                                old_position[
-                                    "direction"
-                                ]
-                                == "LONG"
-                            ):
-
-                                exit_r = (
-                                    exit_price
-                                    - old_position[
-                                        "entry"
-                                    ]
-                                ) / old_position[
-                                    "risk"
-                                ]
-
-                            else:
-
-                                exit_r = (
-                                    old_position[
-                                        "entry"
-                                    ]
-                                    - exit_price
-                                ) / old_position[
-                                    "risk"
-                                ]
-
-                            update_setup_record(
-                                row[0],
-                                exit_time=int(
-                                    time.time()
-                                ),
-                                exit_price=exit_price,
-                                exit_r=exit_r
-                            )
-
-                            break
-
-                save_state(
-                    "position",
-                    position
-                )
-
-            # =================================================
-            # NEW H1 SETUP
-            # =================================================
-
-            setup = detect_h1_setup(
-                h1
-            )
-
-            if (
-                setup is not None
-                and setup["time"]
-                > last_h1_setup_time
-            ):
-
-                last_h1_setup_time = (
-                    setup["time"]
-                )
-
-                save_state(
-                    "last_h1_setup_time",
-                    last_h1_setup_time
-                )
-
-                upsert_setup(
-                    setup
-                )
-
-                stop = structural_stop(
-                    m15,
-                    setup["direction"]
-                )
-
-                risk = (
-                    abs(
-                        setup["price"]
-                        - stop
-                    )
-                    if stop is not None
-                    else None
-                )
-
-                if (
-                    stop is not None
-                    and risk is not None
-                    and risk > 0
-                ):
-
-                    if (
-                        setup["direction"]
-                        == "LONG"
-                    ):
-
-                        initial_trailing_r = (
-                            stop
-                            - setup["price"]
-                        ) / risk
-
-                    else:
-
-                        initial_trailing_r = (
-                            setup["price"]
-                            - stop
-                        ) / risk
-
-                else:
-
-                    initial_trailing_r = None
-
-                update_setup_record(
-                    setup["time"],
-                    stop=stop,
-                    risk=risk,
-                    max_r=0.0,
-                    min_r=0.0,
-                    trailing_stop=stop,
-                    trailing_r=initial_trailing_r
-                )
-
-                log_event(
-                    "H1_SETUP",
-                    setup["direction"],
-                    setup["price"],
-                    stop,
-                    risk,
-                    details="H1 setup detected"
-                )
-
-            # =================================================
-            # CHECK ALL PENDING SETUPS
-            # =================================================
-
-            setup_rows = (
-                get_setup_rows(30)
-            )
-
-            if (
-                setup_rows
-                and position is None
-            ):
-
-                for row in setup_rows:
-
-                    (
-                        setup_time,
-                        direction,
-                        setup_price,
-                        status,
-                        confirmation_time,
-                        entry_time,
-                        entry_price,
-                        exit_time,
-                        exit_price,
-                        exit_r,
-                        stop,
-                        risk,
-                        max_r,
-                        min_r,
-                        trailing_active,
-                        trailing_stop,
-                        trailing_r
-                    ) = row
-
-                    if status == "POTWIERDZONY":
-
-                        continue
-
-                    confirmation = (
-                        confirm_m15(
-                            m15,
-                            direction,
-                            setup_time
-                        )
-                    )
-
-                    if confirmation is None:
-
-                        continue
-
-                    confirmation_time_now = (
-                        confirmation["time"]
-                    )
-
-                    if (
-                        confirmation_time_now
-                        <= last_confirmation_time
-                    ):
-
-                        continue
-
-                    last_confirmation_time = (
-                        confirmation_time_now
-                    )
-
-                    save_state(
-                        "last_confirmation_time",
-                        last_confirmation_time
-                    )
-
-                    update_setup_record(
-                        setup_time,
-                        status="POTWIERDZONY",
-                        confirmation_time=(
-                            confirmation_time_now
-                        )
-                    )
-
-                    log_event(
-                        "M15_CONFIRMATION",
-                        direction,
-                        details="M15 confirmation"
-                    )
-
-                    trigger = trigger_m5(
-                        m5,
-                        direction,
-                        confirmation_time_now
-                    )
-
-                    if trigger is None:
-
-                        continue
-
-                    entry_stop = (
-                        structural_stop(
-                            m15,
-                            direction
-                        )
-                    )
-
-                    if entry_stop is None:
-
-                        continue
-
-                    new_position = (
-                        create_position(
-                            direction,
-                            trigger["entry"],
-                            entry_stop
-                        )
-                    )
-
-                    if new_position is None:
-
-                        continue
-
-                    position = new_position
-
-                    update_setup_record(
-                        setup_time,
-                        entry_time=(
-                            trigger[
-                                "entry_time"
-                            ]
-                        ),
-                        entry_price=(
-                            trigger[
-                                "entry"
-                            ]
-                        ),
-                        stop=entry_stop,
-                        risk=(
-                            new_position[
-                                "risk"
-                            ]
-                        )
-                    )
-
-                    log_event(
-                        "ENTRY",
-                        position[
-                            "direction"
-                        ],
-                        position[
-                            "entry"
-                        ],
-                        position[
-                            "stop"
-                        ],
-                        position[
-                            "risk"
-                        ],
-                        0.0,
-                        0.0,
-                        "M5 trigger / next candle open"
-                    )
-
-                    save_state(
-                        "position",
-                        position
-                    )
-
-                    break
-
-            # =================================================
-            # LIVE UPDATE OF ALL SETUP DIAGNOSTICS
-            # =================================================
-
-            setup_rows = (
-                get_setup_rows(30)
-            )
-
-            for row in setup_rows:
-
-                (
-                    setup_time,
-                    direction,
-                    setup_price,
-                    status,
-                    confirmation_time,
-                    entry_time,
-                    entry_price,
-                    exit_time,
-                    exit_price,
-                    exit_r,
-                    stop,
-                    risk,
-                    max_r,
-                    min_r,
-                    trailing_active,
-                    trailing_stop,
-                    trailing_r
-                ) = row
-
-                if (
-                    risk is None
-                    or risk <= 0
-                ):
-
-                    continue
-
-                live_max_r = (
-                    max_r
-                    if max_r is not None
-                    else 0.0
-                )
-
-                live_min_r = (
-                    min_r
-                    if min_r is not None
-                    else 0.0
-                )
-
-                for candle in (
-                    closed_candles(m5)
-                ):
-
-                    if (
-                        candle["ts"]
-                        <= setup_time
-                    ):
-
-                        continue
-
-                    if direction == "LONG":
-
-                        favorable = (
-                            candle["high"]
-                            - setup_price
-                        ) / risk
-
-                        adverse = (
-                            candle["low"]
-                            - setup_price
-                        ) / risk
-
-                    else:
-
-                        favorable = (
-                            setup_price
-                            - candle["low"]
-                        ) / risk
-
-                        adverse = (
-                            setup_price
-                            - candle["high"]
-                        ) / risk
-
-                    live_max_r = max(
-                        live_max_r,
-                        favorable
-                    )
-
-                    live_min_r = min(
-                        live_min_r,
-                        adverse
-                    )
-
-                trailing_active_live = (
-                    live_max_r
-                    > TRAIL_ACTIVATION_R
-                )
-
-                live_trailing_stop = (
-                    trailing_stop
-                )
-
-                live_trailing_r = (
-                    trailing_r
-                )
-
-                if trailing_active_live:
-
-                    rows15 = (
-                        closed_candles(m15)
-                    )
-
-                    if len(rows15) >= 3:
-
-                        if (
-                            direction
-                            == "LONG"
-                        ):
-
-                            new_stop = min(
-                                x["low"]
-                                for x in rows15[-3:]
-                            )
-
-                            if (
-                                live_trailing_stop
-                                is None
-                                or new_stop
-                                > live_trailing_stop
-                            ):
-
-                                live_trailing_stop = (
-                                    new_stop
-                                )
-
-                        else:
-
-                            new_stop = max(
-                                x["high"]
-                                for x in rows15[-3:]
-                            )
-
-                            if (
-                                live_trailing_stop
-                                is None
-                                or new_stop
-                                < live_trailing_stop
-                            ):
-
-                                live_trailing_stop = (
-                                    new_stop
-                                )
-
-                if (
-                    live_trailing_stop
-                    is not None
-                ):
-
-                    if (
-                        direction
-                        == "LONG"
-                    ):
-
-                        live_trailing_r = (
-                            live_trailing_stop
-                            - setup_price
-                        ) / risk
-
-                    else:
-
-                        live_trailing_r = (
-                            setup_price
-                            - live_trailing_stop
-                        ) / risk
-
-                update_setup_record(
-                    setup_time,
-                    max_r=live_max_r,
-                    min_r=live_min_r,
-                    trailing_active=(
-                        1
-                        if trailing_active_live
-                        else 0
-                    ),
-                    trailing_stop=(
-                        live_trailing_stop
-                    ),
-                    trailing_r=(
-                        live_trailing_r
-                    )
-                )
-
-            time.sleep(
-                POLL_SECONDS
-            )
-
-        except Exception as exc:
-
-            error_trace = (
-                traceback.format_exc()
-            )
-
-            latest_error = {
-                "time": datetime.now(
-                    timezone.utc
-                ).strftime(
-                    "%Y-%m-%d %H:%M:%S UTC"
-                ),
-                "type": type(exc).__name__,
-                "message": str(exc),
-                "traceback": error_trace
-            }
-
-            try:
-
-                save_state(
-                    "latest_error",
-                    latest_error
-                )
-
-            except Exception:
-
-                pass
-
-            log(
-                f"ENGINE ERROR: "
-                f"{type(exc).__name__}: "
-                f"{exc}"
-            )
-
-            time.sleep(
-                POLL_SECONDS
-            )
-
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
-
     init_db()
 
-    health_thread = threading.Thread(
-        target=start_health_server,
+    t = threading.Thread(
+        target=engine_loop,
         daemon=True
     )
 
-    health_thread.start()
+    t.start()
 
-    engine_loop()
+    HTTPServer(
+        ("0.0.0.0", PORT),
+        Handler
+    ).serve_forever()
