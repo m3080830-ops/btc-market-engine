@@ -2724,7 +2724,7 @@ function activateTab(
         );
     }
 
-    sessionStorage.setItem(
+    localStorage.setItem(
         activeTabKey,
         name
     );
@@ -2752,7 +2752,7 @@ bindScroll(
 
 
 const savedTab =
-    sessionStorage.getItem(
+    localStorage.getItem(
         activeTabKey
     );
 
