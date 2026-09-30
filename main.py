@@ -2804,7 +2804,7 @@ def dashboard():
 
 <button
     id="confirmedTab"
-    class="tab active"
+    class="tab"
     onclick="setTab('confirmed')"
 >
 POTWIERDZONE
