@@ -10,20 +10,11 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
-# ============================================================
-# CONFIG
-# ============================================================
-
 SYMBOL = "BTC_USDT"
 BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
-TICKER_URL = "https://api.mexc.com/api/v1/contract/ticker"
 
 POLL_SECONDS = 30
-DASHBOARD_REFRESH_SECONDS = 10
-
 DB_FILE = "/tmp/market_history.db"
-
-PORT = int(os.environ.get("PORT", "3000"))
 
 TRAIL_ACTIVATION_R = 1.0
 
@@ -31,104 +22,62 @@ H1_HISTORY = 200
 M15_HISTORY = 2000
 M5_HISTORY = 2000
 
+PORT = int(os.environ.get("PORT", "3000"))
+
 M15_CONFIRM_CANDLES = 16
 M5_ENTRY_CANDLES = 8
 
-MAX_SETUP_ROWS = 200
-
-
-# ============================================================
-# BASIC HELPERS
-# ============================================================
 
 def now_ts():
     return int(time.time())
 
 
 def fmt_ts(ts):
-    if ts is None:
+    if not ts:
         return "—"
 
-    try:
-        return datetime.fromtimestamp(
-            int(ts),
-            tz=timezone.utc
-        ).strftime("%Y-%m-%d %H:%M UTC")
-    except Exception:
+    return datetime.fromtimestamp(
+        int(ts),
+        tz=timezone.utc
+    ).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def fmt_num(v, d=2):
+    if v is None:
         return "—"
 
+    return f"{float(v):,.{d}f}"
 
-def fmt_num(value, digits=2):
-    if value is None:
+
+def fmt_r(v):
+    if v is None:
         return "—"
 
-    try:
-        return f"{float(value):,.{digits}f}"
-    except Exception:
-        return "—"
+    return f"{float(v):+.2f}R"
 
-
-def fmt_r(value):
-    if value is None:
-        return "—"
-
-    try:
-        return f"{float(value):+.2f}R"
-    except Exception:
-        return "—"
-
-
-def safe_float(value):
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
-# ============================================================
-# DATABASE
-# ============================================================
 
 def db_conn():
-    conn = sqlite3.connect(
+    c = sqlite3.connect(
         DB_FILE,
         timeout=30
     )
 
-    conn.row_factory = sqlite3.Row
+    c.row_factory = sqlite3.Row
 
-    return conn
-
-
-def column_exists(conn, table, column):
-    rows = conn.execute(
-        f"PRAGMA table_info({table})"
-    ).fetchall()
-
-    return any(
-        row["name"] == column
-        for row in rows
-    )
-
-
-def add_column_if_missing(conn, table, column, definition):
-    if not column_exists(conn, table, column):
-        conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-        )
+    return c
 
 
 def init_db():
-    with db_conn() as conn:
 
-        conn.execute("""
+    with db_conn() as c:
+
+        c.execute("""
         CREATE TABLE IF NOT EXISTS setups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-
             setup_time INTEGER NOT NULL UNIQUE,
             direction TEXT NOT NULL,
             setup_price REAL NOT NULL,
-
+            setup_sl REAL,
             status TEXT NOT NULL DEFAULT 'NIEPOTWIERDZONY',
 
             confirm_time INTEGER,
@@ -137,7 +86,6 @@ def init_db():
             entry_time INTEGER,
             entry_price REAL,
 
-            setup_sl REAL,
             position_sl REAL,
 
             exit_time INTEGER,
@@ -145,89 +93,45 @@ def init_db():
             exit_reason TEXT,
             exit_r REAL,
 
-            setup_current_r REAL,
             setup_max_r REAL,
             setup_min_r REAL,
 
-            position_current_r REAL,
             position_max_r REAL,
             position_min_r REAL,
 
             trail_r REAL,
 
-            first_event TEXT,
-            first_event_time INTEGER,
-
             last_update INTEGER NOT NULL DEFAULT 0
         )
         """)
 
-        conn.execute("""
+        c.execute("""
         CREATE TABLE IF NOT EXISTS state (
             key TEXT PRIMARY KEY,
             value TEXT
         )
         """)
 
-        # ----------------------------------------------------
-        # Migration for older databases
-        # ----------------------------------------------------
-
-        migrations = [
-            ("status", "TEXT DEFAULT 'NIEPOTWIERDZONY'"),
-            ("confirm_time", "INTEGER"),
-            ("confirm_price", "REAL"),
-            ("entry_time", "INTEGER"),
-            ("entry_price", "REAL"),
-            ("setup_sl", "REAL"),
-            ("position_sl", "REAL"),
-            ("exit_time", "INTEGER"),
-            ("exit_price", "REAL"),
-            ("exit_reason", "TEXT"),
-            ("exit_r", "REAL"),
-            ("setup_current_r", "REAL"),
-            ("setup_max_r", "REAL"),
-            ("setup_min_r", "REAL"),
-            ("position_current_r", "REAL"),
-            ("position_max_r", "REAL"),
-            ("position_min_r", "REAL"),
-            ("trail_r", "REAL"),
-            ("first_event", "TEXT"),
-            ("first_event_time", "INTEGER"),
-            ("last_update", "INTEGER DEFAULT 0"),
-        ]
-
-        for column, definition in migrations:
-            add_column_if_missing(
-                conn,
-                "setups",
-                column,
-                definition
-            )
-
-        conn.commit()
+        c.commit()
 
 
 def state_get(key, default=None):
-    with db_conn() as conn:
-        row = conn.execute(
-            """
-            SELECT value
-            FROM state
-            WHERE key=?
-            """,
+
+    with db_conn() as c:
+
+        row = c.execute(
+            "SELECT value FROM state WHERE key=?",
             (key,)
         ).fetchone()
 
-    if row is None:
-        return default
-
-    return row["value"]
+        return row[0] if row else default
 
 
 def state_set(key, value):
-    with db_conn() as conn:
-        conn.execute(
+
+    with db_conn() as c:
+
+        c.execute(
             """
             INSERT OR REPLACE INTO state(key,value)
             VALUES(?,?)
@@ -238,15 +142,12 @@ def state_set(key, value):
             )
         )
 
-        conn.commit()
+        c.commit()
 
-
-# ============================================================
-# HTTP / MEXC
-# ============================================================
 
 def api_get(url):
-    request = urllib.request.Request(
+
+    req = urllib.request.Request(
         url,
         headers={
             "User-Agent": "btc-market-engine/1.0"
@@ -254,24 +155,21 @@ def api_get(url):
     )
 
     with urllib.request.urlopen(
-        request,
+        req,
         timeout=15
-    ) as response:
+    ) as r:
 
-        raw = response.read().decode(
-            "utf-8"
+        return json.loads(
+            r.read().decode()
         )
-
-        return json.loads(raw)
 
 
 def parse_klines(payload):
-    if not isinstance(payload, dict):
-        return []
 
-    data = payload.get(
-        "data",
-        payload
+    data = (
+        payload.get("data", payload)
+        if isinstance(payload, dict)
+        else payload
     )
 
     if not isinstance(data, dict):
@@ -287,18 +185,19 @@ def parse_klines(payload):
         [0] * len(times)
     )
 
-    length = min(
-        len(times),
-        len(opens),
-        len(closes),
-        len(highs),
-        len(lows)
-    )
+    out = []
 
-    rows = []
+    for i in range(
+        min(
+            len(times),
+            len(opens),
+            len(closes),
+            len(highs),
+            len(lows)
+        )
+    ):
 
-    for i in range(length):
-        rows.append({
+        out.append({
             "time": int(times[i]),
             "open": float(opens[i]),
             "close": float(closes[i]),
@@ -311,44 +210,51 @@ def parse_klines(payload):
             )
         })
 
-    rows.sort(
+    return sorted(
+        out,
         key=lambda x: x["time"]
     )
 
-    return rows
 
+def get_klines(
+    interval,
+    total,
+    end_ts=None
+):
 
-def get_klines(interval, total):
     total = min(
         int(total),
         12000
     )
 
-    all_rows = []
+    result = []
 
-    end = now_ts()
+    end = (
+        int(end_ts)
+        if end_ts is not None
+        else now_ts()
+    )
 
     pages = 0
 
     while (
-        len(all_rows) < total
+        len(result) < total
         and pages < 20
     ):
 
         limit = min(
             2000,
-            total - len(all_rows)
+            total - len(result)
         )
 
-        query = urllib.parse.urlencode({
+        qs = urllib.parse.urlencode({
             "interval": interval,
             "limit": limit,
             "end": end
         })
 
         url = (
-            f"{BASE_URL}/{SYMBOL}"
-            f"?{query}"
+            f"{BASE_URL}/{SYMBOL}?{qs}"
         )
 
         page = parse_klines(
@@ -358,11 +264,11 @@ def get_klines(interval, total):
         if not page:
             break
 
-        all_rows.extend(page)
+        result.extend(page)
 
         oldest = min(
-            row["time"]
-            for row in page
+            x["time"]
+            for x in page
         )
 
         if len(page) < limit:
@@ -373,160 +279,100 @@ def get_klines(interval, total):
         pages += 1
 
     unique = {
-        row["time"]: row
-        for row in all_rows
+        x["time"]: x
+        for x in result
     }
 
-    result = sorted(
+    return sorted(
         unique.values(),
         key=lambda x: x["time"]
-    )
+    )[-total:]
 
-    return result[-total:]
-
-
-def get_current_btc_price():
-    query = urllib.parse.urlencode({
-        "symbol": SYMBOL
-    })
-
-    url = (
-        f"{TICKER_URL}?{query}"
-    )
-
-    try:
-        payload = api_get(url)
-
-        data = payload.get(
-            "data",
-            payload
-        )
-
-        if isinstance(data, list):
-            if not data:
-                return None
-
-            data = data[0]
-
-        if not isinstance(data, dict):
-            return None
-
-        for key in (
-            "lastPrice",
-            "last",
-            "price"
-        ):
-            if key in data:
-                value = safe_float(
-                    data[key]
-                )
-
-                if value is not None:
-                    return value
-
-    except Exception:
-        pass
-
-    return None
-
-
-# ============================================================
-# INDICATORS
-# ============================================================
 
 def closed(rows):
-    if len(rows) <= 1:
-        return []
 
-    return rows[:-1]
+    return (
+        rows[:-1]
+        if len(rows) > 1
+        else []
+    )
 
 
 def ema(values, period):
+
     if not values:
         return []
 
-    multiplier = (
-        2.0 /
-        (period + 1)
-    )
+    k = 2.0 / (period + 1)
 
-    result = [
-        float(values[0])
-    ]
+    out = [values[0]]
 
     for value in values[1:]:
-        result.append(
-            float(value) *
-            multiplier
-            +
-            result[-1] *
-            (1 - multiplier)
+
+        out.append(
+            value * k
+            + out[-1] * (1 - k)
         )
 
-    return result
+    return out
 
 
 def atr(rows, period=14):
+
     if not rows:
         return []
 
-    true_ranges = []
+    tr = []
 
-    previous_close = rows[0]["close"]
+    prev = rows[0]["close"]
 
     for row in rows:
-        tr = max(
-            row["high"] - row["low"],
-            abs(
-                row["high"] -
-                previous_close
-            ),
-            abs(
-                row["low"] -
-                previous_close
+
+        tr.append(
+            max(
+                row["high"] - row["low"],
+                abs(row["high"] - prev),
+                abs(row["low"] - prev)
             )
         )
 
-        true_ranges.append(tr)
+        prev = row["close"]
 
-        previous_close = row["close"]
+    out = []
 
-    result = []
+    for i in range(len(tr)):
 
-    for i in range(
-        len(true_ranges)
-    ):
+        if i < period:
 
-        start = max(
-            0,
-            i - period + 1
-        )
+            out.append(
+                sum(tr[:i + 1])
+                / (i + 1)
+            )
 
-        window = true_ranges[
-            start:i + 1
-        ]
+        else:
 
-        result.append(
-            sum(window) /
-            len(window)
-        )
+            out.append(
+                sum(
+                    tr[
+                        i - period + 1:
+                        i + 1
+                    ]
+                ) / period
+            )
 
-    return result
+    return out
 
 
-# ============================================================
-# H1 SETUPS
-# ============================================================
+def h1_setup(rows):
 
-def find_h1_setups(rows):
     r = closed(rows)
 
     if len(r) < 60:
-        return []
+        return None
 
     closes = [
-        row["close"]
-        for row in r
+        x["close"]
+        for x in r
     ]
 
     e20 = ema(
@@ -539,159 +385,193 @@ def find_h1_setups(rows):
         50
     )
 
-    setups = []
+    i = len(r) - 1
+
+    if i < 11:
+        return None
+
+    prev_close_5 = r[i - 5]["close"]
+
+    prev_high_10 = max(
+        x["high"]
+        for x in r[i - 10:i]
+    )
+
+    prev_low_10 = min(
+        x["low"]
+        for x in r[i - 10:i]
+    )
+
+    cur = r[i]
+
+    if (
+        prev_close_5 < e50[i - 5]
+        and cur["close"] > prev_high_10
+        and cur["close"] > e20[i]
+        and e20[i] > e20[i - 1]
+    ):
+
+        return {
+            "time": cur["time"],
+            "direction": "LONG",
+            "price": cur["close"]
+        }
+
+    if (
+        prev_close_5 > e50[i - 5]
+        and cur["close"] < prev_low_10
+        and cur["close"] < e20[i]
+        and e20[i] < e20[i - 1]
+    ):
+
+        return {
+            "time": cur["time"],
+            "direction": "SHORT",
+            "price": cur["close"]
+        }
+
+    return None
+
+
+def find_h1_setups(rows):
+
+    r = closed(rows)
+
+    if len(r) < 60:
+        return []
+
+    closes = [
+        x["close"]
+        for x in r
+    ]
+
+    e20 = ema(
+        closes,
+        20
+    )
+
+    e50 = ema(
+        closes,
+        50
+    )
+
+    out = []
 
     for i in range(
         11,
         len(r)
     ):
 
-        current = r[i]
+        cur = r[i]
 
-        previous_close_5 = (
-            r[i - 5]["close"]
+        prev_close_5 = r[i - 5]["close"]
+
+        prev_high_10 = max(
+            x["high"]
+            for x in r[i - 10:i]
         )
 
-        previous_high_10 = max(
-            row["high"]
-            for row in r[i - 10:i]
-        )
-
-        previous_low_10 = min(
-            row["low"]
-            for row in r[i - 10:i]
+        prev_low_10 = min(
+            x["low"]
+            for x in r[i - 10:i]
         )
 
         direction = None
 
         if (
-            previous_close_5
-            < e50[i - 5]
-
-            and current["close"]
-            > previous_high_10
-
-            and current["close"]
-            > e20[i]
-
-            and e20[i]
-            > e20[i - 1]
+            prev_close_5 < e50[i - 5]
+            and cur["close"] > prev_high_10
+            and cur["close"] > e20[i]
+            and e20[i] > e20[i - 1]
         ):
+
             direction = "LONG"
 
         elif (
-            previous_close_5
-            > e50[i - 5]
-
-            and current["close"]
-            < previous_low_10
-
-            and current["close"]
-            < e20[i]
-
-            and e20[i]
-            < e20[i - 1]
+            prev_close_5 > e50[i - 5]
+            and cur["close"] < prev_low_10
+            and cur["close"] < e20[i]
+            and e20[i] < e20[i - 1]
         ):
+
             direction = "SHORT"
 
         if direction:
-            setups.append({
-                "time": current["time"],
+
+            out.append({
+                "time": cur["time"],
                 "direction": direction,
-                "price": current["close"]
+                "price": cur["close"]
             })
 
-    return setups
+    return out
 
-
-def latest_h1_setup(rows):
-    setups = find_h1_setups(rows)
-
-    if not setups:
-        return None
-
-    return setups[-1]
-
-
-# ============================================================
-# STRUCTURAL SL
-# ============================================================
 
 def structural_sl(
     m15_rows,
     direction,
     end_time=None
 ):
+
     r = closed(m15_rows)
 
     if end_time is not None:
+
         r = [
-            row for row in r
-            if row["time"] <= end_time
+            x
+            for x in r
+            if x["time"] <= end_time
         ]
 
     if len(r) < 20:
         return None
 
-    values = atr(
+    a = atr(
         r,
         14
-    )
-
-    if not values:
-        return None
-
-    current_atr = values[-1]
+    )[-1]
 
     last6 = r[-6:]
 
     if direction == "LONG":
+
         return (
             min(
-                row["low"]
-                for row in last6
+                x["low"]
+                for x in last6
             )
-            -
-            current_atr * 0.2
+            - a * 0.2
         )
 
     return (
         max(
-            row["high"]
-            for row in last6
+            x["high"]
+            for x in last6
         )
-        +
-        current_atr * 0.2
+        + a * 0.2
     )
 
 
-# ============================================================
-# M15 CONFIRMATION
-# ============================================================
-
-def confirm_m15(
+def m15_diagnostics(
     m15_rows,
     setup
 ):
+
     r = closed(m15_rows)
 
-    candidates = [
-        row for row in r
-        if row["time"] > setup["time"]
+    after = [
+        x
+        for x in r
+        if x["time"] > setup["time"]
     ]
 
-    # CRITICAL:
-    # only the FIRST 16 candles after THIS setup
-    candidates = candidates[
+    candidates = after[
         :M15_CONFIRM_CANDLES
     ]
 
-    if not candidates:
-        return None
-
     closes = [
-        row["close"]
-        for row in r
+        x["close"]
+        for x in r
     ]
 
     e20 = ema(
@@ -699,101 +579,265 @@ def confirm_m15(
         20
     )
 
-    index_by_time = {
-        row["time"]: i
-        for i, row in enumerate(r)
+    by_time = {
+        x["time"]: i
+        for i, x in enumerate(r)
     }
 
-    for candle in candidates:
+    out = []
 
-        i = index_by_time[
-            candle["time"]
-        ]
+    for n, c in enumerate(
+        candidates,
+        1
+    ):
 
-        if i < 5:
+        i = by_time.get(
+            c["time"]
+        )
+
+        if i is None or i < 5:
+
+            out.append({
+                "n": n,
+                "time": c["time"],
+                "sweep": False,
+                "ema": False,
+                "breakout": False,
+                "candle": False,
+                "confirm": False
+            })
+
             continue
 
         high5 = max(
-            row["high"]
-            for row in r[i - 5:i]
+            x["high"]
+            for x in r[i - 5:i]
         )
 
         low5 = min(
-            row["low"]
-            for row in r[i - 5:i]
+            x["low"]
+            for x in r[i - 5:i]
         )
 
         if setup["direction"] == "LONG":
 
-            if (
-                candle["low"]
-                <= e20[i]
+            sweep = (
+                c["low"] <= e20[i]
+            )
 
-                and candle["close"]
-                > e20[i]
+            ema_ok = (
+                c["close"] > e20[i]
+            )
 
-                and candle["close"]
-                > high5
+            breakout = (
+                c["close"] > high5
+            )
 
-                and candle["close"]
-                > candle["open"]
-            ):
-                return {
-                    "time": candle["time"],
-                    "price": candle["close"]
-                }
+            candle = (
+                c["close"] > c["open"]
+            )
 
         else:
 
-            if (
-                candle["high"]
-                >= e20[i]
+            sweep = (
+                c["high"] >= e20[i]
+            )
 
-                and candle["close"]
-                < e20[i]
+            ema_ok = (
+                c["close"] < e20[i]
+            )
 
-                and candle["close"]
-                < low5
+            breakout = (
+                c["close"] < low5
+            )
 
-                and candle["close"]
-                < candle["open"]
-            ):
-                return {
-                    "time": candle["time"],
-                    "price": candle["close"]
-                }
+            candle = (
+                c["close"] < c["open"]
+            )
+
+        out.append({
+            "n": n,
+            "time": c["time"],
+            "sweep": bool(sweep),
+            "ema": bool(ema_ok),
+            "breakout": bool(breakout),
+            "candle": bool(candle),
+            "confirm": bool(
+                sweep
+                and ema_ok
+                and breakout
+                and candle
+            ),
+            "open": c["open"],
+            "close": c["close"],
+            "high": c["high"],
+            "low": c["low"],
+            "ema20": e20[i]
+        })
+
+    return out
+
+
+def confirm_m15(
+    m15_rows,
+    setup
+):
+
+    diagnostics = m15_diagnostics(
+        m15_rows,
+        setup
+    )
+
+    for row in diagnostics:
+
+        if row["confirm"]:
+
+            return {
+                "time": row["time"],
+                "price": row["close"]
+            }
 
     return None
 
 
-# ============================================================
-# M5 ENTRY
-# ============================================================
+def m5_diagnostics(
+    m5_rows,
+    setup,
+    confirmation
+):
+
+    r = closed(m5_rows)
+
+    after = [
+        x
+        for x in r
+        if x["time"] > confirmation["time"]
+    ]
+
+    candidates = after[
+        :M5_ENTRY_CANDLES
+    ]
+
+    closes = [
+        x["close"]
+        for x in r
+    ]
+
+    e20 = ema(
+        closes,
+        20
+    )
+
+    by_time = {
+        x["time"]: i
+        for i, x in enumerate(r)
+    }
+
+    out = []
+
+    for n, c in enumerate(
+        candidates,
+        1
+    ):
+
+        i = by_time.get(
+            c["time"]
+        )
+
+        if i is None or i < 3:
+
+            out.append({
+                "n": n,
+                "time": c["time"],
+                "breakout": False,
+                "ema": False,
+                "candle": False,
+                "entry": False
+            })
+
+            continue
+
+        high3 = max(
+            x["high"]
+            for x in r[i - 3:i]
+        )
+
+        low3 = min(
+            x["low"]
+            for x in r[i - 3:i]
+        )
+
+        if setup["direction"] == "LONG":
+
+            breakout = (
+                c["close"] > high3
+            )
+
+            ema_ok = (
+                c["close"] > e20[i]
+            )
+
+            candle = (
+                c["close"] > c["open"]
+            )
+
+        else:
+
+            breakout = (
+                c["close"] < low3
+            )
+
+            ema_ok = (
+                c["close"] < e20[i]
+            )
+
+            candle = (
+                c["close"] < c["open"]
+            )
+
+        out.append({
+            "n": n,
+            "time": c["time"],
+            "breakout": bool(breakout),
+            "ema": bool(ema_ok),
+            "candle": bool(candle),
+            "entry": bool(
+                breakout
+                and ema_ok
+                and candle
+                and i + 1 < len(r)
+            ),
+            "open": c["open"],
+            "close": c["close"],
+            "high": c["high"],
+            "low": c["low"],
+            "ema20": e20[i]
+        })
+
+    return out
+
 
 def find_m5_entry(
     m5_rows,
     setup,
     confirmation
 ):
+
     r = closed(m5_rows)
 
-    candidates = [
-        row for row in r
-        if row["time"]
-        > confirmation["time"]
+    after = [
+        x
+        for x in r
+        if x["time"] > confirmation["time"]
     ]
 
-    # FIRST 8 candles after confirmation
-    candidates = candidates[
+    candidates = after[
         :M5_ENTRY_CANDLES
     ]
 
-    if not candidates:
-        return None
-
     closes = [
-        row["close"]
-        for row in r
+        x["close"]
+        for x in r
     ]
 
     e20 = ema(
@@ -801,80 +845,56 @@ def find_m5_entry(
         20
     )
 
-    index_by_time = {
-        row["time"]: i
-        for i, row in enumerate(r)
+    by_time = {
+        x["time"]: i
+        for i, x in enumerate(r)
     }
 
-    for candle in candidates:
+    for c in candidates:
 
-        i = index_by_time[
-            candle["time"]
+        i = by_time[
+            c["time"]
         ]
 
         if i < 3:
             continue
 
         high3 = max(
-            row["high"]
-            for row in r[i - 3:i]
+            x["high"]
+            for x in r[i - 3:i]
         )
 
         low3 = min(
-            row["low"]
-            for row in r[i - 3:i]
+            x["low"]
+            for x in r[i - 3:i]
         )
 
         if setup["direction"] == "LONG":
 
-            valid = (
-                candle["close"]
-                > high3
-
-                and candle["close"]
-                > e20[i]
-
-                and candle["close"]
-                > candle["open"]
+            ok = (
+                c["close"] > high3
+                and c["close"] > e20[i]
+                and c["close"] > c["open"]
             )
 
         else:
 
-            valid = (
-                candle["close"]
-                < low3
-
-                and candle["close"]
-                < e20[i]
-
-                and candle["close"]
-                < candle["open"]
+            ok = (
+                c["close"] < low3
+                and c["close"] < e20[i]
+                and c["close"] < c["open"]
             )
 
-        if not valid:
-            continue
+        if ok and i + 1 < len(r):
 
-        next_index = i + 1
-
-        if next_index >= len(r):
-            return None
-
-        next_candle = r[
-            next_index
-        ]
-
-        return {
-            "signal_time": candle["time"],
-            "time": next_candle["time"],
-            "price": next_candle["open"]
-        }
+            return {
+                "signal_time": c["time"],
+                "time": r[i + 1]["time"],
+                "price": r[i + 1]["open"]
+            }
 
     return None
 
-
-# ============================================================
-# R CALCULATION
-# ============================================================
 
 def r_value(
     direction,
@@ -882,337 +902,69 @@ def r_value(
     sl,
     price
 ):
-    if (
-        entry is None
-        or sl is None
-        or price is None
-    ):
-        return None
 
     risk = abs(
-        float(entry) -
-        float(sl)
+        entry - sl
     )
 
     if risk <= 0:
-        return None
+        return 0.0
 
     if direction == "LONG":
+
         return (
-            float(price) -
-            float(entry)
+            price - entry
         ) / risk
 
     return (
-        float(entry) -
-        float(price)
+        entry - price
     ) / risk
 
 
-def candle_r_range(
+def excursion(
+    rows,
+    start_time,
     direction,
     entry,
-    sl,
-    candle
-):
-    high_r = r_value(
-        direction,
-        entry,
-        sl,
-        candle["high"]
-    )
-
-    low_r = r_value(
-        direction,
-        entry,
-        sl,
-        candle["low"]
-    )
-
-    return high_r, low_r
-
-
-# ============================================================
-# SETUP OBSERVATION
-# ============================================================
-
-def calculate_setup_observation(
-    m5_rows,
-    setup,
     sl
 ):
-    if sl is None:
-        return {
-            "current": None,
-            "max": None,
-            "min": None
-        }
 
-    candles = [
-        row for row in closed(m5_rows)
-        if row["time"] >= setup["time"]
-    ]
+    if abs(entry - sl) <= 0:
+        return None, None
 
-    if not candles:
-        return {
-            "current": None,
-            "max": None,
-            "min": None
-        }
+    values = []
 
-    max_r = None
-    min_r = None
-    current_r = None
+    for row in rows:
 
-    for candle in candles:
-
-        high_r, low_r = candle_r_range(
-            setup["direction"],
-            setup["price"],
-            sl,
-            candle
-        )
-
-        values = [
-            x for x in (
-                high_r,
-                low_r
-            )
-            if x is not None
-        ]
-
-        if not values:
+        if row["time"] < start_time:
             continue
 
-        local_max = max(values)
-        local_min = min(values)
-
-        if (
-            max_r is None
-            or local_max > max_r
-        ):
-            max_r = local_max
-
-        if (
-            min_r is None
-            or local_min < min_r
-        ):
-            min_r = local_min
-
-        current_r = r_value(
-            setup["direction"],
-            setup["price"],
-            sl,
-            candle["close"]
-        )
-
-    return {
-        "current": current_r,
-        "max": max_r,
-        "min": min_r
-    }
-
-
-def first_setup_event(
-    m5_rows,
-    setup,
-    sl
-):
-    if sl is None:
-        return None
-
-    candles = [
-        row for row in closed(m5_rows)
-        if row["time"] >= setup["time"]
-    ]
-
-    for candle in candles:
-
-        if setup["direction"] == "LONG":
-
-            if candle["low"] <= sl:
-                return {
-                    "event": "SL",
-                    "time": candle["time"]
-                }
-
-            if (
-                r_value(
-                    "LONG",
-                    setup["price"],
-                    sl,
-                    candle["high"]
-                )
-                > TRAIL_ACTIVATION_R
-            ):
-                return {
-                    "event": "TRAILING",
-                    "time": candle["time"]
-                }
-
-        else:
-
-            if candle["high"] >= sl:
-                return {
-                    "event": "SL",
-                    "time": candle["time"]
-                }
-
-            if (
-                r_value(
-                    "SHORT",
-                    setup["price"],
-                    sl,
-                    candle["low"]
-                )
-                > TRAIL_ACTIVATION_R
-            ):
-                return {
-                    "event": "TRAILING",
-                    "time": candle["time"]
-                }
-
-    return None
-
-
-# ============================================================
-# DATABASE SETUPS
-# ============================================================
-
-def get_setups(limit=MAX_SETUP_ROWS):
-    with db_conn() as conn:
-        return conn.execute(
-            """
-            SELECT *
-            FROM setups
-            ORDER BY setup_time DESC
-            LIMIT ?
-            """,
-            (limit,)
-        ).fetchall()
-
-
-def get_setup(setup_time):
-    with db_conn() as conn:
-        return conn.execute(
-            """
-            SELECT *
-            FROM setups
-            WHERE setup_time=?
-            """,
-            (setup_time,)
-        ).fetchone()
-
-
-def insert_setup(setup):
-    with db_conn() as conn:
-
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO setups(
-                setup_time,
+        values.append(
+            r_value(
                 direction,
-                setup_price,
-                status,
-                last_update
-            )
-            VALUES(?,?,?,?,?)
-            """,
-            (
-                setup["time"],
-                setup["direction"],
-                setup["price"],
-                "NIEPOTWIERDZONY",
-                now_ts()
+                entry,
+                sl,
+                row["high"]
             )
         )
 
-        conn.commit()
-
-
-def update_setup(
-    setup_time,
-    **fields
-):
-    if not fields:
-        return
-
-    fields["last_update"] = now_ts()
-
-    keys = list(
-        fields.keys()
-    )
-
-    sql = (
-        "UPDATE setups SET "
-        +
-        ",".join(
-            f"{key}=?"
-            for key in keys
-        )
-        +
-        " WHERE setup_time=?"
-    )
-
-    values = [
-        fields[key]
-        for key in keys
-    ]
-
-    values.append(
-        setup_time
-    )
-
-    with db_conn() as conn:
-        conn.execute(
-            sql,
-            values
+        values.append(
+            r_value(
+                direction,
+                entry,
+                sl,
+                row["low"]
+            )
         )
 
-        conn.commit()
+    if not values:
+        return None, None
 
+    return (
+        max(values),
+        min(values)
+    )
 
-# ============================================================
-# ACTIVE POSITION
-# ============================================================
-
-def has_active_position(
-    exclude_setup_time=None
-):
-    with db_conn() as conn:
-
-        if exclude_setup_time is None:
-            row = conn.execute(
-                """
-                SELECT *
-                FROM setups
-                WHERE entry_time IS NOT NULL
-                  AND exit_time IS NULL
-                ORDER BY entry_time DESC
-                LIMIT 1
-                """
-            ).fetchone()
-
-        else:
-            row = conn.execute(
-                """
-                SELECT *
-                FROM setups
-                WHERE entry_time IS NOT NULL
-                  AND exit_time IS NULL
-                  AND setup_time != ?
-                ORDER BY entry_time DESC
-                LIMIT 1
-                """,
-                (exclude_setup_time,)
-            ).fetchone()
-
-    return row
-
-
-# ============================================================
-# POSITION SIMULATION / MANAGEMENT
-# ============================================================
 
 def simulate_position(
     m5_rows,
@@ -1220,6 +972,7 @@ def simulate_position(
     setup,
     entry
 ):
+
     sl = structural_sl(
         m15_rows,
         setup["direction"],
@@ -1231,161 +984,246 @@ def simulate_position(
 
     entry_price = entry["price"]
 
-    risk = abs(
-        entry_price - sl
-    )
-
-    if risk <= 0:
+    if abs(entry_price - sl) <= 0:
         return None
 
-    current_sl = sl
+    original_sl = sl
 
     max_r = 0.0
     min_r = 0.0
-
-    current_r = None
     trail_r = None
 
     exit_time = None
     exit_price = None
-    exit_reason = None
+    reason = None
 
-    m5 = closed(m5_rows)
-    m15 = closed(m15_rows)
+    for c in closed(m5_rows):
 
-    for candle in m5:
-
-        if candle["time"] < entry["time"]:
+        if c["time"] < entry["time"]:
             continue
 
-        high_r, low_r = candle_r_range(
+        hi_r = r_value(
             setup["direction"],
             entry_price,
-            sl,
-            candle
+            original_sl,
+            c["high"]
         )
 
-        if high_r is not None:
-            max_r = max(
-                max_r,
-                high_r
-            )
-
-        if low_r is not None:
-            min_r = min(
-                min_r,
-                low_r
-            )
-
-        current_r = r_value(
+        lo_r = r_value(
             setup["direction"],
             entry_price,
-            sl,
-            candle["close"]
+            original_sl,
+            c["low"]
         )
 
-        # -----------------------------------------------
-        # STOP
-        # -----------------------------------------------
+        max_r = max(
+            max_r,
+            hi_r,
+            lo_r
+        )
 
-        if setup["direction"] == "LONG":
+        min_r = min(
+            min_r,
+            hi_r,
+            lo_r
+        )
 
-            if candle["low"] <= current_sl:
-                exit_time = candle["time"]
-                exit_price = current_sl
-                exit_reason = "SL"
-                break
+        if (
+            setup["direction"] == "LONG"
+            and c["low"] <= sl
+        ):
 
-        else:
+            exit_time = c["time"]
+            exit_price = sl
+            reason = "SL"
+            break
 
-            if candle["high"] >= current_sl:
-                exit_time = candle["time"]
-                exit_price = current_sl
-                exit_reason = "SL"
-                break
+        if (
+            setup["direction"] == "SHORT"
+            and c["high"] >= sl
+        ):
 
-        # -----------------------------------------------
-        # TRAILING
-        # -----------------------------------------------
+            exit_time = c["time"]
+            exit_price = sl
+            reason = "SL"
+            break
 
         if max_r > TRAIL_ACTIVATION_R:
 
             recent = [
-                row for row in m15
-                if (
-                    row["time"]
-                    >= entry["time"]
-                    and row["time"]
-                    <= candle["time"]
-                )
+                x
+                for x in closed(m15_rows)
+                if x["time"] <= c["time"]
             ][-3:]
 
             if len(recent) == 3:
 
                 if setup["direction"] == "LONG":
 
-                    new_sl = min(
-                        row["low"]
-                        for row in recent
+                    new_stop = min(
+                        x["low"]
+                        for x in recent
                     )
 
                     if (
-                        new_sl > current_sl
-                        and new_sl < candle["close"]
+                        new_stop > sl
+                        and new_stop < c["close"]
                     ):
-                        current_sl = new_sl
+
+                        sl = new_stop
 
                 else:
 
-                    new_sl = max(
-                        row["high"]
-                        for row in recent
+                    new_stop = max(
+                        x["high"]
+                        for x in recent
                     )
 
                     if (
-                        new_sl < current_sl
-                        and new_sl > candle["close"]
+                        new_stop < sl
+                        and new_stop > c["close"]
                     ):
-                        current_sl = new_sl
 
-            trail_r = current_r
+                        sl = new_stop
 
-    exit_r = None
+            trail_r = r_value(
+                setup["direction"],
+                entry_price,
+                original_sl,
+                c["close"]
+            )
 
-    if exit_price is not None:
-        exit_r = r_value(
+    if exit_time is None:
+
+        closed_m5 = closed(m5_rows)
+
+        if closed_m5:
+
+            trail_r = r_value(
+                setup["direction"],
+                entry_price,
+                original_sl,
+                closed_m5[-1]["close"]
+            )
+
+    else:
+
+        trail_r = r_value(
             setup["direction"],
             entry_price,
-            sl,
+            original_sl,
             exit_price
         )
 
     return {
-        "sl": sl,
-        "current_sl": current_sl,
-        "current_r": current_r,
-        "max_r": max_r,
-        "min_r": min_r,
-        "trail_r": trail_r,
+        "sl": original_sl,
         "exit_time": exit_time,
         "exit_price": exit_price,
-        "exit_reason": exit_reason,
-        "exit_r": exit_r
+        "reason": reason,
+        "exit_r": (
+            r_value(
+                setup["direction"],
+                entry_price,
+                original_sl,
+                exit_price
+            )
+            if exit_price is not None
+            else None
+        ),
+        "max_r": max_r,
+        "min_r": min_r,
+        "trail_r": trail_r
     }
 
 
-# ============================================================
-# HISTORY REBUILD
-# ============================================================
+def upsert_setup(s):
+
+    with db_conn() as c:
+
+        c.execute(
+            """
+            INSERT INTO setups(
+                setup_time,
+                direction,
+                setup_price,
+                status,
+                last_update
+            )
+            VALUES(?,?,?,?,?)
+
+            ON CONFLICT(setup_time)
+            DO UPDATE SET
+                direction=excluded.direction,
+                setup_price=excluded.setup_price
+            """,
+            (
+                s["time"],
+                s["direction"],
+                s["price"],
+                "NIEPOTWIERDZONY",
+                now_ts()
+            )
+        )
+
+        c.commit()
+
+
+def update_setup(
+    setup_time,
+    **fields
+):
+
+    if not fields:
+        return
+
+    fields["last_update"] = now_ts()
+
+    keys = list(fields)
+
+    sql = (
+        "UPDATE setups SET "
+        + ", ".join(
+            f"{k}=?"
+            for k in keys
+        )
+        + " WHERE setup_time=?"
+    )
+
+    values = [
+        fields[k]
+        for k in keys
+    ]
+
+    values.append(
+        setup_time
+    )
+
+    with db_conn() as c:
+
+        c.execute(
+            sql,
+            values
+        )
+
+        c.commit()
+
+
+def get_setups(limit=100):
+
+    with db_conn() as c:
+
+        return c.execute(
+            """
+            SELECT *
+            FROM setups
+            ORDER BY setup_time DESC
+            LIMIT ?
+            """,
+            (limit,)
+        ).fetchall()
+
 
 def rebuild_history():
-    """
-    Rebuilds setup history from MEXC market data.
-
-    IMPORTANT:
-    H1 -> M15 uses the first 16 M15 candles after each setup.
-    M15 -> M5 uses the first 8 M5 candles after confirmation.
-    """
 
     try:
 
@@ -1401,148 +1239,97 @@ def rebuild_history():
 
         m5 = get_klines(
             "Min5",
-            M5_HISTORY
+            4000
         )
 
-        setups = find_h1_setups(
+        found = find_h1_setups(
             h1
         )
 
-        # We rebuild the analytical history.
-        with db_conn() as conn:
-            conn.execute(
+        with db_conn() as c:
+
+            c.execute(
                 "DELETE FROM setups"
             )
-            conn.commit()
 
-        for setup in setups:
+            c.commit()
 
-            insert_setup(
-                setup
-            )
+        for s in found:
 
-            setup_sl = structural_sl(
+            confirm = confirm_m15(
                 m15,
-                setup["direction"],
-                setup["time"]
+                s
             )
 
-            observation = (
-                calculate_setup_observation(
-                    m5,
-                    setup,
-                    setup_sl
-                )
-                if setup_sl is not None
-                else {
-                    "current": None,
-                    "max": None,
-                    "min": None
-                }
-            )
-
-            event = first_setup_event(
-                m5,
-                setup,
-                setup_sl
+            sl = structural_sl(
+                m15,
+                s["direction"],
+                s["time"]
             )
 
             fields = {
-                "setup_sl": setup_sl,
-                "setup_current_r": observation["current"],
-                "setup_max_r": observation["max"],
-                "setup_min_r": observation["min"]
+                "setup_sl": sl
             }
 
-            if event:
-                fields.update({
-                    "first_event": event["event"],
-                    "first_event_time": event["time"]
-                })
+            if sl:
 
-            confirmation = confirm_m15(
-                m15,
-                setup
-            )
-
-            if confirmation is None:
-
-                update_setup(
-                    setup["time"],
-                    **fields
+                fields[
+                    "setup_max_r"
+                ], fields[
+                    "setup_min_r"
+                ] = excursion(
+                    m5,
+                    s["time"],
+                    s["direction"],
+                    s["price"],
+                    sl
                 )
 
-                continue
+            upsert_setup(s)
 
-            fields.update({
-                "status": "POTWIERDZONY",
-                "confirm_time": confirmation["time"],
-                "confirm_price": confirmation["price"]
-            })
+            if confirm:
 
-            entry = find_m5_entry(
-                m5,
-                setup,
-                confirmation
-            )
-
-            if entry is None:
-
-                update_setup(
-                    setup["time"],
-                    **fields
+                fields.update(
+                    status="POTWIERDZONY",
+                    confirm_time=confirm["time"],
+                    confirm_price=confirm["price"]
                 )
 
-                continue
+                entry = find_m5_entry(
+                    m5,
+                    s,
+                    confirm
+                )
 
-            # ------------------------------------------------
-            # Historical simulation of the actual entry.
-            # ------------------------------------------------
+                if entry:
 
-            simulation = simulate_position(
-                m5,
-                m15,
-                setup,
-                entry
-            )
-
-            fields.update({
-                "entry_time": entry["time"],
-                "entry_price": entry["price"]
-            })
-
-            if simulation:
-
-                fields.update({
-                    "position_sl": simulation["sl"],
-                    "position_current_r": (
-                        simulation["current_r"]
-                    ),
-                    "position_max_r": (
-                        simulation["max_r"]
-                    ),
-                    "position_min_r": (
-                        simulation["min_r"]
-                    ),
-                    "trail_r": (
-                        simulation["trail_r"]
-                    ),
-                    "exit_time": (
-                        simulation["exit_time"]
-                    ),
-                    "exit_price": (
-                        simulation["exit_price"]
-                    ),
-                    "exit_reason": (
-                        simulation["exit_reason"]
-                    ),
-                    "exit_r": (
-                        simulation["exit_r"]
+                    sim = simulate_position(
+                        m5,
+                        m15,
+                        s,
+                        entry
                     )
-                })
+
+                    fields.update(
+                        entry_time=entry["time"],
+                        entry_price=entry["price"]
+                    )
+
+                    if sim:
+
+                        fields.update(
+                            position_sl=sim["sl"],
+                            exit_time=sim["exit_time"],
+                            exit_price=sim["exit_price"],
+                            exit_reason=sim["reason"],
+                            exit_r=sim["exit_r"],
+                            position_max_r=sim["max_r"],
+                            position_min_r=sim["min_r"],
+                            trail_r=sim["trail_r"]
+                        )
 
             update_setup(
-                setup["time"],
+                s["time"],
                 **fields
             )
 
@@ -1556,208 +1343,22 @@ def rebuild_history():
             ""
         )
 
-        return True
-
-    except Exception as exc:
+    except Exception as e:
 
         state_set(
             "latest_error",
-            repr(exc)
+            repr(e)
         )
 
-        return False
-
-
-# ============================================================
-# LIVE SETUP PROCESSING
-# ============================================================
-
-def process_setup_live(
-    row,
-    m15,
-    m5
-):
-    setup = {
-        "time": row["setup_time"],
-        "direction": row["direction"],
-        "price": row["setup_price"]
-    }
-
-    # --------------------------------------------------------
-    # Setup SL / observation
-    # --------------------------------------------------------
-
-    setup_sl = structural_sl(
-        m15,
-        setup["direction"],
-        setup["time"]
-    )
-
-    fields = {
-        "setup_sl": setup_sl
-    }
-
-    if setup_sl is not None:
-
-        observation = (
-            calculate_setup_observation(
-                m5,
-                setup,
-                setup_sl
-            )
-        )
-
-        fields.update({
-            "setup_current_r": (
-                observation["current"]
-            ),
-            "setup_max_r": (
-                observation["max"]
-            ),
-            "setup_min_r": (
-                observation["min"]
-            )
-        })
-
-        event = first_setup_event(
-            m5,
-            setup,
-            setup_sl
-        )
-
-        if event:
-            fields.update({
-                "first_event": event["event"],
-                "first_event_time": event["time"]
-            })
-
-    # --------------------------------------------------------
-    # Already has entry -> don't create another entry.
-    # --------------------------------------------------------
-
-    if row["entry_time"] is not None:
-
-        update_setup(
-            row["setup_time"],
-            **fields
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Confirmation
-    # --------------------------------------------------------
-
-    confirmation = confirm_m15(
-        m15,
-        setup
-    )
-
-    if confirmation is None:
-
-        fields["status"] = (
-            "NIEPOTWIERDZONY"
-        )
-
-        update_setup(
-            row["setup_time"],
-            **fields
-        )
-
-        return
-
-    fields.update({
-        "status": "POTWIERDZONY",
-        "confirm_time": confirmation["time"],
-        "confirm_price": confirmation["price"]
-    })
-
-    # --------------------------------------------------------
-    # M5 entry
-    # --------------------------------------------------------
-
-    entry = find_m5_entry(
-        m5,
-        setup,
-        confirmation
-    )
-
-    if entry is None:
-
-        update_setup(
-            row["setup_time"],
-            **fields
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # One active position at a time.
-    # --------------------------------------------------------
-
-    active = has_active_position(
-        row["setup_time"]
-    )
-
-    if active is not None:
-
-        # Setup is confirmed, but cannot open another
-        # position while another position is active.
-        update_setup(
-            row["setup_time"],
-            **fields
-        )
-
-        return
-
-    position_sl = structural_sl(
-        m15,
-        setup["direction"],
-        entry["time"]
-    )
-
-    if position_sl is None:
-
-        update_setup(
-            row["setup_time"],
-            **fields
-        )
-
-        return
-
-    fields.update({
-        "entry_time": entry["time"],
-        "entry_price": entry["price"],
-        "position_sl": position_sl,
-        "position_current_r": 0.0,
-        "position_max_r": 0.0,
-        "position_min_r": 0.0,
-        "trail_r": None,
-        "exit_time": None,
-        "exit_price": None,
-        "exit_reason": None,
-        "exit_r": None
-    })
-
-    update_setup(
-        row["setup_time"],
-        **fields
-    )
-
-
-# ============================================================
-# LIVE POSITION MANAGEMENT
-# ============================================================
 
 def manage_open_positions(
     m5,
     m15
 ):
-    rows = []
 
-    with db_conn() as conn:
+    with db_conn() as c:
 
-        rows = conn.execute(
+        open_rows = c.execute(
             """
             SELECT *
             FROM setups
@@ -1767,129 +1368,95 @@ def manage_open_positions(
             """
         ).fetchall()
 
-    for row in rows:
+    for row in open_rows:
 
         direction = row["direction"]
-
         entry = row["entry_price"]
+        sl = row["position_sl"]
 
-        original_sl = row["position_sl"]
-
-        if (
-            entry is None
-            or original_sl is None
-        ):
+        if entry is None or sl is None:
             continue
 
         max_r = (
             row["position_max_r"]
-            if row["position_max_r"]
-            is not None
+            if row["position_max_r"] is not None
             else 0.0
         )
 
         min_r = (
             row["position_min_r"]
-            if row["position_min_r"]
-            is not None
+            if row["position_min_r"] is not None
             else 0.0
         )
 
-        current_sl = original_sl
-
         trail_r = row["trail_r"]
 
-        current_r = row[
-            "position_current_r"
-        ]
+        current_sl = sl
 
         exit_time = None
         exit_price = None
-        exit_reason = None
+        reason = None
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # Start from the last saved exit state.
-        # We process only candles after entry.
-        # ----------------------------------------------------
+        for c in closed(m5):
 
-        candles = [
-            candle for candle in closed(m5)
-            if candle["time"]
-            >= row["entry_time"]
-        ]
+            if c["time"] < row["entry_time"]:
+                continue
 
-        m15_closed = closed(
-            m15
-        )
-
-        for candle in candles:
-
-            high_r, low_r = candle_r_range(
+            hi_r = r_value(
                 direction,
                 entry,
-                original_sl,
-                candle
+                sl,
+                c["high"]
             )
 
-            if high_r is not None:
-                max_r = max(
-                    max_r,
-                    high_r
-                )
-
-            if low_r is not None:
-                min_r = min(
-                    min_r,
-                    low_r
-                )
-
-            current_r = r_value(
+            lo_r = r_value(
                 direction,
                 entry,
-                original_sl,
-                candle["close"]
+                sl,
+                c["low"]
             )
 
-            # ------------------------------------------------
-            # SL
-            # ------------------------------------------------
+            max_r = max(
+                max_r,
+                hi_r,
+                lo_r
+            )
 
-            if direction == "LONG":
+            min_r = min(
+                min_r,
+                hi_r,
+                lo_r
+            )
 
-                if candle["low"] <= current_sl:
+            if (
+                direction == "LONG"
+                and c["low"] <= current_sl
+            ):
 
-                    exit_time = candle["time"]
-                    exit_price = current_sl
-                    exit_reason = "SL"
+                exit_time = c["time"]
+                exit_price = current_sl
+                reason = "SL"
+                break
 
-                    break
+            if (
+                direction == "SHORT"
+                and c["high"] >= current_sl
+            ):
 
-            else:
-
-                if candle["high"] >= current_sl:
-
-                    exit_time = candle["time"]
-                    exit_price = current_sl
-                    exit_reason = "SL"
-
-                    break
-
-            # ------------------------------------------------
-            # TRAILING
-            # ------------------------------------------------
+                exit_time = c["time"]
+                exit_price = current_sl
+                reason = "SL"
+                break
 
             if max_r > TRAIL_ACTIVATION_R:
 
                 recent = [
-                    m15_candle
-                    for m15_candle in m15_closed
+                    x
+                    for x in closed(m15)
                     if (
-                        m15_candle["time"]
-                        >= row["entry_time"]
-                        and
-                        m15_candle["time"]
-                        <= candle["time"]
+                        row["entry_time"]
+                        <= x["time"]
+                        <= c["time"]
                     )
                 ][-3:]
 
@@ -1897,68 +1464,65 @@ def manage_open_positions(
 
                     if direction == "LONG":
 
-                        new_sl = min(
+                        new_stop = min(
                             x["low"]
                             for x in recent
                         )
 
                         if (
-                            new_sl > current_sl
-                            and
-                            new_sl < candle["close"]
+                            new_stop > current_sl
+                            and new_stop < c["close"]
                         ):
-                            current_sl = new_sl
+
+                            current_sl = new_stop
 
                     else:
 
-                        new_sl = max(
+                        new_stop = max(
                             x["high"]
                             for x in recent
                         )
 
                         if (
-                            new_sl < current_sl
-                            and
-                            new_sl > candle["close"]
+                            new_stop < current_sl
+                            and new_stop > c["close"]
                         ):
-                            current_sl = new_sl
 
-                trail_r = current_r
+                            current_sl = new_stop
 
-        # ----------------------------------------------------
-        # Save current state.
-        # ----------------------------------------------------
+                trail_r = r_value(
+                    direction,
+                    entry,
+                    sl,
+                    c["close"]
+                )
 
         fields = {
-            "position_current_r": current_r,
             "position_max_r": max_r,
             "position_min_r": min_r,
-            "position_sl": current_sl,
-            "trail_r": trail_r
+            "trail_r": trail_r,
+            "position_sl": current_sl
         }
-
-        # ----------------------------------------------------
-        # Exit
-        # ----------------------------------------------------
 
         if exit_time is not None:
 
-            exit_r = r_value(
-                direction,
-                entry,
-                original_sl,
-                exit_price
+            fields.update(
+                exit_time=exit_time,
+                exit_price=exit_price,
+                exit_reason=reason,
+                exit_r=r_value(
+                    direction,
+                    entry,
+                    sl,
+                    exit_price
+                ),
+                trail_r=r_value(
+                    direction,
+                    entry,
+                    sl,
+                    exit_price
+                )
             )
-
-            fields.update({
-                "exit_time": exit_time,
-                "exit_price": exit_price,
-                "exit_reason": exit_reason,
-                "exit_r": exit_r
-            })
-
-            if trail_r is None:
-                fields["trail_r"] = exit_r
 
         update_setup(
             row["setup_time"],
@@ -1966,11 +1530,8 @@ def manage_open_positions(
         )
 
 
-# ============================================================
-# LIVE ENGINE CYCLE
-# ============================================================
+def live_refresh():
 
-def live_cycle():
     h1 = get_klines(
         "Min60",
         H1_HISTORY
@@ -1978,62 +1539,118 @@ def live_cycle():
 
     m15 = get_klines(
         "Min15",
-        1000
+        500
     )
 
     m5 = get_klines(
         "Min5",
-        2000
+        1000
     )
 
-    current_price = get_current_btc_price()
+    latest = h1_setup(h1)
 
-    if current_price is not None:
-        state_set(
-            "btc_price",
-            current_price
+    if latest:
+
+        upsert_setup(
+            latest
         )
-
-    # --------------------------------------------------------
-    # Add all currently detected H1 setups.
-    # --------------------------------------------------------
-
-    setups = find_h1_setups(
-        h1
-    )
-
-    for setup in setups:
-        insert_setup(
-            setup
-        )
-
-    # --------------------------------------------------------
-    # Process each setup independently.
-    # --------------------------------------------------------
 
     rows = get_setups(
-        MAX_SETUP_ROWS
+        200
     )
 
     for row in rows:
 
-        # Don't modify already exited historical positions
-        # except for preserving their stored values.
-        if (
-            row["entry_time"] is not None
-            and row["exit_time"] is not None
-        ):
-            continue
+        setup = {
+            "time": row["setup_time"],
+            "direction": row["direction"],
+            "price": row["setup_price"]
+        }
 
-        process_setup_live(
-            row,
+        sl = structural_sl(
             m15,
-            m5
+            setup["direction"],
+            setup["time"]
         )
 
-    # --------------------------------------------------------
-    # Manage the actual open position.
-    # --------------------------------------------------------
+        fields = {
+            "setup_sl": sl
+        }
+
+        if sl:
+
+            fields[
+                "setup_max_r"
+            ], fields[
+                "setup_min_r"
+            ] = excursion(
+                m5,
+                setup["time"],
+                setup["direction"],
+                setup["price"],
+                sl
+            )
+
+        if row["entry_time"] is None:
+
+            confirm = confirm_m15(
+                m15,
+                setup
+            )
+
+            if confirm:
+
+                fields.update(
+                    status="POTWIERDZONY",
+                    confirm_time=confirm["time"],
+                    confirm_price=confirm["price"]
+                )
+
+                entry = find_m5_entry(
+                    m5,
+                    setup,
+                    confirm
+                )
+
+                if entry:
+
+                    active = False
+
+                    for other in get_setups(200):
+
+                        if (
+                            other["entry_time"]
+                            and other["exit_time"] is None
+                            and other["setup_time"]
+                            != row["setup_time"]
+                        ):
+
+                            active = True
+                            break
+
+                    if not active:
+
+                        fields.update(
+                            entry_time=entry["time"],
+                            entry_price=entry["price"],
+                            position_sl=structural_sl(
+                                m15,
+                                setup["direction"],
+                                entry["time"]
+                            )
+                        )
+
+            else:
+
+                fields.setdefault(
+                    "status",
+                    "NIEPOTWIERDZONY"
+                )
+
+        update_setup(
+            row["setup_time"],
+            **fields
+        )
 
     manage_open_positions(
         m5,
@@ -2051,282 +1668,580 @@ def live_cycle():
     )
 
 
-# ============================================================
-# DISPLAY DATA
-# ============================================================
+def chart_candles(
+    setup_time,
+    interval,
+    total
+):
 
-def row_to_dict(row):
+    step = {
+        "Min60": 3600,
+        "Min15": 900,
+        "Min5": 300
+    }[interval]
+
+    end = min(
+        now_ts(),
+        int(
+            setup_time
+            + total * step * 0.99
+        )
+    )
+
+    return get_klines(
+        interval,
+        total,
+        end_ts=end
+    )
+
+
+def chart_payload(
+    setup_time,
+    tf
+):
+
+    with db_conn() as c:
+
+        row = c.execute(
+            """
+            SELECT *
+            FROM setups
+            WHERE setup_time=?
+            """,
+            (int(setup_time),)
+        ).fetchone()
+
+    if not row:
+
+        return {
+            "ok": False,
+            "error": "Nie znaleziono setupu."
+        }
+
+    setup = {
+        "time": row["setup_time"],
+        "direction": row["direction"],
+        "price": row["setup_price"]
+    }
+
+    mapping = {
+        "H1": ("Min60", 300),
+        "M15": ("Min15", 1000),
+        "M5": ("Min5", 2400)
+    }
+
+    interval, total = mapping.get(
+        tf,
+        mapping["M15"]
+    )
+
+    candles = chart_candles(
+        row["setup_time"],
+        interval,
+        total
+    )
+
+    m15 = chart_candles(
+        row["setup_time"],
+        "Min15",
+        500
+    )
+
+    m5 = chart_candles(
+        row["setup_time"],
+        "Min5",
+        1600
+    )
+
+    if row["confirm_time"]:
+
+        confirm = {
+            "time": row["confirm_time"],
+            "price": row["confirm_price"]
+        }
+
+    else:
+
+        confirm = confirm_m15(
+            m15,
+            setup
+        )
+
+    if confirm:
+
+        if row["entry_time"]:
+
+            entry = {
+                "time": row["entry_time"],
+                "price": row["entry_price"]
+            }
+
+        else:
+
+            entry = find_m5_entry(
+                m5,
+                setup,
+                confirm
+            )
+
+    else:
+
+        entry = None
+
+    markers = {
+        "setup_time": row["setup_time"],
+        "setup_price": row["setup_price"],
+        "sl": (
+            row["position_sl"]
+            if row["entry_time"]
+            else row["setup_sl"]
+        ),
+        "confirm_time": (
+            confirm["time"]
+            if confirm
+            else None
+        ),
+        "confirm_price": (
+            confirm["price"]
+            if confirm
+            else None
+        ),
+        "entry_time": (
+            entry["time"]
+            if entry
+            else None
+        ),
+        "entry_price": (
+            entry["price"]
+            if entry
+            else None
+        )
+    }
+
     return {
-        key: row[key]
-        for key in row.keys()
+        "ok": True,
+        "tf": tf,
+
+        "setup": {
+            "time": row["setup_time"],
+            "direction": row["direction"],
+            "price": row["setup_price"],
+            "status": row["status"]
+        },
+
+        "markers": markers,
+
+        "candles": candles,
+
+        "m15": m15_diagnostics(
+            m15,
+            setup
+        ),
+
+        "m5": (
+            m5_diagnostics(
+                m5,
+                setup,
+                confirm
+            )
+            if confirm
+            else []
+        ),
+
+        "metrics": {
+            "max_r": (
+                row["position_max_r"]
+                if row["entry_time"]
+                else row["setup_max_r"]
+            ),
+            "min_r": (
+                row["position_min_r"]
+                if row["entry_time"]
+                else row["setup_min_r"]
+            ),
+            "trail_r": row["trail_r"],
+            "exit_r": row["exit_r"],
+            "exit_reason": row["exit_reason"]
+        }
     }
 
 
-def confirmed_rows():
-    rows = get_setups()
+def dashboard():
 
-    return [
-        row for row in rows
-        if row["entry_time"] is not None
-    ]
+    rows = get_setups(
+        200
+    )
 
-
-def unconfirmed_rows():
-    rows = get_setups()
-
-    return [
-        row for row in rows
-        if row["entry_time"] is None
-    ]
-
-
-def first_event_text(row):
-    if row["first_event"] == "SL":
-        return "SL"
-
-    if row["first_event"] == "TRAILING":
-        return "TRAILING"
-
-    return "—"
-
-
-def position_status(row):
-    if row["entry_time"] is None:
-        return "—"
-
-    if row["exit_time"] is None:
-        return "AKTYWNA"
-
-    return "ZAMKNIĘTA"
-
-
-# ============================================================
-# HTML
-# ============================================================
-
-def html_header():
-    return """
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
-
-<title>BTC Market Engine</title>
-
-<style>
-
-* {
-    box-sizing: border-box;
-}
-
-body {
-    margin: 0;
-    padding: 14px;
-    background: #111;
-    color: #eee;
-    font-family: Arial, sans-serif;
-}
-
-h1 {
-    margin: 0 0 6px 0;
-    font-size: 21px;
-}
-
-.topbar {
-    margin-bottom: 14px;
-}
-
-.price {
-    font-size: 26px;
-    font-weight: bold;
-    margin-top: 4px;
-}
-
-.meta {
-    color: #999;
-    font-size: 12px;
-    margin-top: 5px;
-}
-
-.error {
-    background: #5c1717;
-    color: #fff;
-    padding: 10px;
-    border-radius: 8px;
-    margin-bottom: 12px;
-    word-break: break-word;
-}
-
-.tabs {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 10px;
-}
-
-.tab {
-    border: 1px solid #444;
-    background: #1b1b1b;
-    color: #aaa;
-    padding: 9px 14px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-weight: bold;
-}
-
-.tab.active {
-    background: #eee;
-    color: #111;
-}
-
-.panel {
-    display: none;
-}
-
-.panel.active {
-    display: block;
-}
-
-.table-wrap {
-    overflow: auto;
-    max-height: 72vh;
-    border: 1px solid #333;
-    border-radius: 8px;
-    background: #101010;
-}
-
-table {
-    border-collapse: collapse;
-    width: max-content;
-    min-width: 1500px;
-}
-
-th,
-td {
-    padding: 8px 10px;
-    border-bottom: 1px solid #292929;
-    white-space: nowrap;
-    font-size: 12px;
-}
-
-th {
-    position: sticky;
-    top: 0;
-    z-index: 3;
-    background: #1c1c1c;
-    color: #ddd;
-}
-
-.long {
-    color: #7ee787;
-}
-
-.short {
-    color: #ff7b72;
-}
-
-.ok {
-    color: #7ee787;
-}
-
-.no {
-    color: #aaa;
-}
-
-.active-position {
-    color: #ffd866;
-    font-weight: bold;
-}
-
-.event-trailing {
-    color: #7ee787;
-    font-weight: bold;
-}
-
-.event-sl {
-    color: #ff7b72;
-    font-weight: bold;
-}
-
-.small-note {
-    color: #777;
-    font-size: 11px;
-    margin: 8px 0;
-}
-
-</style>
-</head>
-"""
-
-
-def html_top():
-    price = state_get(
-        "btc_price"
+    latest_error = state_get(
+        "latest_error",
+        ""
     )
 
     last_update = state_get(
         "last_live_update"
     )
 
-    return f"""
+    current_price = "—"
+
+    try:
+
+        latest = get_klines(
+            "Min1",
+            2
+        )
+
+        if latest:
+
+            current_price = fmt_num(
+                latest[-1]["close"]
+            )
+
+    except Exception:
+        pass
+
+    options = ""
+
+    for row in rows:
+
+        options += (
+            f"<option value='{row['setup_time']}'>"
+            f"{html.escape(fmt_ts(row['setup_time']))}"
+            f" · {row['direction']}"
+            f" · {html.escape(row['status'])}"
+            f"</option>"
+        )
+
+    confirmed = [
+        r
+        for r in rows
+        if r["status"] == "POTWIERDZONY"
+    ]
+
+    unconfirmed = [
+        r
+        for r in rows
+        if r["status"] != "POTWIERDZONY"
+    ]
+
+    body = []
+
+    body.append("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1">
+
+<title>BTC Market Engine</title>
+
+<style>
+
+*{
+    box-sizing:border-box
+}
+
+body{
+    font-family:Arial,sans-serif;
+    background:#111;
+    color:#eee;
+    margin:16px
+}
+
+h1{
+    font-size:20px;
+    margin:0 0 4px
+}
+
+.meta{
+    color:#aaa;
+    font-size:12px
+}
+
+.price{
+    font-size:18px;
+    font-weight:700;
+    margin:7px 0 12px
+}
+
+.err{
+    background:#5b1717;
+    padding:10px;
+    border-radius:8px;
+    margin-bottom:10px
+}
+
+.tabs{
+    display:flex;
+    gap:7px;
+    flex-wrap:wrap;
+    position:sticky;
+    top:0;
+    z-index:20;
+    background:#111;
+    padding:5px 0
+}
+
+.tab,
+.tf,
+.select{
+    background:#181818;
+    color:#aaa;
+    border:1px solid #333;
+    border-radius:8px;
+    padding:9px;
+    cursor:pointer
+}
+
+.tab.active{
+    color:#fff;
+    background:#292929;
+    border-color:#666
+}
+
+.panel{
+    display:none
+}
+
+.panel.active{
+    display:block
+}
+
+.table-wrap{
+    overflow:auto;
+    border:1px solid #333;
+    border-radius:8px;
+    max-height:70vh
+}
+
+table{
+    border-collapse:collapse;
+    width:max-content;
+    min-width:1400px
+}
+
+th,
+td{
+    padding:8px 10px;
+    border-bottom:1px solid #292929;
+    white-space:nowrap;
+    font-size:13px
+}
+
+th{
+    position:sticky;
+    top:0;
+    background:#1c1c1c;
+    z-index:2
+}
+
+.long,
+.yes{
+    color:#7ee787
+}
+
+.short,
+.bad{
+    color:#ff7b72
+}
+
+.no{
+    color:#aaa
+}
+
+.empty{
+    padding:20px;
+    color:#888
+}
+
+.toolbar{
+    display:flex;
+    gap:7px;
+    flex-wrap:wrap;
+    margin:10px 0
+}
+
+.legend{
+    color:#aaa;
+    font-size:12px;
+    margin:7px 0
+}
+
+.chart-scroll{
+    overflow:auto;
+    border:1px solid #333;
+    border-radius:8px;
+    background:#0b0b0b;
+    max-height:58vh;
+    min-height:360px
+}
+
+#chart{
+    display:block;
+    height:430px;
+    min-width:100%
+}
+
+.info{
+    margin-top:10px;
+    border:1px solid #333;
+    border-radius:8px;
+    background:#161616;
+    padding:10px
+}
+
+.cards{
+    display:grid;
+    grid-template-columns:
+        repeat(4,minmax(100px,1fr));
+    gap:7px;
+    margin-bottom:8px
+}
+
+.card{
+    background:#101010;
+    border:1px solid #292929;
+    border-radius:7px;
+    padding:8px
+}
+
+.card b{
+    display:block;
+    color:#888;
+    font-size:10px;
+    margin-bottom:4px
+}
+
+.card span{
+    font-weight:700
+}
+
+.diag-title{
+    font-weight:700;
+    margin:10px 0 5px
+}
+
+.diag-scroll{
+    overflow:auto;
+    border:1px solid #292929;
+    border-radius:7px
+}
+
+.diag{
+    min-width:100%
+}
+
+.diag td,
+.diag th{
+    font-size:12px;
+    padding:6px 8px
+}
+
+@media(max-width:700px){
+
+    body{
+        margin:10px
+    }
+
+    .cards{
+        grid-template-columns:
+            repeat(2,1fr)
+    }
+
+    #chart{
+        height:360px
+    }
+
+}
+
+</style>
+</head>
+
 <body>
+""")
 
-<div class="topbar">
-
-<h1>BTC MARKET ENGINE</h1>
-
-<div class="price">
-BTC: {fmt_num(price, 2)}
-</div>
-
-<div class="meta">
-Ostatnia aktualizacja silnika:
-{html.escape(fmt_ts(last_update))}
-· dane MEXC
-</div>
-
-</div>
-"""
-
-
-def html_confirmed():
-    rows = confirmed_rows()
-
-    out = []
-
-    out.append(
-        '<div id="confirmedPanel" '
-        'class="panel active">'
+    body.append(
+        "<h1>BTC MARKET ENGINE</h1>"
     )
 
-    out.append(
-        '<div class="table-wrap" '
-        'id="confirmedTable">'
+    body.append(
+        f"<div class='price'>"
+        f"BTC: {current_price} USDT"
+        f"</div>"
     )
 
-    out.append("""
+    body.append(
+        f"<div class='meta'>"
+        f"Ostatnia aktualizacja: "
+        f"{fmt_ts(last_update)}"
+        f" · auto refresh 10 s"
+        f"</div>"
+    )
+
+    if latest_error:
+
+        body.append(
+            f"<div class='err'>"
+            f"{html.escape(latest_error)}"
+            f"</div>"
+        )
+
+    body.append("""
+<div class="tabs">
+
+<button
+    id="confirmedTab"
+    class="tab"
+    onclick="activateTab('confirmed')">
+    POTWIERDZONE
+</button>
+
+<button
+    id="unconfirmedTab"
+    class="tab"
+    onclick="activateTab('unconfirmed')">
+    NIEPOTWIERDZONE
+</button>
+
+<button
+    id="chartTab"
+    class="tab"
+    onclick="activateTab('chart')">
+    WYKRESY SETUPÓW
+</button>
+
+</div>
+""")
+
+    body.append("""
+<section
+    id="confirmed"
+    class="panel">
+
+<div
+    class="table-wrap"
+    id="confirmedWrap">
+
 <table>
 
 <thead>
 
 <tr>
+
 <th>Setup</th>
 <th>Kierunek</th>
+<th>Setup price</th>
 <th>Status</th>
 <th>M15</th>
 <th>Entry</th>
 <th>SL</th>
-<th>Pozycja</th>
 <th>Exit</th>
 <th>Exit R</th>
 <th>Max R</th>
 <th>Min R</th>
 <th>Trail R</th>
 <th>Powód</th>
+
 </tr>
 
 </thead>
@@ -2334,7 +2249,20 @@ def html_confirmed():
 <tbody>
 """)
 
-    for row in rows:
+    if not confirmed:
+
+        body.append(
+            """
+            <tr>
+            <td colspan="13"
+                class="empty">
+                Brak potwierdzonych setupów.
+            </td>
+            </tr>
+            """
+        )
+
+    for row in confirmed:
 
         direction_class = (
             "long"
@@ -2342,132 +2270,96 @@ def html_confirmed():
             else "short"
         )
 
-        status = position_status(
-            row
+        max_display = (
+            row["position_max_r"]
+            if row["entry_time"]
+            else row["setup_max_r"]
         )
 
-        status_class = (
-            "active-position"
-            if status == "AKTYWNA"
-            else "ok"
+        min_display = (
+            row["position_min_r"]
+            if row["entry_time"]
+            else row["setup_min_r"]
         )
 
-        out.append("<tr>")
-
-        out.append(
-            f"<td>{html.escape(fmt_ts(row['setup_time']))}</td>"
+        sl_display = (
+            row["position_sl"]
+            if row["entry_time"]
+            else row["setup_sl"]
         )
 
-        out.append(
-            f"<td class='{direction_class}'>"
-            f"{html.escape(row['direction'])}"
-            "</td>"
+        body.append(
+            f"""
+<tr>
+
+<td>{fmt_ts(row["setup_time"])}</td>
+
+<td class="{direction_class}">
+{row["direction"]}
+</td>
+
+<td>{fmt_num(row["setup_price"])}</td>
+
+<td class="yes">
+POTWIERDZONY
+</td>
+
+<td>{fmt_ts(row["confirm_time"])}</td>
+
+<td>{fmt_num(row["entry_price"])}</td>
+
+<td>{fmt_num(sl_display)}</td>
+
+<td>{fmt_num(row["exit_price"])}</td>
+
+<td>{fmt_r(row["exit_r"])}</td>
+
+<td>{fmt_r(max_display)}</td>
+
+<td>{fmt_r(min_display)}</td>
+
+<td>{fmt_r(row["trail_r"])}</td>
+
+<td>
+{html.escape(row["exit_reason"] or "—")}
+</td>
+
+</tr>
+"""
         )
 
-        out.append(
-            f"<td class='ok'>"
-            f"{html.escape(row['status'])}"
-            "</td>"
-        )
-
-        out.append(
-            f"<td>{html.escape(fmt_ts(row['confirm_time']))}</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_num(row['entry_price'], 2)}</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_num(row['position_sl'], 2)}</td>"
-        )
-
-        out.append(
-            f"<td class='{status_class}'>"
-            f"{html.escape(status)}"
-            "</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_num(row['exit_price'], 2)}"
-            f"<br><span class='meta'>"
-            f"{html.escape(fmt_ts(row['exit_time']))}"
-            f"</span></td>"
-        )
-
-        out.append(
-            f"<td>{fmt_r(row['exit_r'])}</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_r(row['position_max_r'])}</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_r(row['position_min_r'])}</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_r(row['trail_r'])}</td>"
-        )
-
-        out.append(
-            f"<td>{html.escape(row['exit_reason'] or '—')}</td>"
-        )
-
-        out.append("</tr>")
-
-    out.append("""
+    body.append("""
 </tbody>
 </table>
 
 </div>
-</div>
+</section>
 """)
 
-    return "".join(out)
+    body.append("""
+<section
+    id="unconfirmed"
+    class="panel">
 
+<div
+    class="table-wrap"
+    id="unconfirmedWrap">
 
-def html_unconfirmed():
-    rows = unconfirmed_rows()
-
-    out = []
-
-    out.append(
-        '<div id="unconfirmedPanel" '
-        'class="panel">'
-    )
-
-    out.append(
-        '<div class="small-note">'
-        'Setupy bez rzeczywistego Entry. '
-        'R jest liczone obserwacyjnie od ceny H1 setupu. '
-        'To nie są transakcje.'
-        '</div>'
-    )
-
-    out.append(
-        '<div class="table-wrap" '
-        'id="unconfirmedTable">'
-    )
-
-    out.append("""
 <table>
 
 <thead>
 
 <tr>
+
 <th>Setup</th>
 <th>Kierunek</th>
+<th>Setup price</th>
 <th>Status</th>
-<th>Cena setupu</th>
 <th>SL</th>
-<th>Akt. R</th>
 <th>Max R</th>
 <th>Min R</th>
 <th>Pierwsze zdarzenie</th>
-<th>Czas zdarzenia</th>
-<th>M15</th>
+
 </tr>
 
 </thead>
@@ -2475,7 +2367,20 @@ def html_unconfirmed():
 <tbody>
 """)
 
-    for row in rows:
+    if not unconfirmed:
+
+        body.append(
+            """
+            <tr>
+            <td colspan="8"
+                class="empty">
+                Brak niepotwierdzonych setupów.
+            </td>
+            </tr>
+            """
+        )
+
+    for row in unconfirmed:
 
         direction_class = (
             "long"
@@ -2483,362 +2388,1475 @@ def html_unconfirmed():
             else "short"
         )
 
-        event = first_event_text(
-            row
+        mx = row["setup_max_r"]
+        mn = row["setup_min_r"]
+
+        first_event = "—"
+
+        if (
+            mx is not None
+            and mx > TRAIL_ACTIVATION_R
+        ):
+
+            first_event = (
+                "TRAILING > 1R"
+            )
+
+        elif (
+            mn is not None
+            and mn <= -1.0
+        ):
+
+            first_event = (
+                "SL ≤ -1R"
+            )
+
+        body.append(
+            f"""
+<tr>
+
+<td>{fmt_ts(row["setup_time"])}</td>
+
+<td class="{direction_class}">
+{row["direction"]}
+</td>
+
+<td>{fmt_num(row["setup_price"])}</td>
+
+<td class="no">
+NIEPOTWIERDZONY
+</td>
+
+<td>{fmt_num(row["setup_sl"])}</td>
+
+<td>{fmt_r(mx)}</td>
+
+<td>{fmt_r(mn)}</td>
+
+<td>{first_event}</td>
+
+</tr>
+"""
         )
 
-        if event == "TRAILING":
-            event_class = "event-trailing"
-
-        elif event == "SL":
-            event_class = "event-sl"
-
-        else:
-            event_class = "no"
-
-        out.append("<tr>")
-
-        out.append(
-            f"<td>{html.escape(fmt_ts(row['setup_time']))}</td>"
-        )
-
-        out.append(
-            f"<td class='{direction_class}'>"
-            f"{html.escape(row['direction'])}"
-            "</td>"
-        )
-
-        out.append(
-            "<td class='no'>NIEPOTWIERDZONY</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_num(row['setup_price'], 2)}</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_num(row['setup_sl'], 2)}</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_r(row['setup_current_r'])}</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_r(row['setup_max_r'])}</td>"
-        )
-
-        out.append(
-            f"<td>{fmt_r(row['setup_min_r'])}</td>"
-        )
-
-        out.append(
-            f"<td class='{event_class}'>"
-            f"{html.escape(event)}"
-            "</td>"
-        )
-
-        out.append(
-            f"<td>{html.escape(fmt_ts(row['first_event_time']))}</td>"
-        )
-
-        out.append(
-            f"<td>{html.escape(fmt_ts(row['confirm_time']))}</td>"
-        )
-
-        out.append("</tr>")
-
-    out.append("""
+    body.append("""
 </tbody>
 </table>
 
 </div>
-</div>
+</section>
 """)
 
-    return "".join(out)
+    body.append(
+        f"""
+<section
+    id="chartPanel"
+    class="panel">
 
+<div class="toolbar">
 
-def html_footer():
-    return """
+<select
+    id="setupSelect"
+    class="select">
+
+{options}
+
+</select>
+
+<button
+    class="tf"
+    onclick="loadChart('H1')">
+    H1
+</button>
+
+<button
+    class="tf"
+    onclick="loadChart('M15')">
+    M15
+</button>
+
+<button
+    class="tf"
+    onclick="loadChart('M5')">
+    M5
+</button>
+
+</div>
+
+<div class="legend">
+
+Świece z MEXC.
+Linie: SETUP, SL, M15 CONF, M5 ENTRY.
+Pozycja tabeli, strony i wykresu jest zachowywana
+przy odświeżeniu.
+
+</div>
+
+<div
+    class="chart-scroll"
+    id="chartScroll">
+
+<svg
+    id="chart"
+    xmlns="http://www.w3.org/2000/svg">
+</svg>
+
+</div>
+
+<div
+    class="info"
+    id="chartInfo">
+
+<div class="empty">
+Wybierz setup.
+</div>
+
+</div>
+
+</section>
+"""
+    )
+
+    body.append(
+        r"""
 <script>
 
-const REFRESH_MS = 10000;
+const TAB_KEY = "btc_active_tab_v4";
 
-const activeTabKey =
-    "btc_active_tab";
+const PAGE_Y_KEY = "btc_page_y_v4";
 
-const confirmedXKey =
-    "btc_confirmed_x";
+const CONF_SCROLL_KEY =
+    "btc_confirmed_scroll_v4";
 
-const confirmedYKey =
-    "btc_confirmed_y";
+const UNCONF_SCROLL_KEY =
+    "btc_unconfirmed_scroll_v4";
 
-const unconfirmedXKey =
-    "btc_unconfirmed_x";
+const CHART_SETUP_KEY =
+    "btc_chart_setup_v4";
 
-const unconfirmedYKey =
-    "btc_unconfirmed_y";
+const CHART_TF_KEY =
+    "btc_chart_tf_v4";
+
+const CHART_SCROLL_KEY =
+    "btc_chart_scroll_v4";
 
 
-function saveScroll(
-    element,
-    xKey,
-    yKey
-) {
-    if (!element) {
-        return;
+function activateTab(name){
+
+    document
+        .getElementById("confirmed")
+        .classList
+        .remove("active");
+
+    document
+        .getElementById("unconfirmed")
+        .classList
+        .remove("active");
+
+    document
+        .getElementById("chartPanel")
+        .classList
+        .remove("active");
+
+    document
+        .getElementById("confirmedTab")
+        .classList
+        .remove("active");
+
+    document
+        .getElementById("unconfirmedTab")
+        .classList
+        .remove("active");
+
+    document
+        .getElementById("chartTab")
+        .classList
+        .remove("active");
+
+
+    if(name === "chart"){
+
+        document
+            .getElementById("chartPanel")
+            .classList
+            .add("active");
+
+        document
+            .getElementById("chartTab")
+            .classList
+            .add("active");
+
+        localStorage.setItem(
+            TAB_KEY,
+            "chart"
+        );
+
+        initChart();
+
+    }else{
+
+        document
+            .getElementById(name)
+            .classList
+            .add("active");
+
+        document
+            .getElementById(
+                name === "confirmed"
+                ? "confirmedTab"
+                : "unconfirmedTab"
+            )
+            .classList
+            .add("active");
+
+        localStorage.setItem(
+            TAB_KEY,
+            name
+        );
+    }
+}
+
+
+function saveScroll(){
+
+    const confirmed =
+        document.getElementById(
+            "confirmedWrap"
+        );
+
+    const unconfirmed =
+        document.getElementById(
+            "unconfirmedWrap"
+        );
+
+    if(confirmed){
+
+        localStorage.setItem(
+            CONF_SCROLL_KEY,
+            String(
+                confirmed.scrollLeft
+            )
+        );
     }
 
-    sessionStorage.setItem(
-        xKey,
-        String(element.scrollLeft)
-    );
+    if(unconfirmed){
 
-    sessionStorage.setItem(
-        yKey,
-        String(element.scrollTop)
+        localStorage.setItem(
+            UNCONF_SCROLL_KEY,
+            String(
+                unconfirmed.scrollLeft
+            )
+        );
+    }
+
+    localStorage.setItem(
+        PAGE_Y_KEY,
+        String(
+            window.scrollY || 0
+        )
     );
 }
 
 
-function restoreScroll(
-    element,
-    xKey,
-    yKey
-) {
-    if (!element) {
+function restoreScroll(){
+
+    const confirmed =
+        document.getElementById(
+            "confirmedWrap"
+        );
+
+    const unconfirmed =
+        document.getElementById(
+            "unconfirmedWrap"
+        );
+
+    if(confirmed){
+
+        confirmed.scrollLeft =
+            parseInt(
+                localStorage.getItem(
+                    CONF_SCROLL_KEY
+                ) || "0",
+                10
+            ) || 0;
+    }
+
+    if(unconfirmed){
+
+        unconfirmed.scrollLeft =
+            parseInt(
+                localStorage.getItem(
+                    UNCONF_SCROLL_KEY
+                ) || "0",
+                10
+            ) || 0;
+    }
+
+    window.scrollTo(
+        0,
+        parseInt(
+            localStorage.getItem(
+                PAGE_Y_KEY
+            ) || "0",
+            10
+        ) || 0
+    );
+}
+
+
+function formatTime(ts){
+
+    if(!ts){
+        return "—";
+    }
+
+    return new Date(
+        Number(ts) * 1000
+    )
+    .toISOString()
+    .replace("T"," ")
+    .slice(0,16)
+    + " UTC";
+}
+
+
+function formatPrice(value){
+
+    if(
+        value === null ||
+        value === undefined
+    ){
+
+        return "—";
+    }
+
+    return Number(value)
+        .toFixed(2);
+}
+
+
+function formatR(value){
+
+    if(
+        value === null ||
+        value === undefined
+    ){
+
+        return "—";
+    }
+
+    return (
+        Number(value) >= 0
+        ? "+"
+        : ""
+    )
+    + Number(value).toFixed(2)
+    + "R";
+}
+
+
+async function initChart(){
+
+    const select =
+        document.getElementById(
+            "setupSelect"
+        );
+
+    if(
+        !select ||
+        !select.options.length
+    ){
+
         return;
     }
 
-    const x =
-        sessionStorage.getItem(
-            xKey
+    let saved =
+        localStorage.getItem(
+            CHART_SETUP_KEY
         );
 
-    const y =
-        sessionStorage.getItem(
-            yKey
+    const exists =
+        [...select.options]
+        .some(
+            option =>
+                option.value === saved
         );
 
-    if (x !== null) {
-        element.scrollLeft =
-            parseInt(x, 10) || 0;
+    if(
+        !saved ||
+        !exists
+    ){
+
+        saved =
+            select.options[0].value;
     }
 
-    if (y !== null) {
-        element.scrollTop =
-            parseInt(y, 10) || 0;
+    select.value = saved;
+
+    const tf =
+        localStorage.getItem(
+            CHART_TF_KEY
+        ) || "M15";
+
+    await fetchChart(
+        saved,
+        tf,
+        false
+    );
+}
+
+
+async function loadChart(tf){
+
+    const select =
+        document.getElementById(
+            "setupSelect"
+        );
+
+    if(
+        !select ||
+        !select.value
+    ){
+
+        return;
+    }
+
+    localStorage.setItem(
+        CHART_SETUP_KEY,
+        select.value
+    );
+
+    localStorage.setItem(
+        CHART_TF_KEY,
+        tf
+    );
+
+    await fetchChart(
+        select.value,
+        tf,
+        true
+    );
+}
+
+
+async function fetchChart(
+    setupTime,
+    tf,
+    center
+){
+
+    try{
+
+        const response =
+            await fetch(
+                "/api/chart?setup_time="
+                + encodeURIComponent(
+                    setupTime
+                )
+                + "&tf="
+                + encodeURIComponent(tf),
+                {
+                    cache:"no-store"
+                }
+            );
+
+        const data =
+            await response.json();
+
+        if(!data.ok){
+
+            throw new Error(
+                data.error ||
+                "Błąd wykresu"
+            );
+        }
+
+        renderChart(
+            data,
+            center
+        );
+
+    }catch(error){
+
+        document
+            .getElementById(
+                "chartInfo"
+            )
+            .innerHTML =
+            "<div class='empty'>"
+            + "Błąd wykresu: "
+            + String(error)
+                .replace(/[<>]/g,"")
+            + "</div>";
     }
 }
 
 
-function bindScroll(
-    id,
-    xKey,
-    yKey
-) {
-    const element =
-        document.getElementById(id);
+function renderChart(
+    data,
+    center
+){
 
-    if (!element) {
+    const svg =
+        document.getElementById(
+            "chart"
+        );
+
+    const scroll =
+        document.getElementById(
+            "chartScroll"
+        );
+
+    const candles =
+        data.candles || [];
+
+    if(!candles.length){
+
+        svg.innerHTML = "";
+
         return;
     }
 
-    restoreScroll(
-        element,
-        xKey,
-        yKey
+    const width =
+        Math.max(
+            1000,
+            candles.length * 9
+        );
+
+    const height = 430;
+
+    const left = 48;
+    const right = 10;
+    const top = 18;
+    const bottom = 28;
+
+    const innerWidth =
+        width - left - right;
+
+    const innerHeight =
+        height - top - bottom;
+
+
+    let low =
+        Math.min(
+            ...candles.map(
+                c => c.low
+            )
+        );
+
+    let high =
+        Math.max(
+            ...candles.map(
+                c => c.high
+            )
+        );
+
+
+    [
+        data.markers.setup_price,
+        data.markers.sl,
+        data.markers.confirm_price,
+        data.markers.entry_price
+    ].forEach(
+        value => {
+
+            if(
+                value !== null &&
+                value !== undefined
+            ){
+
+                low =
+                    Math.min(
+                        low,
+                        Number(value)
+                    );
+
+                high =
+                    Math.max(
+                        high,
+                        Number(value)
+                    );
+            }
+        }
     );
 
-    element.addEventListener(
-        "scroll",
-        function() {
-            saveScroll(
-                element,
-                xKey,
-                yKey
+
+    const padding =
+        (high - low) * 0.06 || 1;
+
+    low -= padding;
+    high += padding;
+
+
+    const x = index =>
+        left
+        + (
+            index /
+            Math.max(
+                1,
+                candles.length - 1
+            )
+        )
+        * innerWidth;
+
+
+    const y = price =>
+        top
+        + (
+            (high - price)
+            /
+            (high - low)
+        )
+        * innerHeight;
+
+
+    const indexByTime = {};
+
+    candles.forEach(
+        (candle,index) => {
+
+            indexByTime[
+                candle.time
+            ] = index;
+        }
+    );
+
+
+    let output = [];
+
+    output.push(
+        "<rect "
+        + "width='" + width + "' "
+        + "height='" + height + "' "
+        + "fill='#0b0b0b'/>"
+    );
+
+
+    for(
+        let grid = 0;
+        grid <= 5;
+        grid++
+    ){
+
+        const yy =
+            top
+            + grid
+            * innerHeight
+            / 5;
+
+        const price =
+            high
+            - (
+                (high - low)
+                * grid
+                / 5
+            );
+
+        output.push(
+            "<line "
+            + "x1='" + left + "' "
+            + "y1='" + yy + "' "
+            + "x2='" + (
+                width - right
+            ) + "' "
+            + "y2='" + yy + "' "
+            + "stroke='#202020'/>"
+        );
+
+        output.push(
+            "<text "
+            + "x='3' "
+            + "y='" + (
+                yy + 4
+            ) + "' "
+            + "fill='#777' "
+            + "font-size='11'>"
+            + formatPrice(price)
+            + "</text>"
+        );
+    }
+
+
+    candles.forEach(
+        (candle,index) => {
+
+            const xx = x(index);
+
+            const up =
+                candle.close
+                >= candle.open;
+
+            const color =
+                up
+                ? "#7ee787"
+                : "#ff7b72";
+
+            const openY =
+                y(candle.open);
+
+            const closeY =
+                y(candle.close);
+
+            output.push(
+                "<line "
+                + "x1='" + xx + "' "
+                + "y1='" + y(candle.high) + "' "
+                + "x2='" + xx + "' "
+                + "y2='" + y(candle.low) + "' "
+                + "stroke='" + color + "'/>"
+            );
+
+            output.push(
+                "<rect "
+                + "x='" + (
+                    xx - 2.5
+                ) + "' "
+                + "y='" + Math.min(
+                    openY,
+                    closeY
+                ) + "' "
+                + "width='5' "
+                + "height='" + Math.max(
+                    1,
+                    Math.abs(
+                        closeY - openY
+                    )
+                ) + "' "
+                + "fill='" + color + "'/>"
+            );
+        }
+    );
+
+
+    function horizontalLine(
+        value,
+        color,
+        label,
+        dashed
+    ){
+
+        if(
+            value === null ||
+            value === undefined
+        ){
+
+            return;
+        }
+
+        const yy =
+            y(Number(value));
+
+        output.push(
+            "<line "
+            + "x1='" + left + "' "
+            + "y1='" + yy + "' "
+            + "x2='" + (
+                width - right
+            ) + "' "
+            + "y2='" + yy + "' "
+            + "stroke='" + color + "' "
+            + "stroke-width='1.5' "
+            + (
+                dashed
+                ? "stroke-dasharray='6 5' "
+                : ""
+            )
+            + "/>"
+        );
+
+        output.push(
+            "<text "
+            + "x='" + (
+                width - right - 2
+            ) + "' "
+            + "y='" + (
+                yy - 3
+            ) + "' "
+            + "text-anchor='end' "
+            + "fill='" + color + "' "
+            + "font-size='11'>"
+            + label
+            + " "
+            + formatPrice(value)
+            + "</text>"
+        );
+    }
+
+
+    function verticalLine(
+        timestamp,
+        color,
+        label
+    ){
+
+        if(
+            !timestamp ||
+            indexByTime[timestamp] === undefined
+        ){
+
+            return;
+        }
+
+        const xx =
+            x(
+                indexByTime[timestamp]
+            );
+
+        output.push(
+            "<line "
+            + "x1='" + xx + "' "
+            + "y1='" + top + "' "
+            + "x2='" + xx + "' "
+            + "y2='" + (
+                height - bottom
+            ) + "' "
+            + "stroke='" + color + "' "
+            + "stroke-dasharray='3 4'/>"
+        );
+
+        output.push(
+            "<text "
+            + "x='" + (
+                xx + 3
+            ) + "' "
+            + "y='" + (
+                top + 11
+            ) + "' "
+            + "fill='" + color + "' "
+            + "font-size='10'>"
+            + label
+            + "</text>"
+        );
+    }
+
+
+    horizontalLine(
+        data.markers.setup_price,
+        "#58a6ff",
+        "SETUP",
+        false
+    );
+
+    horizontalLine(
+        data.markers.sl,
+        "#ff7b72",
+        "SL",
+        true
+    );
+
+    horizontalLine(
+        data.markers.confirm_price,
+        "#c084fc",
+        "M15",
+        false
+    );
+
+    horizontalLine(
+        data.markers.entry_price,
+        "#f2cc60",
+        "ENTRY",
+        false
+    );
+
+
+    verticalLine(
+        data.markers.setup_time,
+        "#58a6ff",
+        "SETUP"
+    );
+
+    verticalLine(
+        data.markers.confirm_time,
+        "#c084fc",
+        "M15"
+    );
+
+    verticalLine(
+        data.markers.entry_time,
+        "#f2cc60",
+        "ENTRY"
+    );
+
+
+    svg.setAttribute(
+        "width",
+        width
+    );
+
+    svg.setAttribute(
+        "height",
+        height
+    );
+
+    svg.setAttribute(
+        "viewBox",
+        "0 0 "
+        + width
+        + " "
+        + height
+    );
+
+    svg.innerHTML =
+        output.join("");
+
+
+    const metrics =
+        data.metrics || {};
+
+
+    let info = "";
+
+
+    info += `
+<div class="cards">
+
+<div class="card">
+<b>SETUP</b>
+<span>${formatTime(
+    data.setup.time
+)}</span>
+</div>
+
+<div class="card">
+<b>KIERUNEK</b>
+<span class="${
+    data.setup.direction === "LONG"
+    ? "yes"
+    : "bad"
+}">
+${data.setup.direction}
+</span>
+</div>
+
+<div class="card">
+<b>STATUS</b>
+<span class="${
+    data.setup.status === "POTWIERDZONY"
+    ? "yes"
+    : "bad"
+}">
+${data.setup.status}
+</span>
+</div>
+
+<div class="card">
+<b>SL</b>
+<span>${formatPrice(
+    data.markers.sl
+)}</span>
+</div>
+
+</div>
+`;
+
+
+    info += `
+<div class="cards">
+
+<div class="card">
+<b>MAX R</b>
+<span>${formatR(
+    metrics.max_r
+)}</span>
+</div>
+
+<div class="card">
+<b>MIN R</b>
+<span>${formatR(
+    metrics.min_r
+)}</span>
+</div>
+
+<div class="card">
+<b>TRAIL R</b>
+<span>${formatR(
+    metrics.trail_r
+)}</span>
+</div>
+
+<div class="card">
+<b>EXIT</b>
+<span>
+${metrics.exit_reason || "—"}
+${formatR(metrics.exit_r)}
+</span>
+</div>
+
+</div>
+`;
+
+
+    info += `
+<div class="diag-title">
+M15 — 16 świec potwierdzenia
+</div>
+
+<div class="diag-scroll">
+
+<table class="diag">
+
+<thead>
+
+<tr>
+<th>#</th>
+<th>Czas</th>
+<th>Sweep</th>
+<th>EMA20</th>
+<th>Breakout 5</th>
+<th>Świeca</th>
+<th>PEŁNE</th>
+</tr>
+
+</thead>
+
+<tbody>
+`;
+
+
+    (data.m15 || []).forEach(
+        row => {
+
+            info += `
+<tr>
+
+<td>${row.n}</td>
+
+<td>${formatTime(
+    row.time
+)}</td>
+
+<td class="${
+    row.sweep
+    ? "yes"
+    : "bad"
+}">
+${
+    row.sweep
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.ema
+    ? "yes"
+    : "bad"
+}">
+${
+    row.ema
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.breakout
+    ? "yes"
+    : "bad"
+}">
+${
+    row.breakout
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.candle
+    ? "yes"
+    : "bad"
+}">
+${
+    row.candle
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.confirm
+    ? "yes"
+    : "bad"
+}">
+${
+    row.confirm
+    ? "POTW."
+    : "—"
+}
+</td>
+
+</tr>
+`;
+        }
+    );
+
+
+    info += `
+</tbody>
+</table>
+
+</div>
+`;
+
+
+    if(
+        data.setup.status
+        === "POTWIERDZONY"
+    ){
+
+        info += `
+<div class="diag-title">
+M5 — 8 świec wejścia
+</div>
+
+<div class="diag-scroll">
+
+<table class="diag">
+
+<thead>
+
+<tr>
+<th>#</th>
+<th>Czas</th>
+<th>Breakout 3</th>
+<th>EMA20</th>
+<th>Świeca</th>
+<th>ENTRY</th>
+</tr>
+
+</thead>
+
+<tbody>
+`;
+
+        (data.m5 || []).forEach(
+            row => {
+
+                info += `
+<tr>
+
+<td>${row.n}</td>
+
+<td>${formatTime(
+    row.time
+)}</td>
+
+<td class="${
+    row.breakout
+    ? "yes"
+    : "bad"
+}">
+${
+    row.breakout
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.ema
+    ? "yes"
+    : "bad"
+}">
+${
+    row.ema
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.candle
+    ? "yes"
+    : "bad"
+}">
+${
+    row.candle
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.entry
+    ? "yes"
+    : "bad"
+}">
+${
+    row.entry
+    ? "ENTRY"
+    : "—"
+}
+</td>
+
+</tr>
+`;
+            }
+        );
+
+        info += `
+</tbody>
+</table>
+
+</div>
+`;
+
+    }else{
+
+        const misses = {
+            sweep: 0,
+            ema: 0,
+            breakout: 0,
+            candle: 0
+        };
+
+
+        (data.m15 || []).forEach(
+            row => {
+
+                if(!row.sweep){
+                    misses.sweep++;
+                }
+
+                if(!row.ema){
+                    misses.ema++;
+                }
+
+                if(!row.breakout){
+                    misses.breakout++;
+                }
+
+                if(!row.candle){
+                    misses.candle++;
+                }
+            }
+        );
+
+
+        info += `
+<div class="diag-title">
+Dlaczego NIEPOTWIERDZONY?
+</div>
+
+<div class="legend">
+
+Jedna z 16 świec musi spełnić
+jednocześnie wszystkie 4 warunki.
+
+</div>
+
+<div class="legend">
+
+Braki w oknie:
+
+Sweep ${misses.sweep}/16 ·
+EMA ${misses.ema}/16 ·
+Breakout ${misses.breakout}/16 ·
+Świeca ${misses.candle}/16.
+
+</div>
+`;
+    }
+
+
+    document.getElementById(
+        "chartInfo"
+    ).innerHTML = info;
+
+
+    requestAnimationFrame(
+        () => {
+
+            requestAnimationFrame(
+                () => {
+
+                    const saved =
+                        localStorage.getItem(
+                            CHART_SCROLL_KEY
+                        );
+
+                    const setupIndex =
+                        indexByTime[
+                            data.markers.setup_time
+                        ];
+
+
+                    if(
+                        !center &&
+                        saved !== null
+                    ){
+
+                        scroll.scrollLeft =
+                            parseInt(
+                                saved,
+                                10
+                            ) || 0;
+
+                    }else if(
+                        center &&
+                        setupIndex !== undefined
+                    ){
+
+                        scroll.scrollLeft =
+                            Math.max(
+                                0,
+                                x(setupIndex)
+                                - scroll.clientWidth
+                                * 0.30
+                            );
+                    }
+
+
+                    localStorage.setItem(
+                        CHART_SCROLL_KEY,
+                        String(
+                            scroll.scrollLeft
+                        )
+                    );
+                }
             );
         }
     );
 }
 
 
-function activateTab(
-    name
-) {
-    const confirmed =
-        document.getElementById(
-            "confirmedPanel"
+const confirmedWrap =
+    document.getElementById(
+        "confirmedWrap"
+    );
+
+const unconfirmedWrap =
+    document.getElementById(
+        "unconfirmedWrap"
+    );
+
+const chartScroll =
+    document.getElementById(
+        "chartScroll"
+    );
+
+const setupSelect =
+    document.getElementById(
+        "setupSelect"
+    );
+
+
+if(confirmedWrap){
+
+    confirmedWrap.onscroll =
+        () => {
+
+            localStorage.setItem(
+                CONF_SCROLL_KEY,
+                String(
+                    confirmedWrap.scrollLeft
+                )
+            );
+        };
+}
+
+
+if(unconfirmedWrap){
+
+    unconfirmedWrap.onscroll =
+        () => {
+
+            localStorage.setItem(
+                UNCONF_SCROLL_KEY,
+                String(
+                    unconfirmedWrap.scrollLeft
+                )
+            );
+        };
+}
+
+
+if(chartScroll){
+
+    chartScroll.onscroll =
+        () => {
+
+            localStorage.setItem(
+                CHART_SCROLL_KEY,
+                String(
+                    chartScroll.scrollLeft
+                )
+            );
+        };
+}
+
+
+if(setupSelect){
+
+    setupSelect.onchange =
+        () => {
+
+            localStorage.setItem(
+                CHART_SETUP_KEY,
+                setupSelect.value
+            );
+
+            fetchChart(
+                setupSelect.value,
+                localStorage.getItem(
+                    CHART_TF_KEY
+                ) || "M15",
+                true
+            );
+        };
+}
+
+
+window.addEventListener(
+    "beforeunload",
+    saveScroll
+);
+
+
+window.addEventListener(
+    "load",
+    () => {
+
+        restoreScroll();
+
+        const savedTab =
+            localStorage.getItem(
+                TAB_KEY
+            ) || "confirmed";
+
+        activateTab(
+            savedTab
         );
 
-    const unconfirmed =
-        document.getElementById(
-            "unconfirmedPanel"
-        );
-
-    const confirmedButton =
-        document.getElementById(
-            "confirmedTab"
-        );
-
-    const unconfirmedButton =
-        document.getElementById(
-            "unconfirmedTab"
-        );
-
-    if (name === "unconfirmed") {
-
-        confirmed.classList.remove(
-            "active"
-        );
-
-        unconfirmed.classList.add(
-            "active"
-        );
-
-        confirmedButton.classList.remove(
-            "active"
-        );
-
-        unconfirmedButton.classList.add(
-            "active"
-        );
-
-    } else {
-
-        unconfirmed.classList.remove(
-            "active"
-        );
-
-        confirmed.classList.add(
-            "active"
-        );
-
-        unconfirmedButton.classList.remove(
-            "active"
-        );
-
-        confirmedButton.classList.add(
-            "active"
+        setTimeout(
+            restoreScroll,
+            100
         );
     }
-
-    localStorage.setItem(
-        activeTabKey,
-        name
-    );
-}
-
-
-function setTab(
-    name
-) {
-    activateTab(name);
-}
-
-
-bindScroll(
-    "confirmedTable",
-    confirmedXKey,
-    confirmedYKey
-);
-
-bindScroll(
-    "unconfirmedTable",
-    unconfirmedXKey,
-    unconfirmedYKey
-);
-
-
-const savedTab =
-    localStorage.getItem(
-        activeTabKey
-    );
-
-activateTab(
-    savedTab || "confirmed"
 );
 
 
 setTimeout(
-    function() {
+    () => {
+
+        saveScroll();
+
         location.reload();
+
     },
-    REFRESH_MS
+    10000
 );
 
 </script>
-
-</body>
-</html>
 """
-
-
-def dashboard():
-    latest_error = state_get(
-        "latest_error",
-        ""
     )
 
-    out = []
-
-    out.append(
-        html_header()
+    body.append(
+        "</body></html>"
     )
 
-    out.append(
-        html_top()
-    )
+    return "".join(body)
 
-    if latest_error:
-
-        out.append(
-            "<div class='error'>"
-            f"{html.escape(latest_error)}"
-            "</div>"
-        )
-
-    out.append("""
-<div class="tabs">
-
-<button
-    id="confirmedTab"
-    class="tab"
-    onclick="setTab('confirmed')"
->
-POTWIERDZONE
-</button>
-
-<button
-    id="unconfirmedTab"
-    class="tab"
-    onclick="setTab('unconfirmed')"
->
-NIEPOTWIERDZONE
-</button>
-
-</div>
-""")
-
-    out.append(
-        html_confirmed()
-    )
-
-    out.append(
-        html_unconfirmed()
-    )
-
-    out.append(
-        html_footer()
-    )
-
-    return "".join(out)
-
-
-# ============================================================
-# HTTP SERVER
-# ============================================================
 
 class Handler(
     BaseHTTPRequestHandler
@@ -2846,36 +3864,55 @@ class Handler(
 
     def do_GET(self):
 
-        path = self.path.split(
-            "?",
-            1
-        )[0]
+        path, _, query = (
+            self.path.partition("?")
+        )
 
-        if path == "/health":
+        if path == "/api/chart":
 
-            payload = {
-                "ok": True,
-                "btc_price": state_get(
-                    "btc_price"
-                ),
-                "last_update": state_get(
-                    "last_live_update"
-                ),
-                "error": state_get(
-                    "latest_error",
-                    ""
+            try:
+
+                params = (
+                    urllib.parse
+                    .parse_qs(query)
                 )
-            }
 
-            raw = json.dumps(
-                payload
-            ).encode(
-                "utf-8"
-            )
+                setup_time = int(
+                    params.get(
+                        "setup_time",
+                        [""]
+                    )[0]
+                )
 
-            self.send_response(
-                200
-            )
+                tf = params.get(
+                    "tf",
+                    ["M15"]
+                )[0]
+
+                payload = chart_payload(
+                    setup_time,
+                    tf
+                )
+
+                raw = json.dumps(
+                    payload,
+                    separators=(",", ":")
+                ).encode("utf-8")
+
+                self.send_response(
+                    200
+                )
+
+            except Exception as e:
+
+                raw = json.dumps({
+                    "ok": False,
+                    "error": repr(e)
+                }).encode("utf-8")
+
+                self.send_response(
+                    500
+                )
 
             self.send_header(
                 "Content-Type",
@@ -2899,6 +3936,49 @@ class Handler(
             )
 
             return
+
+
+        if path == "/health":
+
+            payload = {
+                "ok": True,
+                "last_update":
+                    state_get(
+                        "last_live_update"
+                    ),
+                "error":
+                    state_get(
+                        "latest_error",
+                        ""
+                    )
+            }
+
+            raw = json.dumps(
+                payload
+            ).encode()
+
+            self.send_response(
+                200
+            )
+
+            self.send_header(
+                "Content-Type",
+                "application/json; charset=utf-8"
+            )
+
+            self.send_header(
+                "Content-Length",
+                str(len(raw))
+            )
+
+            self.end_headers()
+
+            self.wfile.write(
+                raw
+            )
+
+            return
+
 
         raw = dashboard().encode(
             "utf-8"
@@ -2929,35 +4009,31 @@ class Handler(
             raw
         )
 
+
     def log_message(
         self,
-        *_args
+        *_
     ):
         return
 
-
-# ============================================================
-# ENGINE
-# ============================================================
 
 def engine_loop():
 
     init_db()
 
-    # Initial history rebuild.
     rebuild_history()
 
     while True:
 
         try:
 
-            live_cycle()
+            live_refresh()
 
-        except Exception as exc:
+        except Exception as e:
 
             state_set(
                 "latest_error",
-                repr(exc)
+                repr(e)
             )
 
         time.sleep(
@@ -2965,27 +4041,16 @@ def engine_loop():
         )
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 if __name__ == "__main__":
 
     init_db()
 
-    worker = threading.Thread(
+    threading.Thread(
         target=engine_loop,
         daemon=True
-    )
+    ).start()
 
-    worker.start()
-
-    server = HTTPServer(
-        (
-            "0.0.0.0",
-            PORT
-        ),
+    HTTPServer(
+        ("0.0.0.0", PORT),
         Handler
-    )
-
-    server.serve_forever()
+    ).serve_forever()
