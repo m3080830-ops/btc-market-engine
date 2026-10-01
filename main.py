@@ -10,10 +10,16 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 SYMBOL = "BTC_USDT"
+
 BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
 
 POLL_SECONDS = 30
+
 DB_FILE = "/tmp/market_history.db"
 
 TRAIL_ACTIVATION_R = 1.0
@@ -22,27 +28,40 @@ H1_HISTORY = 200
 M15_HISTORY = 2000
 M5_HISTORY = 2000
 
-PORT = int(os.environ.get("PORT", "3000"))
-
 M15_CONFIRM_CANDLES = 16
 M5_ENTRY_CANDLES = 8
 
+PORT = int(
+    os.environ.get(
+        "PORT",
+        "3000"
+    )
+)
+
+
+# ============================================================
+# BASIC HELPERS
+# ============================================================
 
 def now_ts():
     return int(time.time())
 
 
 def fmt_ts(ts):
+
     if not ts:
         return "—"
 
     return datetime.fromtimestamp(
         int(ts),
         tz=timezone.utc
-    ).strftime("%Y-%m-%d %H:%M UTC")
+    ).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
 
 
 def fmt_num(v, d=2):
+
     if v is None:
         return "—"
 
@@ -50,13 +69,19 @@ def fmt_num(v, d=2):
 
 
 def fmt_r(v):
+
     if v is None:
         return "—"
 
     return f"{float(v):+.2f}R"
 
 
+# ============================================================
+# DATABASE
+# ============================================================
+
 def db_conn():
+
     c = sqlite3.connect(
         DB_FILE,
         timeout=30
@@ -120,11 +145,18 @@ def state_get(key, default=None):
     with db_conn() as c:
 
         row = c.execute(
-            "SELECT value FROM state WHERE key=?",
+            """
+            SELECT value
+            FROM state
+            WHERE key=?
+            """,
             (key,)
         ).fetchone()
 
-        return row[0] if row else default
+        if row:
+            return row[0]
+
+    return default
 
 
 def state_set(key, value):
@@ -133,7 +165,10 @@ def state_set(key, value):
 
         c.execute(
             """
-            INSERT OR REPLACE INTO state(key,value)
+            INSERT OR REPLACE INTO state(
+                key,
+                value
+            )
             VALUES(?,?)
             """,
             (
@@ -145,12 +180,17 @@ def state_set(key, value):
         c.commit()
 
 
+# ============================================================
+# MEXC
+# ============================================================
+
 def api_get(url):
 
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "btc-market-engine/1.0"
+            "User-Agent":
+                "btc-market-engine/1.0"
         }
     )
 
@@ -166,20 +206,52 @@ def api_get(url):
 
 def parse_klines(payload):
 
-    data = (
-        payload.get("data", payload)
-        if isinstance(payload, dict)
-        else payload
-    )
+    if isinstance(
+        payload,
+        dict
+    ):
 
-    if not isinstance(data, dict):
+        data = payload.get(
+            "data",
+            payload
+        )
+
+    else:
+
+        data = payload
+
+    if not isinstance(
+        data,
+        dict
+    ):
+
         return []
 
-    times = data.get("time", [])
-    opens = data.get("open", [])
-    closes = data.get("close", [])
-    highs = data.get("high", [])
-    lows = data.get("low", [])
+    times = data.get(
+        "time",
+        []
+    )
+
+    opens = data.get(
+        "open",
+        []
+    )
+
+    closes = data.get(
+        "close",
+        []
+    )
+
+    highs = data.get(
+        "high",
+        []
+    )
+
+    lows = data.get(
+        "low",
+        []
+    )
+
     vols = data.get(
         "vol",
         [0] * len(times)
@@ -187,15 +259,15 @@ def parse_klines(payload):
 
     out = []
 
-    for i in range(
-        min(
-            len(times),
-            len(opens),
-            len(closes),
-            len(highs),
-            len(lows)
-        )
-    ):
+    count = min(
+        len(times),
+        len(opens),
+        len(closes),
+        len(highs),
+        len(lows)
+    )
+
+    for i in range(count):
 
         out.append({
             "time": int(times[i]),
@@ -254,7 +326,8 @@ def get_klines(
         })
 
         url = (
-            f"{BASE_URL}/{SYMBOL}?{qs}"
+            f"{BASE_URL}/{SYMBOL}?"
+            f"{qs}"
         )
 
         page = parse_klines(
@@ -291,21 +364,31 @@ def get_klines(
 
 def closed(rows):
 
-    return (
-        rows[:-1]
-        if len(rows) > 1
-        else []
-    )
+    if len(rows) > 1:
+        return rows[:-1]
+
+    return []
 
 
-def ema(values, period):
+# ============================================================
+# INDICATORS
+# ============================================================
+
+def ema(
+    values,
+    period
+):
 
     if not values:
         return []
 
-    k = 2.0 / (period + 1)
+    k = 2.0 / (
+        period + 1
+    )
 
-    out = [values[0]]
+    out = [
+        values[0]
+    ]
 
     for value in values[1:]:
 
@@ -317,7 +400,10 @@ def ema(values, period):
     return out
 
 
-def atr(rows, period=14):
+def atr(
+    rows,
+    period=14
+):
 
     if not rows:
         return []
@@ -330,9 +416,18 @@ def atr(rows, period=14):
 
         tr.append(
             max(
-                row["high"] - row["low"],
-                abs(row["high"] - prev),
-                abs(row["low"] - prev)
+                row["high"]
+                - row["low"],
+
+                abs(
+                    row["high"]
+                    - prev
+                ),
+
+                abs(
+                    row["low"]
+                    - prev
+                )
             )
         )
 
@@ -340,12 +435,16 @@ def atr(rows, period=14):
 
     out = []
 
-    for i in range(len(tr)):
+    for i in range(
+        len(tr)
+    ):
 
         if i < period:
 
             out.append(
-                sum(tr[:i + 1])
+                sum(
+                    tr[:i + 1]
+                )
                 / (i + 1)
             )
 
@@ -357,11 +456,16 @@ def atr(rows, period=14):
                         i - period + 1:
                         i + 1
                     ]
-                ) / period
+                )
+                / period
             )
 
     return out
 
+
+# ============================================================
+# H1 SETUP
+# ============================================================
 
 def h1_setup(rows):
 
@@ -390,7 +494,9 @@ def h1_setup(rows):
     if i < 11:
         return None
 
-    prev_close_5 = r[i - 5]["close"]
+    prev_close_5 = (
+        r[i - 5]["close"]
+    )
 
     prev_high_10 = max(
         x["high"]
@@ -406,9 +512,12 @@ def h1_setup(rows):
 
     if (
         prev_close_5 < e50[i - 5]
-        and cur["close"] > prev_high_10
-        and cur["close"] > e20[i]
-        and e20[i] > e20[i - 1]
+        and cur["close"]
+            > prev_high_10
+        and cur["close"]
+            > e20[i]
+        and e20[i]
+            > e20[i - 1]
     ):
 
         return {
@@ -419,9 +528,12 @@ def h1_setup(rows):
 
     if (
         prev_close_5 > e50[i - 5]
-        and cur["close"] < prev_low_10
-        and cur["close"] < e20[i]
-        and e20[i] < e20[i - 1]
+        and cur["close"]
+            < prev_low_10
+        and cur["close"]
+            < e20[i]
+        and e20[i]
+            < e20[i - 1]
     ):
 
         return {
@@ -464,7 +576,9 @@ def find_h1_setups(rows):
 
         cur = r[i]
 
-        prev_close_5 = r[i - 5]["close"]
+        prev_close_5 = (
+            r[i - 5]["close"]
+        )
 
         prev_high_10 = max(
             x["high"]
@@ -480,18 +594,24 @@ def find_h1_setups(rows):
 
         if (
             prev_close_5 < e50[i - 5]
-            and cur["close"] > prev_high_10
-            and cur["close"] > e20[i]
-            and e20[i] > e20[i - 1]
+            and cur["close"]
+                > prev_high_10
+            and cur["close"]
+                > e20[i]
+            and e20[i]
+                > e20[i - 1]
         ):
 
             direction = "LONG"
 
         elif (
             prev_close_5 > e50[i - 5]
-            and cur["close"] < prev_low_10
-            and cur["close"] < e20[i]
-            and e20[i] < e20[i - 1]
+            and cur["close"]
+                < prev_low_10
+            and cur["close"]
+                < e20[i]
+            and e20[i]
+                < e20[i - 1]
         ):
 
             direction = "SHORT"
@@ -506,6 +626,10 @@ def find_h1_setups(rows):
 
     return out
 
+
+# ============================================================
+# STRUCTURAL SL
+# ============================================================
 
 def structural_sl(
     m15_rows,
@@ -526,10 +650,15 @@ def structural_sl(
     if len(r) < 20:
         return None
 
-    a = atr(
+    atr_values = atr(
         r,
         14
-    )[-1]
+    )
+
+    if not atr_values:
+        return None
+
+    current_atr = atr_values[-1]
 
     last6 = r[-6:]
 
@@ -540,7 +669,7 @@ def structural_sl(
                 x["low"]
                 for x in last6
             )
-            - a * 0.2
+            - current_atr * 0.2
         )
 
     return (
@@ -548,9 +677,13 @@ def structural_sl(
             x["high"]
             for x in last6
         )
-        + a * 0.2
+        + current_atr * 0.2
     )
 
+
+# ============================================================
+# M15 DIAGNOSTICS
+# ============================================================
 
 def m15_diagnostics(
     m15_rows,
@@ -604,7 +737,12 @@ def m15_diagnostics(
                 "ema": False,
                 "breakout": False,
                 "candle": False,
-                "confirm": False
+                "confirm": False,
+                "open": c.get("open"),
+                "close": c.get("close"),
+                "high": c.get("high"),
+                "low": c.get("low"),
+                "ema20": None
             })
 
             continue
@@ -622,37 +760,45 @@ def m15_diagnostics(
         if setup["direction"] == "LONG":
 
             sweep = (
-                c["low"] <= e20[i]
+                c["low"]
+                <= e20[i]
             )
 
             ema_ok = (
-                c["close"] > e20[i]
+                c["close"]
+                > e20[i]
             )
 
             breakout = (
-                c["close"] > high5
+                c["close"]
+                > high5
             )
 
             candle = (
-                c["close"] > c["open"]
+                c["close"]
+                > c["open"]
             )
 
         else:
 
             sweep = (
-                c["high"] >= e20[i]
+                c["high"]
+                >= e20[i]
             )
 
             ema_ok = (
-                c["close"] < e20[i]
+                c["close"]
+                < e20[i]
             )
 
             breakout = (
-                c["close"] < low5
+                c["close"]
+                < low5
             )
 
             candle = (
-                c["close"] < c["open"]
+                c["close"]
+                < c["open"]
             )
 
         out.append({
@@ -700,6 +846,10 @@ def confirm_m15(
     return None
 
 
+# ============================================================
+# M5 DIAGNOSTICS
+# ============================================================
+
 def m5_diagnostics(
     m5_rows,
     setup,
@@ -711,7 +861,8 @@ def m5_diagnostics(
     after = [
         x
         for x in r
-        if x["time"] > confirmation["time"]
+        if x["time"]
+        > confirmation["time"]
     ]
 
     candidates = after[
@@ -770,29 +921,35 @@ def m5_diagnostics(
         if setup["direction"] == "LONG":
 
             breakout = (
-                c["close"] > high3
+                c["close"]
+                > high3
             )
 
             ema_ok = (
-                c["close"] > e20[i]
+                c["close"]
+                > e20[i]
             )
 
             candle = (
-                c["close"] > c["open"]
+                c["close"]
+                > c["open"]
             )
 
         else:
 
             breakout = (
-                c["close"] < low3
+                c["close"]
+                < low3
             )
 
             ema_ok = (
-                c["close"] < e20[i]
+                c["close"]
+                < e20[i]
             )
 
             candle = (
-                c["close"] < c["open"]
+                c["close"]
+                < c["open"]
             )
 
         out.append({
@@ -828,7 +985,8 @@ def find_m5_entry(
     after = [
         x
         for x in r
-        if x["time"] > confirmation["time"]
+        if x["time"]
+        > confirmation["time"]
     ]
 
     candidates = after[
@@ -872,20 +1030,29 @@ def find_m5_entry(
         if setup["direction"] == "LONG":
 
             ok = (
-                c["close"] > high3
-                and c["close"] > e20[i]
-                and c["close"] > c["open"]
+                c["close"]
+                > high3
+                and c["close"]
+                > e20[i]
+                and c["close"]
+                > c["open"]
             )
 
         else:
 
             ok = (
-                c["close"] < low3
-                and c["close"] < e20[i]
-                and c["close"] < c["open"]
+                c["close"]
+                < low3
+                and c["close"]
+                < e20[i]
+                and c["close"]
+                < c["open"]
             )
 
-        if ok and i + 1 < len(r):
+        if (
+            ok
+            and i + 1 < len(r)
+        ):
 
             return {
                 "signal_time": c["time"],
@@ -895,6 +1062,10 @@ def find_m5_entry(
 
     return None
 
+
+# ============================================================
+# R CALCULATIONS
+# ============================================================
 
 def r_value(
     direction,
@@ -929,7 +1100,10 @@ def excursion(
     sl
 ):
 
-    if abs(entry - sl) <= 0:
+    if abs(
+        entry - sl
+    ) <= 0:
+
         return None, None
 
     values = []
@@ -966,6 +1140,10 @@ def excursion(
     )
 
 
+# ============================================================
+# POSITION SIMULATION
+# ============================================================
+
 def simulate_position(
     m5_rows,
     m15_rows,
@@ -984,7 +1162,10 @@ def simulate_position(
 
     entry_price = entry["price"]
 
-    if abs(entry_price - sl) <= 0:
+    if abs(
+        entry_price - sl
+    ) <= 0:
+
         return None
 
     original_sl = sl
@@ -1095,7 +1276,9 @@ def simulate_position(
 
     if exit_time is None:
 
-        closed_m5 = closed(m5_rows)
+        closed_m5 = closed(
+            m5_rows
+        )
 
         if closed_m5:
 
@@ -1135,6 +1318,10 @@ def simulate_position(
         "trail_r": trail_r
     }
 
+
+# ============================================================
+# DATABASE SETUP OPERATIONS
+# ============================================================
 
 def upsert_setup(s):
 
@@ -1178,7 +1365,9 @@ def update_setup(
 
     fields["last_update"] = now_ts()
 
-    keys = list(fields)
+    keys = list(
+        fields.keys()
+    )
 
     sql = (
         "UPDATE setups SET "
@@ -1208,7 +1397,9 @@ def update_setup(
         c.commit()
 
 
-def get_setups(limit=100):
+def get_setups(
+    limit=100
+):
 
     with db_conn() as c:
 
@@ -1222,6 +1413,10 @@ def get_setups(limit=100):
             (limit,)
         ).fetchall()
 
+
+# ============================================================
+# HISTORY
+# ============================================================
 
 def rebuild_history():
 
@@ -1246,14 +1441,6 @@ def rebuild_history():
             h1
         )
 
-        with db_conn() as c:
-
-            c.execute(
-                "DELETE FROM setups"
-            )
-
-            c.commit()
-
         for s in found:
 
             confirm = confirm_m15(
@@ -1273,11 +1460,10 @@ def rebuild_history():
 
             if sl:
 
-                fields[
-                    "setup_max_r"
-                ], fields[
-                    "setup_min_r"
-                ] = excursion(
+                (
+                    fields["setup_max_r"],
+                    fields["setup_min_r"]
+                ) = excursion(
                     m5,
                     s["time"],
                     s["direction"],
@@ -1285,7 +1471,9 @@ def rebuild_history():
                     sl
                 )
 
-            upsert_setup(s)
+            upsert_setup(
+                s
+            )
 
             if confirm:
 
@@ -1351,6 +1539,10 @@ def rebuild_history():
         )
 
 
+# ============================================================
+# LIVE POSITION MANAGEMENT
+# ============================================================
+
 def manage_open_positions(
     m5,
     m15
@@ -1374,18 +1566,24 @@ def manage_open_positions(
         entry = row["entry_price"]
         sl = row["position_sl"]
 
-        if entry is None or sl is None:
+        if (
+            entry is None
+            or sl is None
+        ):
+
             continue
 
         max_r = (
             row["position_max_r"]
-            if row["position_max_r"] is not None
+            if row["position_max_r"]
+            is not None
             else 0.0
         )
 
         min_r = (
             row["position_min_r"]
-            if row["position_min_r"] is not None
+            if row["position_min_r"]
+            is not None
             else 0.0
         )
 
@@ -1530,6 +1728,10 @@ def manage_open_positions(
         )
 
 
+# ============================================================
+# LIVE REFRESH
+# ============================================================
+
 def live_refresh():
 
     h1 = get_klines(
@@ -1547,7 +1749,9 @@ def live_refresh():
         1000
     )
 
-    latest = h1_setup(h1)
+    latest = h1_setup(
+        h1
+    )
 
     if latest:
 
@@ -1579,11 +1783,10 @@ def live_refresh():
 
         if sl:
 
-            fields[
-                "setup_max_r"
-            ], fields[
-                "setup_min_r"
-            ] = excursion(
+            (
+                fields["setup_max_r"],
+                fields["setup_min_r"]
+            ) = excursion(
                 m5,
                 setup["time"],
                 setup["direction"],
@@ -1616,11 +1819,14 @@ def live_refresh():
 
                     active = False
 
-                    for other in get_setups(200):
+                    for other in get_setups(
+                        200
+                    ):
 
                         if (
                             other["entry_time"]
-                            and other["exit_time"] is None
+                            and other["exit_time"]
+                            is None
                             and other["setup_time"]
                             != row["setup_time"]
                         ):
@@ -1668,6 +1874,10 @@ def live_refresh():
     )
 
 
+# ============================================================
+# CHART DATA
+# ============================================================
+
 def chart_candles(
     setup_time,
     interval,
@@ -1708,14 +1918,17 @@ def chart_payload(
             FROM setups
             WHERE setup_time=?
             """,
-            (int(setup_time),)
+            (
+                int(setup_time),
+            )
         ).fetchone()
 
     if not row:
 
         return {
             "ok": False,
-            "error": "Nie znaleziono setupu."
+            "error":
+                "Nie znaleziono setupu."
         }
 
     setup = {
@@ -1725,9 +1938,18 @@ def chart_payload(
     }
 
     mapping = {
-        "H1": ("Min60", 300),
-        "M15": ("Min15", 1000),
-        "M5": ("Min5", 2400)
+        "H1": (
+            "Min60",
+            300
+        ),
+        "M15": (
+            "Min15",
+            1000
+        ),
+        "M5": (
+            "Min5",
+            2400
+        )
     }
 
     interval, total = mapping.get(
@@ -1789,28 +2011,36 @@ def chart_payload(
         entry = None
 
     markers = {
-        "setup_time": row["setup_time"],
-        "setup_price": row["setup_price"],
+        "setup_time":
+            row["setup_time"],
+
+        "setup_price":
+            row["setup_price"],
+
         "sl": (
             row["position_sl"]
             if row["entry_time"]
             else row["setup_sl"]
         ),
+
         "confirm_time": (
             confirm["time"]
             if confirm
             else None
         ),
+
         "confirm_price": (
             confirm["price"]
             if confirm
             else None
         ),
+
         "entry_time": (
             entry["time"]
             if entry
             else None
         ),
+
         "entry_price": (
             entry["price"]
             if entry
@@ -1820,23 +2050,34 @@ def chart_payload(
 
     return {
         "ok": True,
+
         "tf": tf,
 
         "setup": {
-            "time": row["setup_time"],
-            "direction": row["direction"],
-            "price": row["setup_price"],
-            "status": row["status"]
+            "time":
+                row["setup_time"],
+
+            "direction":
+                row["direction"],
+
+            "price":
+                row["setup_price"],
+
+            "status":
+                row["status"]
         },
 
-        "markers": markers,
+        "markers":
+            markers,
 
-        "candles": candles,
+        "candles":
+            candles,
 
-        "m15": m15_diagnostics(
-            m15,
-            setup
-        ),
+        "m15":
+            m15_diagnostics(
+                m15,
+                setup
+            ),
 
         "m5": (
             m5_diagnostics(
@@ -1854,17 +2095,28 @@ def chart_payload(
                 if row["entry_time"]
                 else row["setup_max_r"]
             ),
+
             "min_r": (
                 row["position_min_r"]
                 if row["entry_time"]
                 else row["setup_min_r"]
             ),
-            "trail_r": row["trail_r"],
-            "exit_r": row["exit_r"],
-            "exit_reason": row["exit_reason"]
+
+            "trail_r":
+                row["trail_r"],
+
+            "exit_r":
+                row["exit_r"],
+
+            "exit_reason":
+                row["exit_reason"]
         }
     }
 
+
+# ============================================================
+# DASHBOARD
+# ============================================================
 
 def dashboard():
 
@@ -1897,30 +2149,38 @@ def dashboard():
             )
 
     except Exception:
+
         pass
 
     options = ""
 
     for row in rows:
 
-        options += (
-            f"<option value='{row['setup_time']}'>"
-            f"{html.escape(fmt_ts(row['setup_time']))}"
+        option_label = (
+            f"{fmt_ts(row['setup_time'])}"
             f" · {row['direction']}"
-            f" · {html.escape(row['status'])}"
+            f" · {row['status']}"
+        )
+
+        options += (
+            f"<option "
+            f"value='{row['setup_time']}'>"
+            f"{html.escape(option_label)}"
             f"</option>"
         )
 
     confirmed = [
         r
         for r in rows
-        if r["status"] == "POTWIERDZONY"
+        if r["status"]
+        == "POTWIERDZONY"
     ]
 
     unconfirmed = [
         r
         for r in rows
-        if r["status"] != "POTWIERDZONY"
+        if r["status"]
+        != "POTWIERDZONY"
     ]
 
     body = []
@@ -1929,9 +2189,13 @@ def dashboard():
 <!doctype html>
 <html>
 <head>
+
 <meta charset="utf-8">
-<meta name="viewport"
-      content="width=device-width,initial-scale=1">
+
+<meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+>
 
 <title>BTC Market Engine</title>
 
@@ -1986,17 +2250,44 @@ h1{
 .tf,
 .select{
     background:#181818;
-    color:#aaa;
+    color:#ddd;
     border:1px solid #333;
     border-radius:8px;
-    padding:9px;
-    cursor:pointer
+    padding:10px 12px;
+    cursor:pointer;
+    font-size:14px;
+    outline:none
 }
 
 .tab.active{
     color:#fff;
     background:#292929;
     border-color:#666
+}
+
+.select{
+    width:100%;
+    max-width:100%;
+    min-height:52px;
+    appearance:auto;
+    -webkit-appearance:auto
+}
+
+.select:focus{
+    border-color:#666;
+    background:#202020;
+    color:#fff
+}
+
+.select option{
+    background:#181818;
+    color:#ddd;
+    padding:12px
+}
+
+.select option:checked{
+    background:#303030;
+    color:#fff
 }
 
 .panel{
@@ -2058,7 +2349,15 @@ th{
     display:flex;
     gap:7px;
     flex-wrap:wrap;
-    margin:10px 0
+    margin:10px 0;
+    padding:10px;
+    background:#151515;
+    border:1px solid #303030;
+    border-radius:10px
+}
+
+.toolbar .select{
+    flex:1 1 100%
 }
 
 .legend{
@@ -2068,12 +2367,35 @@ th{
 }
 
 .chart-scroll{
+    position:relative;
     overflow:auto;
     border:1px solid #333;
     border-radius:8px;
     background:#0b0b0b;
     max-height:58vh;
-    min-height:360px
+    min-height:360px;
+    padding-left:76px
+}
+
+.chart-yaxis{
+    position:absolute;
+    left:0;
+    top:0;
+    bottom:0;
+    width:76px;
+    background:#0b0b0b;
+    z-index:10;
+    pointer-events:none;
+    border-right:1px solid #252525
+}
+
+.chart-yaxis-label{
+    position:absolute;
+    right:7px;
+    transform:translateY(-50%);
+    color:#777;
+    font-size:11px;
+    white-space:nowrap
 }
 
 #chart{
@@ -2155,6 +2477,7 @@ th{
 }
 
 </style>
+
 </head>
 
 <body>
@@ -2165,25 +2488,31 @@ th{
     )
 
     body.append(
-        f"<div class='price'>"
-        f"BTC: {current_price} USDT"
-        f"</div>"
+        f"""
+<div class="price">
+BTC: {current_price} USDT
+</div>
+"""
     )
 
     body.append(
-        f"<div class='meta'>"
-        f"Ostatnia aktualizacja: "
-        f"{fmt_ts(last_update)}"
-        f" · auto refresh 10 s"
-        f"</div>"
+        f"""
+<div class="meta">
+Ostatnia aktualizacja:
+{fmt_ts(last_update)}
+· auto refresh 10 s
+</div>
+"""
     )
 
     if latest_error:
 
         body.append(
-            f"<div class='err'>"
-            f"{html.escape(latest_error)}"
-            f"</div>"
+            f"""
+<div class="err">
+{html.escape(latest_error)}
+</div>
+"""
         )
 
     body.append("""
@@ -2253,20 +2582,22 @@ th{
 
         body.append(
             """
-            <tr>
-            <td colspan="13"
-                class="empty">
-                Brak potwierdzonych setupów.
-            </td>
-            </tr>
-            """
+<tr>
+<td
+    colspan="13"
+    class="empty">
+Brak potwierdzonych setupów.
+</td>
+</tr>
+"""
         )
 
     for row in confirmed:
 
         direction_class = (
             "long"
-            if row["direction"] == "LONG"
+            if row["direction"]
+            == "LONG"
             else "short"
         )
 
@@ -2292,36 +2623,59 @@ th{
             f"""
 <tr>
 
-<td>{fmt_ts(row["setup_time"])}</td>
+<td>
+{fmt_ts(row["setup_time"])}
+</td>
 
 <td class="{direction_class}">
 {row["direction"]}
 </td>
 
-<td>{fmt_num(row["setup_price"])}</td>
+<td>
+{fmt_num(row["setup_price"])}
+</td>
 
 <td class="yes">
 POTWIERDZONY
 </td>
 
-<td>{fmt_ts(row["confirm_time"])}</td>
-
-<td>{fmt_num(row["entry_price"])}</td>
-
-<td>{fmt_num(sl_display)}</td>
-
-<td>{fmt_num(row["exit_price"])}</td>
-
-<td>{fmt_r(row["exit_r"])}</td>
-
-<td>{fmt_r(max_display)}</td>
-
-<td>{fmt_r(min_display)}</td>
-
-<td>{fmt_r(row["trail_r"])}</td>
+<td>
+{fmt_ts(row["confirm_time"])}
+</td>
 
 <td>
-{html.escape(row["exit_reason"] or "—")}
+{fmt_num(row["entry_price"])}
+</td>
+
+<td>
+{fmt_num(sl_display)}
+</td>
+
+<td>
+{fmt_num(row["exit_price"])}
+</td>
+
+<td>
+{fmt_r(row["exit_r"])}
+</td>
+
+<td>
+{fmt_r(max_display)}
+</td>
+
+<td>
+{fmt_r(min_display)}
+</td>
+
+<td>
+{fmt_r(row["trail_r"])}
+</td>
+
+<td>
+{html.escape(
+    row["exit_reason"]
+    or "—"
+)}
 </td>
 
 </tr>
@@ -2371,20 +2725,22 @@ POTWIERDZONY
 
         body.append(
             """
-            <tr>
-            <td colspan="8"
-                class="empty">
-                Brak niepotwierdzonych setupów.
-            </td>
-            </tr>
-            """
+<tr>
+<td
+    colspan="8"
+    class="empty">
+Brak niepotwierdzonych setupów.
+</td>
+</tr>
+"""
         )
 
     for row in unconfirmed:
 
         direction_class = (
             "long"
-            if row["direction"] == "LONG"
+            if row["direction"]
+            == "LONG"
             else "short"
         )
 
@@ -2415,25 +2771,37 @@ POTWIERDZONY
             f"""
 <tr>
 
-<td>{fmt_ts(row["setup_time"])}</td>
+<td>
+{fmt_ts(row["setup_time"])}
+</td>
 
 <td class="{direction_class}">
 {row["direction"]}
 </td>
 
-<td>{fmt_num(row["setup_price"])}</td>
+<td>
+{fmt_num(row["setup_price"])}
+</td>
 
 <td class="no">
 NIEPOTWIERDZONY
 </td>
 
-<td>{fmt_num(row["setup_sl"])}</td>
+<td>
+{fmt_num(row["setup_sl"])}
+</td>
 
-<td>{fmt_r(mx)}</td>
+<td>
+{fmt_r(mx)}
+</td>
 
-<td>{fmt_r(mn)}</td>
+<td>
+{fmt_r(mn)}
+</td>
 
-<td>{first_event}</td>
+<td>
+{first_event}
+</td>
 
 </tr>
 """
@@ -2466,19 +2834,19 @@ NIEPOTWIERDZONY
 <button
     class="tf"
     onclick="loadChart('H1')">
-    H1
+H1
 </button>
 
 <button
     class="tf"
     onclick="loadChart('M15')">
-    M15
+M15
 </button>
 
 <button
     class="tf"
     onclick="loadChart('M5')">
-    M5
+M5
 </button>
 
 </div>
@@ -2495,6 +2863,11 @@ przy odświeżeniu.
 <div
     class="chart-scroll"
     id="chartScroll">
+
+<div
+    class="chart-yaxis"
+    id="chartYAxis">
+</div>
 
 <svg
     id="chart"
@@ -2518,73 +2891,122 @@ Wybierz setup.
     )
 
     body.append(
-        r"""
+r"""
 <script>
 
-const TAB_KEY = "btc_active_tab_v4";
+const TAB_KEY =
+    "btc_active_tab_v5";
 
-const PAGE_Y_KEY = "btc_page_y_v4";
+const PAGE_Y_KEY =
+    "btc_page_y_v5";
 
 const CONF_SCROLL_KEY =
-    "btc_confirmed_scroll_v4";
+    "btc_confirmed_scroll_v5";
 
 const UNCONF_SCROLL_KEY =
-    "btc_unconfirmed_scroll_v4";
+    "btc_unconfirmed_scroll_v5";
 
 const CHART_SETUP_KEY =
-    "btc_chart_setup_v4";
+    "btc_chart_setup_v5";
 
 const CHART_TF_KEY =
-    "btc_chart_tf_v4";
+    "btc_chart_tf_v5";
 
 const CHART_SCROLL_KEY =
-    "btc_chart_scroll_v4";
+    "btc_chart_scroll_v5";
 
 
 function activateTab(name){
 
-    document
-        .getElementById("confirmed")
-        .classList
-        .remove("active");
+    const confirmed =
+        document.getElementById(
+            "confirmed"
+        );
 
-    document
-        .getElementById("unconfirmed")
-        .classList
-        .remove("active");
+    const unconfirmed =
+        document.getElementById(
+            "unconfirmed"
+        );
 
-    document
-        .getElementById("chartPanel")
-        .classList
-        .remove("active");
+    const chartPanel =
+        document.getElementById(
+            "chartPanel"
+        );
 
-    document
-        .getElementById("confirmedTab")
-        .classList
-        .remove("active");
+    const confirmedTab =
+        document.getElementById(
+            "confirmedTab"
+        );
 
-    document
-        .getElementById("unconfirmedTab")
-        .classList
-        .remove("active");
+    const unconfirmedTab =
+        document.getElementById(
+            "unconfirmedTab"
+        );
 
-    document
-        .getElementById("chartTab")
-        .classList
-        .remove("active");
+    const chartTab =
+        document.getElementById(
+            "chartTab"
+        );
+
+
+    if(confirmed){
+
+        confirmed.classList.remove(
+            "active"
+        );
+    }
+
+    if(unconfirmed){
+
+        unconfirmed.classList.remove(
+            "active"
+        );
+    }
+
+    if(chartPanel){
+
+        chartPanel.classList.remove(
+            "active"
+        );
+    }
+
+    if(confirmedTab){
+
+        confirmedTab.classList.remove(
+            "active"
+        );
+    }
+
+    if(unconfirmedTab){
+
+        unconfirmedTab.classList.remove(
+            "active"
+        );
+    }
+
+    if(chartTab){
+
+        chartTab.classList.remove(
+            "active"
+        );
+    }
 
 
     if(name === "chart"){
 
-        document
-            .getElementById("chartPanel")
-            .classList
-            .add("active");
+        if(chartPanel){
 
-        document
-            .getElementById("chartTab")
-            .classList
-            .add("active");
+            chartPanel.classList.add(
+                "active"
+            );
+        }
+
+        if(chartTab){
+
+            chartTab.classList.add(
+                "active"
+            );
+        }
 
         localStorage.setItem(
             TAB_KEY,
@@ -2593,27 +3015,49 @@ function activateTab(name){
 
         initChart();
 
-    }else{
+        return;
+    }
 
-        document
-            .getElementById(name)
-            .classList
-            .add("active");
 
-        document
-            .getElementById(
-                name === "confirmed"
-                ? "confirmedTab"
-                : "unconfirmedTab"
-            )
-            .classList
-            .add("active");
-
-        localStorage.setItem(
-            TAB_KEY,
+    const panel =
+        document.getElementById(
             name
         );
+
+    if(panel){
+
+        panel.classList.add(
+            "active"
+        );
     }
+
+
+    if(
+        name === "confirmed"
+        && confirmedTab
+    ){
+
+        confirmedTab.classList.add(
+            "active"
+        );
+    }
+
+
+    if(
+        name === "unconfirmed"
+        && unconfirmedTab
+    ){
+
+        unconfirmedTab.classList.add(
+            "active"
+        );
+    }
+
+
+    localStorage.setItem(
+        TAB_KEY,
+        name
+    );
 }
 
 
@@ -2670,6 +3114,7 @@ function restoreScroll(){
             "unconfirmedWrap"
         );
 
+
     if(confirmed){
 
         confirmed.scrollLeft =
@@ -2680,6 +3125,7 @@ function restoreScroll(){
                 10
             ) || 0;
     }
+
 
     if(unconfirmed){
 
@@ -2692,21 +3138,71 @@ function restoreScroll(){
             ) || 0;
     }
 
-    window.scrollTo(
-        0,
+
+    const savedPage =
         parseInt(
             localStorage.getItem(
                 PAGE_Y_KEY
             ) || "0",
             10
-        ) || 0
+        ) || 0;
+
+
+    window.scrollTo(
+        0,
+        savedPage
     );
+}
+
+
+function bindTableScroll(){
+
+    const confirmed =
+        document.getElementById(
+            "confirmedWrap"
+        );
+
+    const unconfirmed =
+        document.getElementById(
+            "unconfirmedWrap"
+        );
+
+
+    if(confirmed){
+
+        confirmed.onscroll =
+            () => {
+
+                localStorage.setItem(
+                    CONF_SCROLL_KEY,
+                    String(
+                        confirmed.scrollLeft
+                    )
+                );
+            };
+    }
+
+
+    if(unconfirmed){
+
+        unconfirmed.onscroll =
+            () => {
+
+                localStorage.setItem(
+                    UNCONF_SCROLL_KEY,
+                    String(
+                        unconfirmed.scrollLeft
+                    )
+                );
+            };
+    }
 }
 
 
 function formatTime(ts){
 
     if(!ts){
+
         return "—";
     }
 
@@ -2714,8 +3210,14 @@ function formatTime(ts){
         Number(ts) * 1000
     )
     .toISOString()
-    .replace("T"," ")
-    .slice(0,16)
+    .replace(
+        "T",
+        " "
+    )
+    .slice(
+        0,
+        16
+    )
     + " UTC";
 }
 
@@ -2723,8 +3225,8 @@ function formatTime(ts){
 function formatPrice(value){
 
     if(
-        value === null ||
-        value === undefined
+        value === null
+        || value === undefined
     ){
 
         return "—";
@@ -2738,8 +3240,8 @@ function formatPrice(value){
 function formatR(value){
 
     if(
-        value === null ||
-        value === undefined
+        value === null
+        || value === undefined
     ){
 
         return "—";
@@ -2763,40 +3265,49 @@ async function initChart(){
         );
 
     if(
-        !select ||
-        !select.options.length
+        !select
+        || !select.options.length
     ){
 
         return;
     }
+
 
     let saved =
         localStorage.getItem(
             CHART_SETUP_KEY
         );
 
+
     const exists =
-        [...select.options]
-        .some(
+        [
+            ...select.options
+        ].some(
             option =>
                 option.value === saved
         );
 
+
     if(
-        !saved ||
-        !exists
+        !saved
+        || !exists
     ){
 
         saved =
             select.options[0].value;
     }
 
-    select.value = saved;
+
+    select.value =
+        saved;
+
 
     const tf =
         localStorage.getItem(
             CHART_TF_KEY
-        ) || "M15";
+        )
+        || "M15";
+
 
     await fetchChart(
         saved,
@@ -2814,22 +3325,25 @@ async function loadChart(tf){
         );
 
     if(
-        !select ||
-        !select.value
+        !select
+        || !select.value
     ){
 
         return;
     }
+
 
     localStorage.setItem(
         CHART_SETUP_KEY,
         select.value
     );
 
+
     localStorage.setItem(
         CHART_TF_KEY,
         tf
     );
+
 
     await fetchChart(
         select.value,
@@ -2854,40 +3368,54 @@ async function fetchChart(
                     setupTime
                 )
                 + "&tf="
-                + encodeURIComponent(tf),
+                + encodeURIComponent(
+                    tf
+                ),
                 {
-                    cache:"no-store"
+                    cache:
+                        "no-store"
                 }
             );
+
 
         const data =
             await response.json();
 
+
         if(!data.ok){
 
             throw new Error(
-                data.error ||
-                "Błąd wykresu"
+                data.error
+                || "Błąd wykresu"
             );
         }
+
 
         renderChart(
             data,
             center
         );
 
+
     }catch(error){
 
-        document
-            .getElementById(
+        const info =
+            document.getElementById(
                 "chartInfo"
-            )
-            .innerHTML =
-            "<div class='empty'>"
-            + "Błąd wykresu: "
-            + String(error)
-                .replace(/[<>]/g,"")
-            + "</div>";
+            );
+
+        if(info){
+
+            info.innerHTML =
+                "<div class='empty'>"
+                + "Błąd wykresu: "
+                + String(error)
+                    .replace(
+                        /[<>]/g,
+                        ""
+                    )
+                + "</div>";
+        }
     }
 }
 
@@ -2907,15 +3435,26 @@ function renderChart(
             "chartScroll"
         );
 
+    const yAxis =
+        document.getElementById(
+            "chartYAxis"
+        );
+
+
     const candles =
-        data.candles || [];
+        data.candles
+        || [];
 
-    if(!candles.length){
 
-        svg.innerHTML = "";
+    if(
+        !svg
+        || !scroll
+        || !candles.length
+    ){
 
         return;
     }
+
 
     const width =
         Math.max(
@@ -2923,18 +3462,33 @@ function renderChart(
             candles.length * 9
         );
 
-    const height = 430;
+    const height =
+        430;
 
-    const left = 48;
-    const right = 10;
-    const top = 18;
-    const bottom = 28;
+
+    const left =
+        8;
+
+    const right =
+        10;
+
+    const top =
+        18;
+
+    const bottom =
+        28;
+
 
     const innerWidth =
-        width - left - right;
+        width
+        - left
+        - right;
+
 
     const innerHeight =
-        height - top - bottom;
+        height
+        - top
+        - bottom;
 
 
     let low =
@@ -2943,6 +3497,7 @@ function renderChart(
                 c => c.low
             )
         );
+
 
     let high =
         Math.max(
@@ -2961,8 +3516,8 @@ function renderChart(
         value => {
 
             if(
-                value !== null &&
-                value !== undefined
+                value !== null
+                && value !== undefined
             ){
 
                 low =
@@ -2982,38 +3537,45 @@ function renderChart(
 
 
     const padding =
-        (high - low) * 0.06 || 1;
+        (
+            high - low
+        ) * 0.06 || 1;
+
 
     low -= padding;
     high += padding;
 
 
-    const x = index =>
-        left
-        + (
-            index /
-            Math.max(
-                1,
-                candles.length - 1
+    const x =
+        index =>
+            left
+            + (
+                index
+                /
+                Math.max(
+                    1,
+                    candles.length - 1
+                )
             )
-        )
-        * innerWidth;
+            * innerWidth;
 
 
-    const y = price =>
-        top
-        + (
-            (high - price)
-            /
-            (high - low)
-        )
-        * innerHeight;
+    const y =
+        price =>
+            top
+            + (
+                (high - price)
+                /
+                (high - low)
+            )
+            * innerHeight;
 
 
     const indexByTime = {};
 
+
     candles.forEach(
-        (candle,index) => {
+        (candle, index) => {
 
             indexByTime[
                 candle.time
@@ -3024,12 +3586,23 @@ function renderChart(
 
     let output = [];
 
+
     output.push(
         "<rect "
-        + "width='" + width + "' "
-        + "height='" + height + "' "
+        + "width='"
+        + width
+        + "' "
+        + "height='"
+        + height
+        + "' "
         + "fill='#0b0b0b'/>"
     );
+
+
+    if(yAxis){
+
+        yAxis.innerHTML = "";
+    }
 
 
     for(
@@ -3044,6 +3617,7 @@ function renderChart(
             * innerHeight
             / 5;
 
+
         const price =
             high
             - (
@@ -3052,77 +3626,134 @@ function renderChart(
                 / 5
             );
 
+
         output.push(
             "<line "
-            + "x1='" + left + "' "
-            + "y1='" + yy + "' "
-            + "x2='" + (
+            + "x1='"
+            + left
+            + "' "
+            + "y1='"
+            + yy
+            + "' "
+            + "x2='"
+            + (
                 width - right
-            ) + "' "
-            + "y2='" + yy + "' "
+            )
+            + "' "
+            + "y2='"
+            + yy
+            + "' "
             + "stroke='#202020'/>"
         );
 
-        output.push(
-            "<text "
-            + "x='3' "
-            + "y='" + (
-                yy + 4
-            ) + "' "
-            + "fill='#777' "
-            + "font-size='11'>"
-            + formatPrice(price)
-            + "</text>"
-        );
+
+        if(yAxis){
+
+            const label =
+                document.createElement(
+                    "div"
+                );
+
+
+            label.className =
+                "chart-yaxis-label";
+
+
+            label.style.top =
+                yy + "px";
+
+
+            label.textContent =
+                formatPrice(
+                    price
+                );
+
+
+            yAxis.appendChild(
+                label
+            );
+        }
     }
 
 
     candles.forEach(
-        (candle,index) => {
+        (
+            candle,
+            index
+        ) => {
 
-            const xx = x(index);
+            const xx =
+                x(index);
+
 
             const up =
                 candle.close
                 >= candle.open;
+
 
             const color =
                 up
                 ? "#7ee787"
                 : "#ff7b72";
 
+
             const openY =
-                y(candle.open);
+                y(
+                    candle.open
+                );
+
 
             const closeY =
-                y(candle.close);
+                y(
+                    candle.close
+                );
+
 
             output.push(
                 "<line "
-                + "x1='" + xx + "' "
-                + "y1='" + y(candle.high) + "' "
-                + "x2='" + xx + "' "
-                + "y2='" + y(candle.low) + "' "
-                + "stroke='" + color + "'/>"
+                + "x1='"
+                + xx
+                + "' "
+                + "y1='"
+                + y(candle.high)
+                + "' "
+                + "x2='"
+                + xx
+                + "' "
+                + "y2='"
+                + y(candle.low)
+                + "' "
+                + "stroke='"
+                + color
+                + "'/>"
             );
+
 
             output.push(
                 "<rect "
-                + "x='" + (
+                + "x='"
+                + (
                     xx - 2.5
-                ) + "' "
-                + "y='" + Math.min(
+                )
+                + "' "
+                + "y='"
+                + Math.min(
                     openY,
                     closeY
-                ) + "' "
+                )
+                + "' "
                 + "width='5' "
-                + "height='" + Math.max(
+                + "height='"
+                + Math.max(
                     1,
                     Math.abs(
                         closeY - openY
                     )
-                ) + "' "
-                + "fill='" + color + "'/>"
+                )
+                + "' "
+                + "fill='"
+                + color
+                + "'/>"
             );
         }
     );
@@ -3136,25 +3767,39 @@ function renderChart(
     ){
 
         if(
-            value === null ||
-            value === undefined
+            value === null
+            || value === undefined
         ){
 
             return;
         }
 
+
         const yy =
-            y(Number(value));
+            y(
+                Number(value)
+            );
+
 
         output.push(
             "<line "
-            + "x1='" + left + "' "
-            + "y1='" + yy + "' "
-            + "x2='" + (
+            + "x1='"
+            + left
+            + "' "
+            + "y1='"
+            + yy
+            + "' "
+            + "x2='"
+            + (
                 width - right
-            ) + "' "
-            + "y2='" + yy + "' "
-            + "stroke='" + color + "' "
+            )
+            + "' "
+            + "y2='"
+            + yy
+            + "' "
+            + "stroke='"
+            + color
+            + "' "
             + "stroke-width='1.5' "
             + (
                 dashed
@@ -3164,16 +3809,23 @@ function renderChart(
             + "/>"
         );
 
+
         output.push(
             "<text "
-            + "x='" + (
+            + "x='"
+            + (
                 width - right - 2
-            ) + "' "
-            + "y='" + (
+            )
+            + "' "
+            + "y='"
+            + (
                 yy - 3
-            ) + "' "
+            )
+            + "' "
             + "text-anchor='end' "
-            + "fill='" + color + "' "
+            + "fill='"
+            + color
+            + "' "
             + "font-size='11'>"
             + label
             + " "
@@ -3190,39 +3842,62 @@ function renderChart(
     ){
 
         if(
-            !timestamp ||
-            indexByTime[timestamp] === undefined
+            !timestamp
+            || indexByTime[
+                timestamp
+            ] === undefined
         ){
 
             return;
         }
 
+
         const xx =
             x(
-                indexByTime[timestamp]
+                indexByTime[
+                    timestamp
+                ]
             );
+
 
         output.push(
             "<line "
-            + "x1='" + xx + "' "
-            + "y1='" + top + "' "
-            + "x2='" + xx + "' "
-            + "y2='" + (
+            + "x1='"
+            + xx
+            + "' "
+            + "y1='"
+            + top
+            + "' "
+            + "x2='"
+            + xx
+            + "' "
+            + "y2='"
+            + (
                 height - bottom
-            ) + "' "
-            + "stroke='" + color + "' "
+            )
+            + "' "
+            + "stroke='"
+            + color
+            + "' "
             + "stroke-dasharray='3 4'/>"
         );
 
+
         output.push(
             "<text "
-            + "x='" + (
+            + "x='"
+            + (
                 xx + 3
-            ) + "' "
-            + "y='" + (
+            )
+            + "' "
+            + "y='"
+            + (
                 top + 11
-            ) + "' "
-            + "fill='" + color + "' "
+            )
+            + "' "
+            + "fill='"
+            + color
+            + "' "
             + "font-size='10'>"
             + label
             + "</text>"
@@ -3237,6 +3912,7 @@ function renderChart(
         false
     );
 
+
     horizontalLine(
         data.markers.sl,
         "#ff7b72",
@@ -3244,12 +3920,14 @@ function renderChart(
         true
     );
 
+
     horizontalLine(
         data.markers.confirm_price,
         "#c084fc",
         "M15",
         false
     );
+
 
     horizontalLine(
         data.markers.entry_price,
@@ -3265,11 +3943,13 @@ function renderChart(
         "SETUP"
     );
 
+
     verticalLine(
         data.markers.confirm_time,
         "#c084fc",
         "M15"
     );
+
 
     verticalLine(
         data.markers.entry_time,
@@ -3283,10 +3963,12 @@ function renderChart(
         width
     );
 
+
     svg.setAttribute(
         "height",
         height
     );
+
 
     svg.setAttribute(
         "viewBox",
@@ -3295,6 +3977,7 @@ function renderChart(
         + " "
         + height
     );
+
 
     svg.innerHTML =
         output.join("");
@@ -3312,15 +3995,18 @@ function renderChart(
 
 <div class="card">
 <b>SETUP</b>
-<span>${formatTime(
+<span>
+${formatTime(
     data.setup.time
-)}</span>
+)}
+</span>
 </div>
 
 <div class="card">
 <b>KIERUNEK</b>
 <span class="${
-    data.setup.direction === "LONG"
+    data.setup.direction
+    === "LONG"
     ? "yes"
     : "bad"
 }">
@@ -3331,7 +4017,8 @@ ${data.setup.direction}
 <div class="card">
 <b>STATUS</b>
 <span class="${
-    data.setup.status === "POTWIERDZONY"
+    data.setup.status
+    === "POTWIERDZONY"
     ? "yes"
     : "bad"
 }">
@@ -3341,9 +4028,11 @@ ${data.setup.status}
 
 <div class="card">
 <b>SL</b>
-<span>${formatPrice(
+<span>
+${formatPrice(
     data.markers.sl
-)}</span>
+)}
+</span>
 </div>
 
 </div>
@@ -3355,30 +4044,38 @@ ${data.setup.status}
 
 <div class="card">
 <b>MAX R</b>
-<span>${formatR(
+<span>
+${formatR(
     metrics.max_r
-)}</span>
+)}
+</span>
 </div>
 
 <div class="card">
 <b>MIN R</b>
-<span>${formatR(
+<span>
+${formatR(
     metrics.min_r
-)}</span>
+)}
+</span>
 </div>
 
 <div class="card">
 <b>TRAIL R</b>
-<span>${formatR(
+<span>
+${formatR(
     metrics.trail_r
-)}</span>
+)}
+</span>
 </div>
 
 <div class="card">
 <b>EXIT</b>
 <span>
 ${metrics.exit_reason || "—"}
-${formatR(metrics.exit_r)}
+${formatR(
+    metrics.exit_r
+)}
 </span>
 </div>
 
@@ -3413,17 +4110,23 @@ M15 — 16 świec potwierdzenia
 `;
 
 
-    (data.m15 || []).forEach(
+    (
+        data.m15 || []
+    ).forEach(
         row => {
 
             info += `
 <tr>
 
-<td>${row.n}</td>
+<td>
+${row.n}
+</td>
 
-<td>${formatTime(
+<td>
+${formatTime(
     row.time
-)}</td>
+)}
+</td>
 
 <td class="${
     row.sweep
@@ -3529,17 +4232,24 @@ M5 — 8 świec wejścia
 <tbody>
 `;
 
-        (data.m5 || []).forEach(
+
+        (
+            data.m5 || []
+        ).forEach(
             row => {
 
                 info += `
 <tr>
 
-<td>${row.n}</td>
+<td>
+${row.n}
+</td>
 
-<td>${formatTime(
+<td>
+${formatTime(
     row.time
-)}</td>
+)}
+</td>
 
 <td class="${
     row.breakout
@@ -3594,6 +4304,7 @@ ${
             }
         );
 
+
         info += `
 </tbody>
 </table>
@@ -3611,22 +4322,28 @@ ${
         };
 
 
-        (data.m15 || []).forEach(
+        (
+            data.m15 || []
+        ).forEach(
             row => {
 
                 if(!row.sweep){
+
                     misses.sweep++;
                 }
 
                 if(!row.ema){
+
                     misses.ema++;
                 }
 
                 if(!row.breakout){
+
                     misses.breakout++;
                 }
 
                 if(!row.candle){
+
                     misses.candle++;
                 }
             }
@@ -3659,9 +4376,17 @@ Breakout ${misses.breakout}/16 ·
     }
 
 
-    document.getElementById(
-        "chartInfo"
-    ).innerHTML = info;
+    const infoElement =
+        document.getElementById(
+            "chartInfo"
+        );
+
+
+    if(infoElement){
+
+        infoElement.innerHTML =
+            info;
+    }
 
 
     requestAnimationFrame(
@@ -3675,15 +4400,17 @@ Breakout ${misses.breakout}/16 ·
                             CHART_SCROLL_KEY
                         );
 
+
                     const setupIndex =
                         indexByTime[
-                            data.markers.setup_time
+                            data.markers
+                                .setup_time
                         ];
 
 
                     if(
-                        !center &&
-                        saved !== null
+                        !center
+                        && saved !== null
                     ){
 
                         scroll.scrollLeft =
@@ -3693,16 +4420,19 @@ Breakout ${misses.breakout}/16 ·
                             ) || 0;
 
                     }else if(
-                        center &&
-                        setupIndex !== undefined
+                        center
+                        && setupIndex
+                        !== undefined
                     ){
 
                         scroll.scrollLeft =
                             Math.max(
                                 0,
                                 x(setupIndex)
-                                - scroll.clientWidth
-                                * 0.30
+                                - (
+                                    scroll.clientWidth
+                                    * 0.30
+                                )
                             );
                     }
 
@@ -3720,55 +4450,43 @@ Breakout ${misses.breakout}/16 ·
 }
 
 
-const confirmedWrap =
-    document.getElementById(
-        "confirmedWrap"
-    );
-
-const unconfirmedWrap =
-    document.getElementById(
-        "unconfirmedWrap"
-    );
-
-const chartScroll =
-    document.getElementById(
-        "chartScroll"
-    );
-
 const setupSelect =
     document.getElementById(
         "setupSelect"
     );
 
 
-if(confirmedWrap){
+if(setupSelect){
 
-    confirmedWrap.onscroll =
+    setupSelect.onchange =
         () => {
 
             localStorage.setItem(
-                CONF_SCROLL_KEY,
-                String(
-                    confirmedWrap.scrollLeft
+                CHART_SETUP_KEY,
+                setupSelect.value
+            );
+
+
+            const tf =
+                localStorage.getItem(
+                    CHART_TF_KEY
                 )
+                || "M15";
+
+
+            fetchChart(
+                setupSelect.value,
+                tf,
+                true
             );
         };
 }
 
 
-if(unconfirmedWrap){
-
-    unconfirmedWrap.onscroll =
-        () => {
-
-            localStorage.setItem(
-                UNCONF_SCROLL_KEY,
-                String(
-                    unconfirmedWrap.scrollLeft
-                )
-            );
-        };
-}
+const chartScroll =
+    document.getElementById(
+        "chartScroll"
+    );
 
 
 if(chartScroll){
@@ -3786,24 +4504,322 @@ if(chartScroll){
 }
 
 
-if(setupSelect){
+async function refreshDashboard(){
 
-    setupSelect.onchange =
-        () => {
+    saveScroll();
 
-            localStorage.setItem(
-                CHART_SETUP_KEY,
-                setupSelect.value
+
+    const savedTab =
+        localStorage.getItem(
+            TAB_KEY
+        )
+        || "confirmed";
+
+
+    const savedPageY =
+        window.scrollY || 0;
+
+
+    const savedSetup =
+        localStorage.getItem(
+            CHART_SETUP_KEY
+        );
+
+
+    const savedTf =
+        localStorage.getItem(
+            CHART_TF_KEY
+        )
+        || "M15";
+
+
+    try{
+
+        const response =
+            await fetch(
+                window.location.pathname,
+                {
+                    cache:
+                        "no-store"
+                }
             );
 
-            fetchChart(
-                setupSelect.value,
-                localStorage.getItem(
-                    CHART_TF_KEY
-                ) || "M15",
-                true
+
+        const text =
+            await response.text();
+
+
+        const parser =
+            new DOMParser();
+
+
+        const doc =
+            parser.parseFromString(
+                text,
+                "text/html"
             );
-        };
+
+
+        const newConfirmed =
+            doc.getElementById(
+                "confirmed"
+            );
+
+
+        const newUnconfirmed =
+            doc.getElementById(
+                "unconfirmed"
+            );
+
+
+        const oldConfirmed =
+            document.getElementById(
+                "confirmed"
+            );
+
+
+        const oldUnconfirmed =
+            document.getElementById(
+                "unconfirmed"
+            );
+
+
+        if(
+            newConfirmed
+            && oldConfirmed
+        ){
+
+            oldConfirmed.replaceWith(
+                newConfirmed
+            );
+        }
+
+
+        if(
+            newUnconfirmed
+            && oldUnconfirmed
+        ){
+
+            oldUnconfirmed.replaceWith(
+                newUnconfirmed
+            );
+        }
+
+
+        const newPrice =
+            doc.querySelector(
+                ".price"
+            );
+
+
+        const oldPrice =
+            document.querySelector(
+                ".price"
+            );
+
+
+        if(
+            newPrice
+            && oldPrice
+        ){
+
+            oldPrice.textContent =
+                newPrice.textContent;
+        }
+
+
+        const newMeta =
+            doc.querySelector(
+                ".meta"
+            );
+
+
+        const oldMeta =
+            document.querySelector(
+                ".meta"
+            );
+
+
+        if(
+            newMeta
+            && oldMeta
+        ){
+
+            oldMeta.textContent =
+                newMeta.textContent;
+        }
+
+
+        const newError =
+            doc.querySelector(
+                ".err"
+            );
+
+
+        const oldError =
+            document.querySelector(
+                ".err"
+            );
+
+
+        if(
+            newError
+            && oldError
+        ){
+
+            oldError.textContent =
+                newError.textContent;
+
+        }else if(
+            newError
+            && !oldError
+        ){
+
+            const title =
+                document.querySelector(
+                    "h1"
+                );
+
+
+            if(title){
+
+                title.insertAdjacentElement(
+                    "afterend",
+                    newError
+                );
+            }
+
+        }else if(
+            !newError
+            && oldError
+        ){
+
+            oldError.remove();
+        }
+
+
+        const newSelect =
+            doc.getElementById(
+                "setupSelect"
+            );
+
+
+        const oldSelect =
+            document.getElementById(
+                "setupSelect"
+            );
+
+
+        if(
+            newSelect
+            && oldSelect
+        ){
+
+            const currentValue =
+                oldSelect.value;
+
+
+            oldSelect.innerHTML =
+                newSelect.innerHTML;
+
+
+            const stillExists =
+                [
+                    ...oldSelect.options
+                ].some(
+                    option =>
+                        option.value
+                        === currentValue
+                );
+
+
+            if(stillExists){
+
+                oldSelect.value =
+                    currentValue;
+
+            }else if(
+                savedSetup
+            ){
+
+                const savedExists =
+                    [
+                        ...oldSelect.options
+                    ].some(
+                        option =>
+                            option.value
+                            === savedSetup
+                    );
+
+
+                if(savedExists){
+
+                    oldSelect.value =
+                        savedSetup;
+                }
+            }
+        }
+
+
+        bindTableScroll();
+
+
+        activateTab(
+            savedTab
+        );
+
+
+        requestAnimationFrame(
+            () => {
+
+                window.scrollTo(
+                    0,
+                    savedPageY
+                );
+
+
+                restoreScroll();
+            }
+        );
+
+
+        if(
+            savedTab === "chart"
+        ){
+
+            const select =
+                document.getElementById(
+                    "setupSelect"
+                );
+
+
+            if(
+                select
+                && select.value
+            ){
+
+                await fetchChart(
+                    select.value,
+                    savedTf,
+                    false
+                );
+            }
+        }
+
+
+    }catch(error){
+
+        console.log(
+            "Refresh error:",
+            error
+        );
+    }
+
+
+    setTimeout(
+        refreshDashboard,
+        10000
+    );
 }
 
 
@@ -3817,34 +4833,38 @@ window.addEventListener(
     "load",
     () => {
 
+        bindTableScroll();
+
         restoreScroll();
+
 
         const savedTab =
             localStorage.getItem(
                 TAB_KEY
-            ) || "confirmed";
+            )
+            || "confirmed";
+
 
         activateTab(
             savedTab
         );
 
+
         setTimeout(
-            restoreScroll,
+            () => {
+
+                restoreScroll();
+
+            },
             100
         );
+
+
+        setTimeout(
+            refreshDashboard,
+            10000
+        );
     }
-);
-
-
-setTimeout(
-    () => {
-
-        saveScroll();
-
-        location.reload();
-
-    },
-    10000
 );
 
 </script>
@@ -3858,6 +4878,10 @@ setTimeout(
     return "".join(body)
 
 
+# ============================================================
+# HTTP SERVER
+# ============================================================
+
 class Handler(
     BaseHTTPRequestHandler
 ):
@@ -3868,14 +4892,18 @@ class Handler(
             self.path.partition("?")
         )
 
+
         if path == "/api/chart":
 
             try:
 
                 params = (
                     urllib.parse
-                    .parse_qs(query)
+                    .parse_qs(
+                        query
+                    )
                 )
+
 
                 setup_time = int(
                     params.get(
@@ -3884,56 +4912,76 @@ class Handler(
                     )[0]
                 )
 
+
                 tf = params.get(
                     "tf",
                     ["M15"]
                 )[0]
+
 
                 payload = chart_payload(
                     setup_time,
                     tf
                 )
 
+
                 raw = json.dumps(
                     payload,
-                    separators=(",", ":")
-                ).encode("utf-8")
+                    separators=(
+                        ",",
+                        ":"
+                    )
+                ).encode(
+                    "utf-8"
+                )
+
 
                 self.send_response(
                     200
                 )
+
 
             except Exception as e:
 
                 raw = json.dumps({
                     "ok": False,
                     "error": repr(e)
-                }).encode("utf-8")
+                }).encode(
+                    "utf-8"
+                )
+
 
                 self.send_response(
                     500
                 )
 
+
             self.send_header(
                 "Content-Type",
-                "application/json; charset=utf-8"
+                "application/json; "
+                "charset=utf-8"
             )
+
 
             self.send_header(
                 "Cache-Control",
                 "no-store"
             )
 
+
             self.send_header(
                 "Content-Length",
                 str(len(raw))
             )
 
+
             self.end_headers()
+
 
             self.wfile.write(
                 raw
             )
+
 
             return
 
@@ -3953,29 +5001,39 @@ class Handler(
                     )
             }
 
+
             raw = json.dumps(
                 payload
-            ).encode()
+            ).encode(
+                "utf-8"
+            )
+
 
             self.send_response(
                 200
             )
 
+
             self.send_header(
                 "Content-Type",
-                "application/json; charset=utf-8"
+                "application/json; "
+                "charset=utf-8"
             )
+
 
             self.send_header(
                 "Content-Length",
                 str(len(raw))
             )
 
+
             self.end_headers()
+
 
             self.wfile.write(
                 raw
             )
+
 
             return
 
@@ -3984,26 +5042,33 @@ class Handler(
             "utf-8"
         )
 
+
         self.send_response(
             200
         )
 
+
         self.send_header(
             "Content-Type",
-            "text/html; charset=utf-8"
+            "text/html; "
+            "charset=utf-8"
         )
+
 
         self.send_header(
             "Cache-Control",
             "no-store"
         )
 
+
         self.send_header(
             "Content-Length",
             str(len(raw))
         )
 
+
         self.end_headers()
+
 
         self.wfile.write(
             raw
@@ -4014,14 +5079,20 @@ class Handler(
         self,
         *_
     ):
+
         return
 
+
+# ============================================================
+# ENGINE LOOP
+# ============================================================
 
 def engine_loop():
 
     init_db()
 
     rebuild_history()
+
 
     while True:
 
@@ -4036,21 +5107,31 @@ def engine_loop():
                 repr(e)
             )
 
+
         time.sleep(
             POLL_SECONDS
         )
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 if __name__ == "__main__":
 
     init_db()
+
 
     threading.Thread(
         target=engine_loop,
         daemon=True
     ).start()
 
+
     HTTPServer(
-        ("0.0.0.0", PORT),
+        (
+            "0.0.0.0",
+            PORT
+        ),
         Handler
     ).serve_forever()
