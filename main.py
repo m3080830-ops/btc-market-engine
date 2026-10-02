@@ -2955,6 +2955,28 @@ Brak setupów.
             else row["setup_sl"]
         )
 
+        if row["exit_time"]:
+            final_stage = "SL" if row["exit_reason"] == "SL" else "EXIT"
+            result_display = fmt_r(row["exit_r"])
+        elif row["entry_time"]:
+            final_stage = "M5 ENTRY"
+            result_display = "OTWARTA"
+        elif row["confirm_time"]:
+            final_stage = "M15 CONFIRM"
+            result_display = "BRAK ENTRY"
+        else:
+            final_stage = "H1 SETUP"
+            result_display = "BRAK M15"
+
+        if row["confirm_time"]:
+            timeline = (
+                "H1 SETUP → M15 CONFIRM → "
+                + ("M5 ENTRY → " if row["entry_time"] else "")
+                + (final_stage if row["exit_time"] else final_stage)
+            )
+        else:
+            timeline = "H1 SETUP → M15 BRAK"
+
         if is_confirmed:
             status_text = "POTWIERDZONY"
             status_class = "yes"
@@ -3010,7 +3032,22 @@ Brak setupów.
 
 <div class="setup-details">
 
+<div class="setup-stage">
+<b>PRZEBIEG</b>
+<span>{timeline}</span>
+</div>
+
 <div class="setup-grid">
+
+<div class="card">
+<b>WYNIK</b>
+<span>{result_display}</span>
+</div>
+
+<div class="card">
+<b>ETAP</b>
+<span>{final_stage}</span>
+</div>
 
 <div class="card">
 <b>SETUP</b>
