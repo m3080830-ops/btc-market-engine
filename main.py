@@ -497,8 +497,7 @@ def h1_setup(rows):
     prev_close_5 = (
         r[i - 5]["close"]
     )
-    prev_high_10 = max(
-        x["high"]
+    prev_high_10 = max(        x["high"]
         for x in r[i - 10:i]
     )
 
@@ -997,8 +996,7 @@ def find_m5_entry(
         for x in r
     ]
     e20 = ema(
-        closes,
-        20
+        closes,        20
     )
 
     by_time = {
@@ -1497,8 +1495,7 @@ def rebuild_history():
                     )
                     fields.update(
                         entry_time=entry["time"],
-                        entry_price=entry["price"]
-                    )
+                        entry_price=entry["price"]                    )
 
                     if sim:
 
@@ -1997,8 +1994,7 @@ def chart_payload(
         else:
 
             entry = find_m5_entry(
-                m5,
-                setup,
+                m5,                setup,
                 confirm
             )
 
@@ -2497,8 +2493,7 @@ tbody tr:hover{
     color:#7f8996;
     font-size:10px;
     margin-bottom:6px;
-    letter-spacing:.4px;
-}
+    letter-spacing:.4px;}
 
 .card span{
     display:block;
@@ -2530,7 +2525,140 @@ tbody tr:hover{
     padding:8px;
 }
 
+
+.setup-list{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+}
+
+.setup-item{
+    border:1px solid var(--line);
+    border-radius:16px;
+    background:var(--panel);
+    overflow:hidden;
+}
+
+.setup-summary{
+    min-height:54px;
+    padding:10px 12px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px;
+    cursor:pointer;
+    user-select:none;
+}
+
+.setup-main,
+.setup-summary-right{
+    display:flex;
+    align-items:center;
+    gap:9px;
+    min-width:0;
+}
+
+.setup-main{
+    flex:1 1 auto;
+    overflow:hidden;
+}
+
+.setup-main > span:first-child{
+    color:#dbe2ea;
+    font-size:12px;
+    white-space:nowrap;
+}
+
+.setup-main > span:nth-child(2){
+    font-size:12px;
+    font-weight:900;
+}
+
+.setup-summary-right{
+    flex:0 0 auto;
+}
+
+.setup-summary-right > span{
+    font-size:11px;
+    font-weight:800;
+    white-space:nowrap;
+}
+
+.setup-r{
+    min-width:54px;
+    text-align:right;
+}
+
+.setup-chevron{
+    font-size:22px !important;
+    line-height:1;
+    color:#7f8996;
+    transition:transform .15s ease;
+}
+
+.setup-item:not(.collapsed) .setup-chevron{
+    transform:rotate(90deg);
+}
+
+.setup-details{
+    display:none;
+    padding:0 10px 10px;
+    border-top:1px solid #20262e;
+}
+
+.setup-item:not(.collapsed) .setup-details{
+    display:block;
+}
+
+.setup-grid{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:7px;
+    padding-top:9px;
+}
+
+.setup-note{
+    margin-top:8px;
+    color:#8993a1;
+    font-size:11px;
+    line-height:1.5;
+}
+
 @media(max-width:700px){
+    .setup-summary{
+        min-height:50px;
+        padding:9px 10px;
+    }
+
+    .setup-main{
+        gap:7px;
+    }
+
+    .setup-main > span:first-child{
+        font-size:10px;
+    }
+
+    .setup-main > span:nth-child(2){
+        font-size:11px;
+    }
+
+    .setup-summary-right{
+        gap:6px;
+    }
+
+    .setup-summary-right > span{
+        font-size:10px;
+    }
+
+    .setup-r{
+        min-width:45px;
+    }
+
+    .setup-grid{
+        grid-template-columns:repeat(2,minmax(0,1fr));
+    }
+
+
 
     body{
         margin:0;
@@ -2756,86 +2884,53 @@ BTC: {current_price} USDT
 <div class="tabs">
 
 <button
-    id="confirmedTab"
+    id="setupsTab"
     class="tab"
-    onclick="activateTab('confirmed')">
-    POTWIERDZONE
-</button>
-
-<button
-    id="unconfirmedTab"
-    class="tab"
-    onclick="activateTab('unconfirmed')">
-    NIEPOTWIERDZONE
+    onclick="activateTab('setups')">
+    SETUPY
 </button>
 
 <button
     id="chartTab"
     class="tab"
     onclick="activateTab('chart')">
-    WYKRESY SETUPÓW
+    WYKRESY
 </button>
 
 </div>
 """)
 
     body.append("""
+    body.append("""
 <section
-    id="confirmed"
+    id="setups"
     class="panel">
 
-<div
-    class="table-wrap"
-    id="confirmedWrap">
-
-<table>
-
-<thead>
-
-<tr>
-
-<th>Setup</th>
-<th>Kierunek</th>
-<th>Setup price</th>
-<th>Status</th>
-<th>M15</th>
-<th>Entry</th>
-<th>SL</th>
-<th>Exit</th>
-<th>Exit R</th>
-<th>Max R</th>
-<th>Min R</th>
-<th>Trail R</th>
-<th>Powód</th>
-
-</tr>
-
-</thead>
-
-<tbody>
+<div class="setup-list">
 """)
 
-    if not confirmed:
+    if not rows:
 
         body.append(
             """
-<tr>
-<td
-    colspan="13"
-    class="empty">
-Brak potwierdzonych setupów.
-</td>
-</tr>
+<div class="empty">
+Brak setupów.
+</div>
 """
         )
 
-    for row in confirmed:
+    for row in rows:
 
         direction_class = (
             "long"
             if row["direction"]
             == "LONG"
             else "short"
+        )
+
+        is_confirmed = (
+            row["status"]
+            == "POTWIERDZONY"
         )
 
         max_display = (
@@ -2856,198 +2951,120 @@ Brak potwierdzonych setupów.
             else row["setup_sl"]
         )
 
-        body.append(
-            f"""
-<tr>
-
-<td>
-{fmt_ts(row["setup_time"])}
-</td>
-
-<td class="{direction_class}">
-{row["direction"]}
-</td>
-
-<td>
-{fmt_num(row["setup_price"])}
-</td>
-
-<td class="yes">
-POTWIERDZONY
-</td>
-
-<td>
-{fmt_ts(row["confirm_time"])}
-</td>
-
-<td>
-{fmt_num(row["entry_price"])}
-</td>
-
-<td>
-{fmt_num(sl_display)}
-</td>
-
-<td>
-{fmt_num(row["exit_price"])}
-</td>
-
-<td>
-{fmt_r(row["exit_r"])}
-</td>
-
-<td>
-{fmt_r(max_display)}
-</td>
-
-<td>
-{fmt_r(min_display)}
-</td>
-
-<td>
-{fmt_r(row["trail_r"])}
-</td>
-
-<td>
-{html.escape(
-    row["exit_reason"]
-    or "—"
-)}
-</td>
-
-</tr>
-"""
-        )
-
-    body.append("""
-</tbody>
-</table>
-
-</div>
-</section>
-""")
-
-    body.append("""
-<section
-    id="unconfirmed"
-    class="panel">
-
-<div
-    class="table-wrap"
-    id="unconfirmedWrap">
-
-<table>
-
-<thead>
-
-<tr>
-
-<th>Setup</th>
-<th>Kierunek</th>
-<th>Setup price</th>
-<th>Status</th>
-<th>SL</th>
-<th>Max R</th>
-<th>Min R</th>
-<th>Pierwsze zdarzenie</th>
-
-</tr>
-
-</thead>
-
-<tbody>
-""")
-
-    if not unconfirmed:
-
-        body.append(
-            """
-<tr>
-<td
-    colspan="8"
-    class="empty">
-Brak niepotwierdzonych setupów.
-</td>
-</tr>
-"""
-        )
-
-    for row in unconfirmed:
-
-        direction_class = (
-            "long"
-            if row["direction"]
-            == "LONG"
-            else "short"
-        )
-
-        mx = row["setup_max_r"]
-        mn = row["setup_min_r"]
-
-        first_event = "—"
+        if is_confirmed:
+            status_text = "POTWIERDZONY"
+            status_class = "yes"
+        else:
+            status_text = "OCZEKUJE"
+            status_class = "no"
 
         if (
-            mx is not None
-            and mx > TRAIL_ACTIVATION_R
+            not is_confirmed
+            and max_display is not None
+            and max_display > TRAIL_ACTIVATION_R
         ):
-
-            first_event = (
-                "TRAILING > 1R"
-            )
-
-        elif (
-            mn is not None
-            and mn <= -1.0
-        ):
-
-            first_event = (
-                "SL ≤ -1R"
-            )
+            status_text = "OCZEKUJE · >1R POTENCJAŁ"
+            status_class = "yes"
 
         body.append(
             f"""
-<tr>
+<div
+    class="setup-item collapsed"
+    data-setup="{row["setup_time"]}">
 
-<td>
+<div
+    class="setup-summary"
+    onclick="toggleSetupRow(this)">
+
+<div class="setup-main">
+<span>
 {fmt_ts(row["setup_time"])}
-</td>
+</span>
 
-<td class="{direction_class}">
+<span class="{direction_class}">
 {row["direction"]}
-</td>
+</span>
+</div>
 
-<td>
-{fmt_num(row["setup_price"])}
-</td>
+<div class="setup-summary-right">
 
-<td class="no">
-NIEPOTWIERDZONY
-</td>
+<span class="{status_class}">
+{status_text}
+</span>
 
-<td>
-{fmt_num(row["setup_sl"])}
-</td>
+<span class="setup-r">
+{fmt_r(max_display)}
+</span>
 
-<td>
-{fmt_r(mx)}
-</td>
+<span class="setup-chevron">
+›
+</span>
 
-<td>
-{fmt_r(mn)}
-</td>
+</div>
 
-<td>
-{first_event}
-</td>
+</div>
 
-</tr>
+<div class="setup-details">
+
+<div class="setup-grid">
+
+<div class="card">
+<b>SETUP</b>
+<span>{fmt_num(row["setup_price"])}</span>
+</div>
+
+<div class="card">
+<b>SL</b>
+<span>{fmt_num(sl_display)}</span>
+</div>
+
+<div class="card">
+<b>ENTRY</b>
+<span>{fmt_num(row["entry_price"])}</span>
+</div>
+
+<div class="card">
+<b>EXIT</b>
+<span>{fmt_num(row["exit_price"])}</span>
+</div>
+
+<div class="card">
+<b>MAX R</b>
+<span>{fmt_r(max_display)}</span>
+</div>
+
+<div class="card">
+<b>MIN R</b>
+<span>{fmt_r(min_display)}</span>
+</div>
+
+<div class="card">
+<b>TRAIL R</b>
+<span>{fmt_r(row["trail_r"])}</span>
+</div>
+
+<div class="card">
+<b>EXIT</b>
+<span>{html.escape(row["exit_reason"] or "—")}</span>
+</div>
+
+</div>
+
+<div class="setup-note">
+M15:
+{fmt_ts(row["confirm_time"])}
+·
+M5 ENTRY:
+{fmt_ts(row["entry_time"])}
+</div>
+
+</div>
+
+</div>
 """
         )
 
     body.append("""
-</tbody>
-</table>
-
 </div>
 </section>
 """)
@@ -3132,7 +3149,7 @@ r"""
 <script>
 
 const TAB_KEY =
-    "btc_active_tab_v5";
+    "btc_active_tab_v6";
 
 const PAGE_Y_KEY =
     "btc_page_y_v5";
@@ -3155,14 +3172,9 @@ const CHART_SCROLL_KEY =
 
 function activateTab(name){
 
-    const confirmed =
+    const setups =
         document.getElementById(
-            "confirmed"
-        );
-
-    const unconfirmed =
-        document.getElementById(
-            "unconfirmed"
+            "setups"
         );
 
     const chartPanel =
@@ -3170,14 +3182,9 @@ function activateTab(name){
             "chartPanel"
         );
 
-    const confirmedTab =
+    const setupsTab =
         document.getElementById(
-            "confirmedTab"
-        );
-
-    const unconfirmedTab =
-        document.getElementById(
-            "unconfirmedTab"
+            "setupsTab"
         );
 
     const chartTab =
@@ -3185,63 +3192,30 @@ function activateTab(name){
             "chartTab"
         );
 
-
-    if(confirmed){
-
-        confirmed.classList.remove(
-            "active"
-        );
-    }
-
-    if(unconfirmed){
-
-        unconfirmed.classList.remove(
-            "active"
-        );
+    if(setups){
+        setups.classList.remove("active");
     }
 
     if(chartPanel){
-
-        chartPanel.classList.remove(
-            "active"
-        );
+        chartPanel.classList.remove("active");
     }
 
-    if(confirmedTab){
-
-        confirmedTab.classList.remove(
-            "active"
-        );
-    }
-
-    if(unconfirmedTab){
-
-        unconfirmedTab.classList.remove(
-            "active"
-        );
+    if(setupsTab){
+        setupsTab.classList.remove("active");
     }
 
     if(chartTab){
-
-        chartTab.classList.remove(
-            "active"
-        );
+        chartTab.classList.remove("active");
     }
-
 
     if(name === "chart"){
 
         if(chartPanel){
-
-            chartPanel.classList.add(
-                "active"            );
+            chartPanel.classList.add("active");
         }
 
         if(chartTab){
-
-            chartTab.classList.add(
-                "active"
-            );
+            chartTab.classList.add("active");
         }
 
         localStorage.setItem(
@@ -3250,84 +3224,86 @@ function activateTab(name){
         );
 
         initChart();
-
         return;
     }
 
-
-    const panel =
-        document.getElementById(
-            name
-        );
-
-    if(panel){
-
-        panel.classList.add(
-            "active"
-        );
+    if(setups){
+        setups.classList.add("active");
     }
 
-
-    if(
-        name === "confirmed"
-        && confirmedTab
-    ){
-
-        confirmedTab.classList.add(
-            "active"
-        );
+    if(setupsTab){
+        setupsTab.classList.add("active");
     }
-
-
-    if(
-        name === "unconfirmed"
-        && unconfirmedTab
-    ){
-
-        unconfirmedTab.classList.add(
-            "active"
-        );
-    }
-
 
     localStorage.setItem(
         TAB_KEY,
-        name
+        "setups"
     );
 }
 
 
+function toggleSetupRow(summary){
+
+    const item =
+        summary.closest(
+            ".setup-item"
+        );
+
+    if(!item){
+        return;
+    }
+
+    item.classList.toggle(
+        "collapsed"
+    );
+
+    const setupTime =
+        item.dataset.setup;
+
+    if(
+        item.classList.contains(
+            "collapsed"
+        )
+    ){
+        localStorage.removeItem(
+            "btc_open_setup_v6"
+        );
+    }else{
+        localStorage.setItem(
+            "btc_open_setup_v6",
+            setupTime
+        );
+    }
+}
+
+
+function restoreOpenSetup(){
+
+    const saved =
+        localStorage.getItem(
+            "btc_open_setup_v6"
+        );
+
+    if(!saved){
+        return;
+    }
+
+    const item =
+        document.querySelector(
+            '.setup-item[data-setup="' +
+            saved +
+            '"]'
+        );
+
+    if(item){
+        item.classList.remove(
+            "collapsed"
+        );
+    }
+}
+
+
 function saveScroll(){
-
-    const confirmed =
-        document.getElementById(
-            "confirmedWrap"
-        );
-
-    const unconfirmed =
-        document.getElementById(
-            "unconfirmedWrap"
-        );
-
-    if(confirmed){
-
-        localStorage.setItem(
-            CONF_SCROLL_KEY,
-            String(
-                confirmed.scrollLeft
-            )
-        );
-    }
-
-    if(unconfirmed){
-
-        localStorage.setItem(
-            UNCONF_SCROLL_KEY,
-            String(
-                unconfirmed.scrollLeft
-            )
-        );
-    }
 
     localStorage.setItem(
         PAGE_Y_KEY,
@@ -3340,41 +3316,6 @@ function saveScroll(){
 
 function restoreScroll(){
 
-    const confirmed =
-        document.getElementById(
-            "confirmedWrap"
-        );
-
-    const unconfirmed =
-        document.getElementById(
-            "unconfirmedWrap"
-        );
-
-
-    if(confirmed){
-
-        confirmed.scrollLeft =
-            parseInt(
-                localStorage.getItem(
-                    CONF_SCROLL_KEY
-                ) || "0",
-                10
-            ) || 0;
-    }
-
-
-    if(unconfirmed){
-
-        unconfirmed.scrollLeft =
-            parseInt(
-                localStorage.getItem(
-                    UNCONF_SCROLL_KEY
-                ) || "0",
-                10
-            ) || 0;
-    }
-
-
     const savedPage =
         parseInt(
             localStorage.getItem(
@@ -3382,7 +3323,6 @@ function restoreScroll(){
             ) || "0",
             10
         ) || 0;
-
 
     window.scrollTo(
         0,
@@ -3392,47 +3332,10 @@ function restoreScroll(){
 
 
 function bindTableScroll(){
-
-    const confirmed =
-        document.getElementById(
-            "confirmedWrap"
-        );
-
-    const unconfirmed =
-        document.getElementById(
-            "unconfirmedWrap"
-        );
-
-
-    if(confirmed){
-
-        confirmed.onscroll =
-            () => {
-
-                localStorage.setItem(
-                    CONF_SCROLL_KEY,
-                    String(
-                        confirmed.scrollLeft
-                    )
-                );
-            };
-    }
-
-
-    if(unconfirmed){
-
-        unconfirmed.onscroll =
-            () => {
-
-                localStorage.setItem(
-                    UNCONF_SCROLL_KEY,
-                    String(
-                        unconfirmed.scrollLeft
-                    )
-                );
-            };
-    }
+    return;
 }
+
+
 
 
 function formatTime(ts){
@@ -3497,8 +3400,7 @@ async function initChart(){
 
     const select =
         document.getElementById(
-            "setupSelect"
-        );
+            "setupSelect"        );
 
     if(
         !select
@@ -3997,8 +3899,7 @@ function renderChart(
     function horizontalLine(
         value,
         color,
-        label,
-        dashed
+        label,        dashed
     ){
 
         if(
@@ -4497,8 +4398,7 @@ ${
 }
 </td>
 
-<td class="${
-    row.ema
+<td class="${    row.ema
     ? "yes"
     : "bad"
 }">
@@ -4997,8 +4897,7 @@ async function refreshDashboard(){
         bindTableScroll();
 
 
-        activateTab(
-            savedTab
+        activateTab(            savedTab
         );
 
 
@@ -5068,6 +4967,8 @@ window.addEventListener(
 
         bindTableScroll();
 
+        restoreOpenSetup();
+
         restoreScroll();
 
 
@@ -5079,7 +4980,9 @@ window.addEventListener(
 
 
         activateTab(
-            savedTab
+            savedTab === "chart"
+            ? "chart"
+            : "setups"
         );
 
 
