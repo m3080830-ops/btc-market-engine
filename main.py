@@ -497,7 +497,6 @@ def h1_setup(rows):
     prev_close_5 = (
         r[i - 5]["close"]
     )
-
     prev_high_10 = max(
         x["high"]
         for x in r[i - 10:i]
@@ -997,7 +996,6 @@ def find_m5_entry(
         x["close"]
         for x in r
     ]
-
     e20 = ema(
         closes,
         20
@@ -1497,7 +1495,6 @@ def rebuild_history():
                         s,
                         entry
                     )
-
                     fields.update(
                         entry_time=entry["time"],
                         entry_price=entry["price"]
@@ -1997,7 +1994,6 @@ def chart_payload(
                 "time": row["entry_time"],
                 "price": row["entry_price"]
             }
-
         else:
 
             entry = find_m5_entry(
@@ -2201,180 +2197,249 @@ def dashboard():
 
 <style>
 
+:root{
+    --bg:#080a0d;
+    --panel:#11151b;
+    --panel2:#0d1116;
+    --line:#252c35;
+    --text:#f3f6fa;
+    --muted:#8993a1;
+    --green:#35e58a;
+    --red:#ff6475;
+    --blue:#59a8ff;
+    --gold:#f2cc60;
+    --purple:#c084fc;
+}
+
 *{
-    box-sizing:border-box
+    box-sizing:border-box;
+}
+
+html{
+    scroll-behavior:auto;
 }
 
 body{
-    font-family:Arial,sans-serif;
-    background:#111;
-    color:#eee;
-    margin:16px
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Arial,
+        sans-serif;
+    background:
+        radial-gradient(
+            circle at top,
+            #151a21 0,
+            #080a0d 42%,
+            #080a0d 100%
+        );
+    color:var(--text);
+    margin:0;
+    padding:14px;
+    min-width:0;
 }
 
 h1{
-    font-size:20px;
-    margin:0 0 4px
+    font-size:26px;
+    line-height:1.05;
+    margin:4px 0 5px;
+    letter-spacing:-.5px;
 }
 
 .meta{
-    color:#aaa;
-    font-size:12px
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.5;
 }
 
 .price{
-    font-size:18px;
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    margin:10px 0 14px;
+    padding:8px 12px;
+    border:1px solid #27313b;
+    border-radius:999px;
+    background:#10151b;
+    color:#dce3eb;
+    font-size:15px;
     font-weight:700;
-    margin:7px 0 12px
 }
 
 .err{
-    background:#5b1717;
-    padding:10px;
-    border-radius:8px;
-    margin-bottom:10px
+    background:#42151d;
+    border:1px solid #7d2735;
+    color:#ffd9df;
+    padding:12px;
+    border-radius:14px;
+    margin:10px 0;
+    line-height:1.4;
 }
 
 .tabs{
     display:flex;
-    gap:7px;
-    flex-wrap:wrap;
+    gap:8px;
     position:sticky;
     top:0;
     z-index:20;
-    background:#111;
-    padding:5px 0
+    margin:12px -2px 14px;
+    padding:8px 2px;
+    background:rgba(8,10,13,.94);
+    backdrop-filter:blur(12px);
+    overflow-x:auto;
+    scrollbar-width:none;
+}
+
+.tabs::-webkit-scrollbar{
+    display:none;
 }
 
 .tab,
 .tf,
 .select{
-    background:#181818;
-    color:#ddd;
-    border:1px solid #333;
-    border-radius:8px;
-    padding:10px 12px;
+    background:#10151b;
+    color:#b9c2ce;
+    border:1px solid #2a323c;
+    border-radius:13px;
+    padding:12px 14px;
     cursor:pointer;
-    font-size:14px;
-    outline:none
+    font-size:13px;
+    font-weight:700;
+    outline:none;
+    min-height:46px;
+}
+
+.tab{
+    flex:0 0 auto;
+    white-space:nowrap;
 }
 
 .tab.active{
     color:#fff;
-    background:#292929;
-    border-color:#666
+    background:#202731;
+    border-color:#56616e;
+    box-shadow:0 4px 18px rgba(0,0,0,.25);
 }
 
 .select{
     width:100%;
-    max-width:100%;
     min-height:52px;
     appearance:auto;
-    -webkit-appearance:auto
+    -webkit-appearance:auto;
 }
 
 .select:focus{
-    border-color:#666;
-    background:#202020;
-    color:#fff
+    border-color:#667483;
+    background:#171d25;
+    color:#fff;
 }
 
 .select option{
-    background:#181818;
+    background:#11151b;
     color:#ddd;
-    padding:12px
-}
-
-.select option:checked{
-    background:#303030;
-    color:#fff
+    padding:12px;
 }
 
 .panel{
-    display:none
+    display:none;
 }
 
 .panel.active{
-    display:block
+    display:block;
 }
 
 .table-wrap{
     overflow:auto;
-    border:1px solid #333;
-    border-radius:8px;
-    max-height:70vh
+    border:1px solid var(--line);
+    border-radius:18px;
+    background:var(--panel);
+    max-height:70vh;
+    box-shadow:
+        0 10px 30px rgba(0,0,0,.22);
 }
 
 table{
     border-collapse:collapse;
     width:max-content;
-    min-width:1400px
+    min-width:1200px;
 }
 
 th,
 td{
-    padding:8px 10px;
-    border-bottom:1px solid #292929;
+    padding:11px 12px;
+    border-bottom:1px solid #20262e;
     white-space:nowrap;
-    font-size:13px
+    font-size:13px;
 }
 
 th{
     position:sticky;
     top:0;
-    background:#1c1c1c;
-    z-index:2
+    background:#151a21;
+    z-index:2;
+    color:#aeb8c5;
+    text-align:left;
+}
+
+tbody tr:last-child td{
+    border-bottom:0;
+}
+
+tbody tr:hover{
+    background:#151a21;
 }
 
 .long,
 .yes{
-    color:#7ee787
+    color:var(--green);
 }
 
 .short,
 .bad{
-    color:#ff7b72
+    color:var(--red);
 }
 
 .no{
-    color:#aaa
+    color:#9aa3ae;
 }
 
 .empty{
-    padding:20px;
-    color:#888
+    padding:26px 20px;
+    color:#7f8996;
 }
 
 .toolbar{
     display:flex;
-    gap:7px;
+    gap:8px;
     flex-wrap:wrap;
-    margin:10px 0;
-    padding:10px;
-    background:#151515;
-    border:1px solid #303030;
-    border-radius:10px
+    margin:10px 0 12px;
+    padding:12px;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:18px;
 }
 
 .toolbar .select{
-    flex:1 1 100%
+    flex:1 1 100%;
 }
 
 .legend{
-    color:#aaa;
+    color:#8993a1;
     font-size:12px;
-    margin:7px 0
+    line-height:1.55;
+    margin:8px 0;
 }
 
 .chart-scroll{
     position:relative;
     overflow:auto;
-    border:1px solid #333;
-    border-radius:8px;
-    background:#0b0b0b;
+    border:1px solid var(--line);
+    border-radius:18px;
+    background:#090c10;
     max-height:58vh;
-    min-height:360px;
-    padding-left:76px
+    min-height:340px;
+    padding-left:70px;
+    -webkit-overflow-scrolling:touch;
 }
 
 .chart-yaxis{
@@ -2382,98 +2447,271 @@ th{
     left:0;
     top:0;
     bottom:0;
-    width:76px;
-    background:#0b0b0b;
+    width:70px;
+    background:#090c10;
     z-index:10;
     pointer-events:none;
-    border-right:1px solid #252525
+    border-right:1px solid #20262e;
 }
 
 .chart-yaxis-label{
     position:absolute;
     right:7px;
     transform:translateY(-50%);
-    color:#777;
-    font-size:11px;
-    white-space:nowrap
+    color:#6f7a87;
+    font-size:10px;
+    white-space:nowrap;
 }
 
 #chart{
     display:block;
-    height:430px;
-    min-width:100%
+    height:400px;
+    min-width:900px;
 }
 
 .info{
-    margin-top:10px;
-    border:1px solid #333;
-    border-radius:8px;
-    background:#161616;
-    padding:10px
+    margin-top:12px;
+    border:1px solid var(--line);
+    border-radius:18px;
+    background:var(--panel);
+    padding:12px;
 }
 
 .cards{
     display:grid;
-    grid-template-columns:
-        repeat(4,minmax(100px,1fr));
-    gap:7px;
-    margin-bottom:8px
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:8px;
+    margin-bottom:9px;
 }
 
 .card{
-    background:#101010;
-    border:1px solid #292929;
-    border-radius:7px;
-    padding:8px
+    background:#0d1116;
+    border:1px solid #242b34;
+    border-radius:14px;
+    padding:11px;
+    min-width:0;
 }
 
 .card b{
     display:block;
-    color:#888;
+    color:#7f8996;
     font-size:10px;
-    margin-bottom:4px
+    margin-bottom:6px;
+    letter-spacing:.4px;
 }
 
 .card span{
-    font-weight:700
+    display:block;
+    font-weight:800;
+    overflow:hidden;
+    text-overflow:ellipsis;
 }
 
 .diag-title{
-    font-weight:700;
-    margin:10px 0 5px
+    font-weight:800;
+    margin:13px 0 7px;
+    font-size:14px;
 }
 
 .diag-scroll{
     overflow:auto;
-    border:1px solid #292929;
-    border-radius:7px
+    border:1px solid #252c35;
+    border-radius:13px;
+    -webkit-overflow-scrolling:touch;
 }
 
 .diag{
-    min-width:100%
+    min-width:100%;
 }
 
 .diag td,
 .diag th{
     font-size:12px;
-    padding:6px 8px
+    padding:8px;
 }
 
 @media(max-width:700px){
 
     body{
-        margin:10px
+        margin:0;
+        padding:12px;
     }
 
-    .cards{
-        grid-template-columns:
-            repeat(2,1fr)
+    h1{
+        font-size:25px;
+        margin-top:2px;
+    }
+
+    .price{
+        font-size:14px;
+        margin-top:9px;
+    }
+
+    .tabs{
+        margin-top:10px;
+        margin-bottom:12px;
+    }
+
+    .tab{
+        min-height:44px;
+        padding:11px 13px;
+    }
+
+    .table-wrap{
+        border-radius:18px;
+        max-height:none;
+        overflow:visible;
+        background:transparent;
+        border:0;
+        box-shadow:none;
+    }
+
+    .table-wrap table{
+        width:100%;
+        min-width:0;
+        border-collapse:separate;
+        border-spacing:0 10px;
+    }
+
+    .table-wrap thead{
+        display:none;
+    }
+
+    .table-wrap tbody,
+    .table-wrap tr,
+    .table-wrap td{
+        display:block;
+        width:100%;
+    }
+
+    .table-wrap tbody tr{
+        background:var(--panel);
+        border:1px solid var(--line);
+        border-radius:18px;
+        overflow:hidden;
+        box-shadow:
+            0 8px 24px rgba(0,0,0,.20);
+    }
+
+    .table-wrap tbody tr:hover{
+        background:var(--panel);
+    }
+
+    .table-wrap td{
+        display:grid;
+        grid-template-columns:42% 58%;
+        gap:8px;
+        align-items:center;
+        padding:10px 13px;
+        white-space:normal;
+        border-bottom:1px solid #20262e;
+        font-size:13px;
+        min-height:43px;
+    }
+
+    .table-wrap td:last-child{
+        border-bottom:0;
+    }
+
+    .table-wrap td::before{
+        color:#7f8996;
+        font-size:10px;
+        font-weight:800;
+        text-transform:uppercase;
+        letter-spacing:.45px;
+    }
+
+    .table-wrap td:nth-child(1)::before{content:"Setup";}
+    .table-wrap td:nth-child(2)::before{content:"Kierunek";}
+    .table-wrap td:nth-child(3)::before{content:"Setup price";}
+    .table-wrap td:nth-child(4)::before{content:"Status";}
+    .table-wrap td:nth-child(5)::before{content:"M15";}
+    .table-wrap td:nth-child(6)::before{content:"Entry";}
+    .table-wrap td:nth-child(7)::before{content:"SL";}
+    .table-wrap td:nth-child(8)::before{content:"Exit";}
+    .table-wrap td:nth-child(9)::before{content:"Exit R";}
+    .table-wrap td:nth-child(10)::before{content:"Max R";}
+    .table-wrap td:nth-child(11)::before{content:"Min R";}
+    .table-wrap td:nth-child(12)::before{content:"Trail R";}
+    .table-wrap td:nth-child(13)::before{content:"Powód";}
+
+    .table-wrap td.empty{
+        display:block;
+        padding:24px 18px;
+        color:#7f8996;
+        text-align:center;
+    }
+
+    .table-wrap td.empty::before{
+        content:none;
+    }
+
+    .toolbar{
+        padding:11px;
+        border-radius:17px;
+    }
+
+    .tf{
+        flex:1 1 0;
+        min-width:0;
+        padding:10px 9px;
+    }
+
+    .chart-scroll{
+        min-height:300px;
+        max-height:52vh;
+        border-radius:18px;
+        padding-left:60px;
+    }
+
+    .chart-yaxis{
+        width:60px;
+    }
+
+    .chart-yaxis-label{
+        font-size:9px;
     }
 
     #chart{
-        height:360px
+        height:330px;
+        min-width:820px;
     }
 
+    .info{
+        border-radius:18px;
+        padding:10px;
+    }
+
+    .cards{
+        grid-template-columns:repeat(2,minmax(0,1fr));
+        gap:7px;
+    }
+
+    .card{
+        border-radius:13px;
+        padding:10px;
+    }
+
+    .card span{
+        font-size:14px;
+    }
+
+    .diag-scroll{
+        border-radius:13px;
+    }
+
+    .diag{
+        min-width:650px;
+    }
+}
+
+@media(min-width:701px){
+
+    body{
+        max-width:1400px;
+        margin:0 auto;
+        padding:20px;
+    }
 }
 
 </style>
@@ -2497,8 +2735,7 @@ BTC: {current_price} USDT
 
     body.append(
         f"""
-<div class="meta">
-Ostatnia aktualizacja:
+<div class="meta">Ostatnia aktualizacja:
 {fmt_ts(last_update)}
 · auto refresh 10 s
 </div>
@@ -2997,8 +3234,7 @@ function activateTab(name){
         if(chartPanel){
 
             chartPanel.classList.add(
-                "active"
-            );
+                "active"            );
         }
 
         if(chartTab){
@@ -3498,7 +3734,6 @@ function renderChart(
             )
         );
 
-
     let high =
         Math.max(
             ...candles.map(
@@ -3997,8 +4232,7 @@ function renderChart(
 <b>SETUP</b>
 <span>
 ${formatTime(
-    data.setup.time
-)}
+    data.setup.time)}
 </span>
 </div>
 
@@ -4497,8 +4731,7 @@ if(chartScroll){
             localStorage.setItem(
                 CHART_SCROLL_KEY,
                 String(
-                    chartScroll.scrollLeft
-                )
+                    chartScroll.scrollLeft                )
             );
         };
 }
@@ -4997,8 +5230,7 @@ class Handler(
                 "error":
                     state_get(
                         "latest_error",
-                        ""
-                    )
+                        ""                    )
             }
 
 
