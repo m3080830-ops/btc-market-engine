@@ -30,6 +30,7 @@ M5_HISTORY = 2000
 
 M15_CONFIRM_CANDLES = 16
 M5_ENTRY_CANDLES = 8
+M5_FALLBACK_CANDLES = 24
 
 PORT = int(
     os.environ.get(
@@ -1483,30 +1484,54 @@ def rebuild_history():
                     confirm
                 )
 
-                if entry:
+            else:
 
-                    sim = simulate_position(
+                fallback_window = M5_ENTRY_CANDLES
+                old_limit = M5_ENTRY_CANDLES
+                M5_ENTRY_CANDLES = M5_FALLBACK_CANDLES
+
+                try:
+                    entry = find_m5_entry(
                         m5,
-                        m15,
                         s,
-                        entry
+                        s
                     )
+                finally:
+                    M5_ENTRY_CANDLES = old_limit
+
+                if entry:
                     fields.update(
-                        entry_time=entry["time"],
-                        entry_price=entry["price"]                    )
+                        status="M5_FALLBACK",
+                        confirm_time=None,
+                        confirm_price=None
+                    )
 
-                    if sim:
+            if entry:
 
-                        fields.update(
-                            position_sl=sim["sl"],
-                            exit_time=sim["exit_time"],
-                            exit_price=sim["exit_price"],
-                            exit_reason=sim["reason"],
-                            exit_r=sim["exit_r"],
-                            position_max_r=sim["max_r"],
-                            position_min_r=sim["min_r"],
-                            trail_r=sim["trail_r"]
-                        )
+                sim = simulate_position(
+                    m5,
+                    m15,
+                    s,
+                    entry
+                )
+
+                fields.update(
+                    entry_time=entry["time"],
+                    entry_price=entry["price"]
+                )
+
+                if sim:
+
+                    fields.update(
+                        position_sl=sim["sl"],
+                        exit_time=sim["exit_time"],
+                        exit_price=sim["exit_price"],
+                        exit_reason=sim["reason"],
+                        exit_r=sim["exit_r"],
+                        position_max_r=sim["max_r"],
+                        position_min_r=sim["min_r"],
+                        trail_r=sim["trail_r"]
+                    )
 
             update_setup(
                 s["time"],
@@ -1847,10 +1872,50 @@ def live_refresh():
 
             else:
 
-                fields.setdefault(
-                    "status",
-                    "NIEPOTWIERDZONY"
-                )
+                old_limit = M5_ENTRY_CANDLES
+                M5_ENTRY_CANDLES = M5_FALLBACK_CANDLES
+
+                try:
+                    entry = find_m5_entry(
+                        m5,
+                        setup,
+                        setup
+                    )
+                finally:
+                    M5_ENTRY_CANDLES = old_limit
+
+                if entry:
+                    fields.update(
+                        status="M5_FALLBACK"
+                    )
+
+                    active = False
+
+                    for other in get_setups(200):
+
+                        if (
+                            other["entry_time"]
+                            and other["exit_time"] is None
+                            and other["setup_time"] != row["setup_time"]
+                        ):
+                            active = True
+                            break
+
+                    if not active:
+                        fields.update(
+                            entry_time=entry["time"],
+                            entry_price=entry["price"],
+                            position_sl=structural_sl(
+                                m15,
+                                setup["direction"],
+                                entry["time"]
+                            )
+                        )
+                else:
+                    fields.setdefault(
+                        "status",
+                        "OCZEKUJE"
+                    )
 
         update_setup(
             row["setup_time"],
@@ -1988,24 +2053,34 @@ def chart_payload(
             setup
         )
 
-    if confirm:
+    if row["entry_time"]:
 
-        if row["entry_time"]:
+        entry = {
+            "time": row["entry_time"],
+            "price": row["entry_price"]
+        }
 
-            entry = {
-                "time": row["entry_time"],
-                "price": row["entry_price"]
-            }
-        else:
+    elif confirm:
 
-            entry = find_m5_entry(
-                m5,                setup,
-                confirm
-            )
+        entry = find_m5_entry(
+            m5,
+            setup,
+            confirm
+        )
 
     else:
 
-        entry = None
+        old_limit = M5_ENTRY_CANDLES
+        M5_ENTRY_CANDLES = M5_FALLBACK_CANDLES
+
+        try:
+            entry = find_m5_entry(
+                m5,
+                setup,
+                setup
+            )
+        finally:
+            M5_ENTRY_CANDLES = old_limit
 
     markers = {
         "setup_time":
