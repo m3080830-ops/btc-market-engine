@@ -1716,7 +1716,7 @@ def manage_open_positions(
                 trail_r=r_value(
                     direction,
                     entry,
-                    original_sl,
+                    sl,
                     exit_price
                 )
             )
@@ -2203,3 +2203,3075 @@ def dashboard():
     --panel:#11151b;
     --panel2:#0d1116;
     --line:#252c35;
+    --text:#f3f6fa;
+    --muted:#8993a1;
+    --green:#35e58a;
+    --red:#ff6475;
+    --blue:#59a8ff;
+    --gold:#f2cc60;
+    --purple:#c084fc;
+}
+
+*{
+    box-sizing:border-box;
+}
+
+html{
+    scroll-behavior:auto;
+}
+
+body{
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Arial,
+        sans-serif;
+    background:
+        radial-gradient(
+            circle at top,
+            #151a21 0,
+            #080a0d 42%,
+            #080a0d 100%
+        );
+    color:var(--text);
+    margin:0;
+    padding:14px;
+    min-width:0;
+}
+
+h1{
+    font-size:26px;
+    line-height:1.05;
+    margin:4px 0 5px;
+    letter-spacing:-.5px;
+}
+
+.meta{
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.5;
+}
+
+.price{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    margin:10px 0 14px;
+    padding:8px 12px;
+    border:1px solid #27313b;
+    border-radius:999px;
+    background:#10151b;
+    color:#dce3eb;
+    font-size:15px;
+    font-weight:700;
+}
+
+.err{
+    background:#42151d;
+    border:1px solid #7d2735;
+    color:#ffd9df;
+    padding:12px;
+    border-radius:14px;
+    margin:10px 0;
+    line-height:1.4;
+}
+
+.tabs{
+    display:flex;
+    gap:8px;
+    position:sticky;
+    top:0;
+    z-index:20;
+    margin:12px -2px 14px;
+    padding:8px 2px;
+    background:rgba(8,10,13,.94);
+    backdrop-filter:blur(12px);
+    overflow-x:auto;
+    scrollbar-width:none;
+}
+
+.tabs::-webkit-scrollbar{
+    display:none;
+}
+
+.tab,
+.tf,
+.select{
+    background:#10151b;
+    color:#b9c2ce;
+    border:1px solid #2a323c;
+    border-radius:13px;
+    padding:12px 14px;
+    cursor:pointer;
+    font-size:13px;
+    font-weight:700;
+    outline:none;
+    min-height:46px;
+}
+
+.tab{
+    flex:0 0 auto;
+    white-space:nowrap;
+}
+
+.tab.active{
+    color:#fff;
+    background:#202731;
+    border-color:#56616e;
+    box-shadow:0 4px 18px rgba(0,0,0,.25);
+}
+
+.select{
+    width:100%;
+    min-height:52px;
+    appearance:auto;
+    -webkit-appearance:auto;
+}
+
+.select:focus{
+    border-color:#667483;
+    background:#171d25;
+    color:#fff;
+}
+
+.select option{
+    background:#11151b;
+    color:#ddd;
+    padding:12px;
+}
+
+.panel{
+    display:none;
+}
+
+.panel.active{
+    display:block;
+}
+
+.table-wrap{
+    overflow:auto;
+    border:1px solid var(--line);
+    border-radius:18px;
+    background:var(--panel);
+    max-height:70vh;
+    box-shadow:
+        0 10px 30px rgba(0,0,0,.22);
+}
+
+table{
+    border-collapse:collapse;
+    width:max-content;
+    min-width:1200px;
+}
+
+th,
+td{
+    padding:11px 12px;
+    border-bottom:1px solid #20262e;
+    white-space:nowrap;
+    font-size:13px;
+}
+
+th{
+    position:sticky;
+    top:0;
+    background:#151a21;
+    z-index:2;
+    color:#aeb8c5;
+    text-align:left;
+}
+
+tbody tr:last-child td{
+    border-bottom:0;
+}
+
+tbody tr:hover{
+    background:#151a21;
+}
+
+.long,
+.yes{
+    color:var(--green);
+}
+
+.short,
+.bad{
+    color:var(--red);
+}
+
+.no{
+    color:#9aa3ae;
+}
+
+.empty{
+    padding:26px 20px;
+    color:#7f8996;
+}
+
+.toolbar{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+    margin:10px 0 12px;
+    padding:12px;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:18px;
+}
+
+.toolbar .select{
+    flex:1 1 100%;
+}
+
+.legend{
+    color:#8993a1;
+    font-size:12px;
+    line-height:1.55;
+    margin:8px 0;
+}
+
+.chart-scroll{
+    position:relative;
+    overflow:auto;
+    border:1px solid var(--line);
+    border-radius:18px;
+    background:#090c10;
+    max-height:58vh;
+    min-height:340px;
+    padding-left:70px;
+    -webkit-overflow-scrolling:touch;
+}
+
+.chart-yaxis{
+    position:absolute;
+    left:0;
+    top:0;
+    bottom:0;
+    width:70px;
+    background:#090c10;
+    z-index:10;
+    pointer-events:none;
+    border-right:1px solid #20262e;
+}
+
+.chart-yaxis-label{
+    position:absolute;
+    right:7px;
+    transform:translateY(-50%);
+    color:#6f7a87;
+    font-size:10px;
+    white-space:nowrap;
+}
+
+#chart{
+    display:block;
+    height:400px;
+    min-width:900px;
+}
+
+.info{
+    margin-top:12px;
+    border:1px solid var(--line);
+    border-radius:18px;
+    background:var(--panel);
+    padding:12px;
+}
+
+.cards{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:8px;
+    margin-bottom:9px;
+}
+
+.card{
+    background:#0d1116;
+    border:1px solid #242b34;
+    border-radius:14px;
+    padding:11px;
+    min-width:0;
+}
+
+.card b{
+    display:block;
+    color:#7f8996;
+    font-size:10px;
+    margin-bottom:6px;
+    letter-spacing:.4px;}
+
+.card span{
+    display:block;
+    font-weight:800;
+    overflow:hidden;
+    text-overflow:ellipsis;
+}
+
+.diag-title{
+    font-weight:800;
+    margin:13px 0 7px;
+    font-size:14px;
+}
+
+.diag-scroll{
+    overflow:auto;
+    border:1px solid #252c35;
+    border-radius:13px;
+    -webkit-overflow-scrolling:touch;
+}
+
+.diag{
+    min-width:100%;
+}
+
+.diag td,
+.diag th{
+    font-size:12px;
+    padding:8px;
+}
+
+
+.setup-list{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+}
+
+.setup-item{
+    border:1px solid var(--line);
+    border-radius:16px;
+    background:var(--panel);
+    overflow:hidden;
+}
+
+.setup-summary{
+    min-height:54px;
+    padding:10px 12px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px;
+    cursor:pointer;
+    user-select:none;
+}
+
+.setup-main,
+.setup-summary-right{
+    display:flex;
+    align-items:center;
+    gap:9px;
+    min-width:0;
+}
+
+.setup-main{
+    flex:1 1 auto;
+    overflow:hidden;
+}
+
+.setup-main > span:first-child{
+    color:#dbe2ea;
+    font-size:12px;
+    white-space:nowrap;
+}
+
+.setup-main > span:nth-child(2){
+    font-size:12px;
+    font-weight:900;
+}
+
+.setup-summary-right{
+    flex:0 0 auto;
+}
+
+.setup-summary-right > span{
+    font-size:11px;
+    font-weight:800;
+    white-space:nowrap;
+}
+
+.setup-r{
+    min-width:54px;
+    text-align:right;
+}
+
+.setup-chevron{
+    font-size:22px !important;
+    line-height:1;
+    color:#7f8996;
+    transition:transform .15s ease;
+}
+
+.setup-item:not(.collapsed) .setup-chevron{
+    transform:rotate(90deg);
+}
+
+.setup-details{
+    display:none;
+    padding:0 10px 10px;
+    border-top:1px solid #20262e;
+}
+
+.setup-item:not(.collapsed) .setup-details{
+    display:block;
+}
+
+.setup-grid{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:7px;
+    padding-top:9px;
+}
+
+.setup-note{
+    margin-top:8px;
+    color:#8993a1;
+    font-size:11px;
+    line-height:1.5;
+}
+
+@media(max-width:700px){
+    .setup-summary{
+        min-height:50px;
+        padding:9px 10px;
+    }
+
+    .setup-main{
+        gap:7px;
+    }
+
+    .setup-main > span:first-child{
+        font-size:10px;
+    }
+
+    .setup-main > span:nth-child(2){
+        font-size:11px;
+    }
+
+    .setup-summary-right{
+        gap:6px;
+    }
+
+    .setup-summary-right > span{
+        font-size:10px;
+    }
+
+    .setup-r{
+        min-width:45px;
+    }
+
+    .setup-grid{
+        grid-template-columns:repeat(2,minmax(0,1fr));
+    }
+
+
+
+    body{
+        margin:0;
+        padding:12px;
+    }
+
+    h1{
+        font-size:25px;
+        margin-top:2px;
+    }
+
+    .price{
+        font-size:14px;
+        margin-top:9px;
+    }
+
+    .tabs{
+        margin-top:10px;
+        margin-bottom:12px;
+    }
+
+    .tab{
+        min-height:44px;
+        padding:11px 13px;
+    }
+
+    .table-wrap{
+        border-radius:18px;
+        max-height:none;
+        overflow:visible;
+        background:transparent;
+        border:0;
+        box-shadow:none;
+    }
+
+    .table-wrap table{
+        width:100%;
+        min-width:0;
+        border-collapse:separate;
+        border-spacing:0 10px;
+    }
+
+    .table-wrap thead{
+        display:none;
+    }
+
+    .table-wrap tbody,
+    .table-wrap tr,
+    .table-wrap td{
+        display:block;
+        width:100%;
+    }
+
+    .table-wrap tbody tr{
+        background:var(--panel);
+        border:1px solid var(--line);
+        border-radius:18px;
+        overflow:hidden;
+        box-shadow:
+            0 8px 24px rgba(0,0,0,.20);
+    }
+
+    .table-wrap tbody tr:hover{
+        background:var(--panel);
+    }
+
+    .table-wrap td{
+        display:grid;
+        grid-template-columns:42% 58%;
+        gap:8px;
+        align-items:center;
+        padding:10px 13px;
+        white-space:normal;
+        border-bottom:1px solid #20262e;
+        font-size:13px;
+        min-height:43px;
+    }
+
+    .table-wrap td:last-child{
+        border-bottom:0;
+    }
+
+    .table-wrap td::before{
+        color:#7f8996;
+        font-size:10px;
+        font-weight:800;
+        text-transform:uppercase;
+        letter-spacing:.45px;
+    }
+
+    .table-wrap td:nth-child(1)::before{content:"Setup";}
+    .table-wrap td:nth-child(2)::before{content:"Kierunek";}
+    .table-wrap td:nth-child(3)::before{content:"Setup price";}
+    .table-wrap td:nth-child(4)::before{content:"Status";}
+    .table-wrap td:nth-child(5)::before{content:"M15";}
+    .table-wrap td:nth-child(6)::before{content:"Entry";}
+    .table-wrap td:nth-child(7)::before{content:"SL";}
+    .table-wrap td:nth-child(8)::before{content:"Exit";}
+    .table-wrap td:nth-child(9)::before{content:"Exit R";}
+    .table-wrap td:nth-child(10)::before{content:"Max R";}
+    .table-wrap td:nth-child(11)::before{content:"Min R";}
+    .table-wrap td:nth-child(12)::before{content:"Trail R";}
+    .table-wrap td:nth-child(13)::before{content:"Powód";}
+
+    .table-wrap td.empty{
+        display:block;
+        padding:24px 18px;
+        color:#7f8996;
+        text-align:center;
+    }
+
+    .table-wrap td.empty::before{
+        content:none;
+    }
+
+    .toolbar{
+        padding:11px;
+        border-radius:17px;
+    }
+
+    .tf{
+        flex:1 1 0;
+        min-width:0;
+        padding:10px 9px;
+    }
+
+    .chart-scroll{
+        min-height:300px;
+        max-height:52vh;
+        border-radius:18px;
+        padding-left:60px;
+    }
+
+    .chart-yaxis{
+        width:60px;
+    }
+
+    .chart-yaxis-label{
+        font-size:9px;
+    }
+
+    #chart{
+        height:330px;
+        min-width:820px;
+    }
+
+    .info{
+        border-radius:18px;
+        padding:10px;
+    }
+
+    .cards{
+        grid-template-columns:repeat(2,minmax(0,1fr));
+        gap:7px;
+    }
+
+    .card{
+        border-radius:13px;
+        padding:10px;
+    }
+
+    .card span{
+        font-size:14px;
+    }
+
+    .diag-scroll{
+        border-radius:13px;
+    }
+
+    .diag{
+        min-width:650px;
+    }
+}
+
+@media(min-width:701px){
+
+    body{
+        max-width:1400px;
+        margin:0 auto;
+        padding:20px;
+    }
+}
+
+</style>
+
+</head>
+
+<body>
+""")
+
+    body.append(
+        "<h1>BTC MARKET ENGINE</h1>"
+    )
+
+    body.append(
+        f"""
+<div class="price">
+BTC: {current_price} USDT
+</div>
+"""
+    )
+
+    body.append(
+        f"""
+<div class="meta">Ostatnia aktualizacja:
+{fmt_ts(last_update)}
+· auto refresh 10 s
+</div>
+"""
+    )
+
+    if latest_error:
+
+        body.append(
+            f"""
+<div class="err">
+{html.escape(latest_error)}
+</div>
+"""
+        )
+
+    body.append("""
+<div class="tabs">
+
+<button
+    id="setupsTab"
+    class="tab"
+    onclick="activateTab('setups')">
+    SETUPY
+</button>
+
+<button
+    id="chartTab"
+    class="tab"
+    onclick="activateTab('chart')">
+    WYKRESY
+</button>
+
+</div>
+""")
+
+    body.append("""
+    body.append("""
+<section
+    id="setups"
+    class="panel">
+
+<div class="setup-list">
+""")
+
+    if not rows:
+
+        body.append(
+            """
+<div class="empty">
+Brak setupów.
+</div>
+"""
+        )
+
+    for row in rows:
+
+        direction_class = (
+            "long"
+            if row["direction"]
+            == "LONG"
+            else "short"
+        )
+
+        is_confirmed = (
+            row["status"]
+            == "POTWIERDZONY"
+        )
+
+        max_display = (
+            row["position_max_r"]
+            if row["entry_time"]
+            else row["setup_max_r"]
+        )
+
+        min_display = (
+            row["position_min_r"]
+            if row["entry_time"]
+            else row["setup_min_r"]
+        )
+
+        sl_display = (
+            row["position_sl"]
+            if row["entry_time"]
+            else row["setup_sl"]
+        )
+
+        if is_confirmed:
+            status_text = "POTWIERDZONY"
+            status_class = "yes"
+        else:
+            status_text = "OCZEKUJE"
+            status_class = "no"
+
+        if (
+            not is_confirmed
+            and max_display is not None
+            and max_display > TRAIL_ACTIVATION_R
+        ):
+            status_text = "OCZEKUJE · >1R POTENCJAŁ"
+            status_class = "yes"
+
+        body.append(
+            f"""
+<div
+    class="setup-item collapsed"
+    data-setup="{row["setup_time"]}">
+
+<div
+    class="setup-summary"
+    onclick="toggleSetupRow(this)">
+
+<div class="setup-main">
+<span>
+{fmt_ts(row["setup_time"])}
+</span>
+
+<span class="{direction_class}">
+{row["direction"]}
+</span>
+</div>
+
+<div class="setup-summary-right">
+
+<span class="{status_class}">
+{status_text}
+</span>
+
+<span class="setup-r">
+{fmt_r(max_display)}
+</span>
+
+<span class="setup-chevron">
+›
+</span>
+
+</div>
+
+</div>
+
+<div class="setup-details">
+
+<div class="setup-grid">
+
+<div class="card">
+<b>SETUP</b>
+<span>{fmt_num(row["setup_price"])}</span>
+</div>
+
+<div class="card">
+<b>SL</b>
+<span>{fmt_num(sl_display)}</span>
+</div>
+
+<div class="card">
+<b>ENTRY</b>
+<span>{fmt_num(row["entry_price"])}</span>
+</div>
+
+<div class="card">
+<b>EXIT</b>
+<span>{fmt_num(row["exit_price"])}</span>
+</div>
+
+<div class="card">
+<b>MAX R</b>
+<span>{fmt_r(max_display)}</span>
+</div>
+
+<div class="card">
+<b>MIN R</b>
+<span>{fmt_r(min_display)}</span>
+</div>
+
+<div class="card">
+<b>TRAIL R</b>
+<span>{fmt_r(row["trail_r"])}</span>
+</div>
+
+<div class="card">
+<b>EXIT</b>
+<span>{html.escape(row["exit_reason"] or "—")}</span>
+</div>
+
+</div>
+
+<div class="setup-note">
+M15:
+{fmt_ts(row["confirm_time"])}
+·
+M5 ENTRY:
+{fmt_ts(row["entry_time"])}
+</div>
+
+</div>
+
+</div>
+"""
+        )
+
+    body.append("""
+</div>
+</section>
+""")
+
+    body.append(
+        f"""
+<section
+    id="chartPanel"
+    class="panel">
+
+<div class="toolbar">
+
+<select
+    id="setupSelect"
+    class="select">
+
+{options}
+
+</select>
+
+<button
+    class="tf"
+    onclick="loadChart('H1')">
+H1
+</button>
+
+<button
+    class="tf"
+    onclick="loadChart('M15')">
+M15
+</button>
+
+<button
+    class="tf"
+    onclick="loadChart('M5')">
+M5
+</button>
+
+</div>
+
+<div class="legend">
+
+Świece z MEXC.
+Linie: SETUP, SL, M15 CONF, M5 ENTRY.
+Pozycja tabeli, strony i wykresu jest zachowywana
+przy odświeżeniu.
+
+</div>
+
+<div
+    class="chart-scroll"
+    id="chartScroll">
+
+<div
+    class="chart-yaxis"
+    id="chartYAxis">
+</div>
+
+<svg
+    id="chart"
+    xmlns="http://www.w3.org/2000/svg">
+</svg>
+
+</div>
+
+<div
+    class="info"
+    id="chartInfo">
+
+<div class="empty">
+Wybierz setup.
+</div>
+
+</div>
+
+</section>
+"""
+    )
+
+    body.append(
+r"""
+<script>
+
+const TAB_KEY =
+    "btc_active_tab_v6";
+
+const PAGE_Y_KEY =
+    "btc_page_y_v5";
+
+const CONF_SCROLL_KEY =
+    "btc_confirmed_scroll_v5";
+
+const UNCONF_SCROLL_KEY =
+    "btc_unconfirmed_scroll_v5";
+
+const CHART_SETUP_KEY =
+    "btc_chart_setup_v5";
+
+const CHART_TF_KEY =
+    "btc_chart_tf_v5";
+
+const CHART_SCROLL_KEY =
+    "btc_chart_scroll_v5";
+
+
+function activateTab(name){
+
+    const setups =
+        document.getElementById(
+            "setups"
+        );
+
+    const chartPanel =
+        document.getElementById(
+            "chartPanel"
+        );
+
+    const setupsTab =
+        document.getElementById(
+            "setupsTab"
+        );
+
+    const chartTab =
+        document.getElementById(
+            "chartTab"
+        );
+
+    if(setups){
+        setups.classList.remove("active");
+    }
+
+    if(chartPanel){
+        chartPanel.classList.remove("active");
+    }
+
+    if(setupsTab){
+        setupsTab.classList.remove("active");
+    }
+
+    if(chartTab){
+        chartTab.classList.remove("active");
+    }
+
+    if(name === "chart"){
+
+        if(chartPanel){
+            chartPanel.classList.add("active");
+        }
+
+        if(chartTab){
+            chartTab.classList.add("active");
+        }
+
+        localStorage.setItem(
+            TAB_KEY,
+            "chart"
+        );
+
+        initChart();
+        return;
+    }
+
+    if(setups){
+        setups.classList.add("active");
+    }
+
+    if(setupsTab){
+        setupsTab.classList.add("active");
+    }
+
+    localStorage.setItem(
+        TAB_KEY,
+        "setups"
+    );
+}
+
+
+function toggleSetupRow(summary){
+
+    const item =
+        summary.closest(
+            ".setup-item"
+        );
+
+    if(!item){
+        return;
+    }
+
+    item.classList.toggle(
+        "collapsed"
+    );
+
+    const setupTime =
+        item.dataset.setup;
+
+    if(
+        item.classList.contains(
+            "collapsed"
+        )
+    ){
+        localStorage.removeItem(
+            "btc_open_setup_v6"
+        );
+    }else{
+        localStorage.setItem(
+            "btc_open_setup_v6",
+            setupTime
+        );
+    }
+}
+
+
+function restoreOpenSetup(){
+
+    const saved =
+        localStorage.getItem(
+            "btc_open_setup_v6"
+        );
+
+    if(!saved){
+        return;
+    }
+
+    const item =
+        document.querySelector(
+            '.setup-item[data-setup="' +
+            saved +
+            '"]'
+        );
+
+    if(item){
+        item.classList.remove(
+            "collapsed"
+        );
+    }
+}
+
+
+function saveScroll(){
+
+    localStorage.setItem(
+        PAGE_Y_KEY,
+        String(
+            window.scrollY || 0
+        )
+    );
+}
+
+
+function restoreScroll(){
+
+    const savedPage =
+        parseInt(
+            localStorage.getItem(
+                PAGE_Y_KEY
+            ) || "0",
+            10
+        ) || 0;
+
+    window.scrollTo(
+        0,
+        savedPage
+    );
+}
+
+
+function bindTableScroll(){
+    return;
+}
+
+
+
+
+function formatTime(ts){
+
+    if(!ts){
+
+        return "—";
+    }
+
+    return new Date(
+        Number(ts) * 1000
+    )
+    .toISOString()
+    .replace(
+        "T",
+        " "
+    )
+    .slice(
+        0,
+        16
+    )
+    + " UTC";
+}
+
+
+function formatPrice(value){
+
+    if(
+        value === null
+        || value === undefined
+    ){
+
+        return "—";
+    }
+
+    return Number(value)
+        .toFixed(2);
+}
+
+
+function formatR(value){
+
+    if(
+        value === null
+        || value === undefined
+    ){
+
+        return "—";
+    }
+
+    return (
+        Number(value) >= 0
+        ? "+"
+        : ""
+    )
+    + Number(value).toFixed(2)
+    + "R";
+}
+
+
+async function initChart(){
+
+    const select =
+        document.getElementById(
+            "setupSelect"        );
+
+    if(
+        !select
+        || !select.options.length
+    ){
+
+        return;
+    }
+
+
+    let saved =
+        localStorage.getItem(
+            CHART_SETUP_KEY
+        );
+
+
+    const exists =
+        [
+            ...select.options
+        ].some(
+            option =>
+                option.value === saved
+        );
+
+
+    if(
+        !saved
+        || !exists
+    ){
+
+        saved =
+            select.options[0].value;
+    }
+
+
+    select.value =
+        saved;
+
+
+    const tf =
+        localStorage.getItem(
+            CHART_TF_KEY
+        )
+        || "M15";
+
+
+    await fetchChart(
+        saved,
+        tf,
+        false
+    );
+}
+
+
+async function loadChart(tf){
+
+    const select =
+        document.getElementById(
+            "setupSelect"
+        );
+
+    if(
+        !select
+        || !select.value
+    ){
+
+        return;
+    }
+
+
+    localStorage.setItem(
+        CHART_SETUP_KEY,
+        select.value
+    );
+
+
+    localStorage.setItem(
+        CHART_TF_KEY,
+        tf
+    );
+
+
+    await fetchChart(
+        select.value,
+        tf,
+        true
+    );
+}
+
+
+async function fetchChart(
+    setupTime,
+    tf,
+    center
+){
+
+    try{
+
+        const response =
+            await fetch(
+                "/api/chart?setup_time="
+                + encodeURIComponent(
+                    setupTime
+                )
+                + "&tf="
+                + encodeURIComponent(
+                    tf
+                ),
+                {
+                    cache:
+                        "no-store"
+                }
+            );
+
+
+        const data =
+            await response.json();
+
+
+        if(!data.ok){
+
+            throw new Error(
+                data.error
+                || "Błąd wykresu"
+            );
+        }
+
+
+        renderChart(
+            data,
+            center
+        );
+
+
+    }catch(error){
+
+        const info =
+            document.getElementById(
+                "chartInfo"
+            );
+
+        if(info){
+
+            info.innerHTML =
+                "<div class='empty'>"
+                + "Błąd wykresu: "
+                + String(error)
+                    .replace(
+                        /[<>]/g,
+                        ""
+                    )
+                + "</div>";
+        }
+    }
+}
+
+
+function renderChart(
+    data,
+    center
+){
+
+    const svg =
+        document.getElementById(
+            "chart"
+        );
+
+    const scroll =
+        document.getElementById(
+            "chartScroll"
+        );
+
+    const yAxis =
+        document.getElementById(
+            "chartYAxis"
+        );
+
+
+    const candles =
+        data.candles
+        || [];
+
+
+    if(
+        !svg
+        || !scroll
+        || !candles.length
+    ){
+
+        return;
+    }
+
+
+    const width =
+        Math.max(
+            1000,
+            candles.length * 9
+        );
+
+    const height =
+        430;
+
+
+    const left =
+        8;
+
+    const right =
+        10;
+
+    const top =
+        18;
+
+    const bottom =
+        28;
+
+
+    const innerWidth =
+        width
+        - left
+        - right;
+
+
+    const innerHeight =
+        height
+        - top
+        - bottom;
+
+
+    let low =
+        Math.min(
+            ...candles.map(
+                c => c.low
+            )
+        );
+
+    let high =
+        Math.max(
+            ...candles.map(
+                c => c.high
+            )
+        );
+
+
+    [
+        data.markers.setup_price,
+        data.markers.sl,
+        data.markers.confirm_price,
+        data.markers.entry_price
+    ].forEach(
+        value => {
+
+            if(
+                value !== null
+                && value !== undefined
+            ){
+
+                low =
+                    Math.min(
+                        low,
+                        Number(value)
+                    );
+
+                high =
+                    Math.max(
+                        high,
+                        Number(value)
+                    );
+            }
+        }
+    );
+
+
+    const padding =
+        (
+            high - low
+        ) * 0.06 || 1;
+
+
+    low -= padding;
+    high += padding;
+
+
+    const x =
+        index =>
+            left
+            + (
+                index
+                /
+                Math.max(
+                    1,
+                    candles.length - 1
+                )
+            )
+            * innerWidth;
+
+
+    const y =
+        price =>
+            top
+            + (
+                (high - price)
+                /
+                (high - low)
+            )
+            * innerHeight;
+
+
+    const indexByTime = {};
+
+
+    candles.forEach(
+        (candle, index) => {
+
+            indexByTime[
+                candle.time
+            ] = index;
+        }
+    );
+
+
+    let output = [];
+
+
+    output.push(
+        "<rect "
+        + "width='"
+        + width
+        + "' "
+        + "height='"
+        + height
+        + "' "
+        + "fill='#0b0b0b'/>"
+    );
+
+
+    if(yAxis){
+
+        yAxis.innerHTML = "";
+    }
+
+
+    for(
+        let grid = 0;
+        grid <= 5;
+        grid++
+    ){
+
+        const yy =
+            top
+            + grid
+            * innerHeight
+            / 5;
+
+
+        const price =
+            high
+            - (
+                (high - low)
+                * grid
+                / 5
+            );
+
+
+        output.push(
+            "<line "
+            + "x1='"
+            + left
+            + "' "
+            + "y1='"
+            + yy
+            + "' "
+            + "x2='"
+            + (
+                width - right
+            )
+            + "' "
+            + "y2='"
+            + yy
+            + "' "
+            + "stroke='#202020'/>"
+        );
+
+
+        if(yAxis){
+
+            const label =
+                document.createElement(
+                    "div"
+                );
+
+
+            label.className =
+                "chart-yaxis-label";
+
+
+            label.style.top =
+                yy + "px";
+
+
+            label.textContent =
+                formatPrice(
+                    price
+                );
+
+
+            yAxis.appendChild(
+                label
+            );
+        }
+    }
+
+
+    candles.forEach(
+        (
+            candle,
+            index
+        ) => {
+
+            const xx =
+                x(index);
+
+
+            const up =
+                candle.close
+                >= candle.open;
+
+
+            const color =
+                up
+                ? "#7ee787"
+                : "#ff7b72";
+
+
+            const openY =
+                y(
+                    candle.open
+                );
+
+
+            const closeY =
+                y(
+                    candle.close
+                );
+
+
+            output.push(
+                "<line "
+                + "x1='"
+                + xx
+                + "' "
+                + "y1='"
+                + y(candle.high)
+                + "' "
+                + "x2='"
+                + xx
+                + "' "
+                + "y2='"
+                + y(candle.low)
+                + "' "
+                + "stroke='"
+                + color
+                + "'/>"
+            );
+
+
+            output.push(
+                "<rect "
+                + "x='"
+                + (
+                    xx - 2.5
+                )
+                + "' "
+                + "y='"
+                + Math.min(
+                    openY,
+                    closeY
+                )
+                + "' "
+                + "width='5' "
+                + "height='"
+                + Math.max(
+                    1,
+                    Math.abs(
+                        closeY - openY
+                    )
+                )
+                + "' "
+                + "fill='"
+                + color
+                + "'/>"
+            );
+        }
+    );
+
+
+    function horizontalLine(
+        value,
+        color,
+        label,        dashed
+    ){
+
+        if(
+            value === null
+            || value === undefined
+        ){
+
+            return;
+        }
+
+
+        const yy =
+            y(
+                Number(value)
+            );
+
+
+        output.push(
+            "<line "
+            + "x1='"
+            + left
+            + "' "
+            + "y1='"
+            + yy
+            + "' "
+            + "x2='"
+            + (
+                width - right
+            )
+            + "' "
+            + "y2='"
+            + yy
+            + "' "
+            + "stroke='"
+            + color
+            + "' "
+            + "stroke-width='1.5' "
+            + (
+                dashed
+                ? "stroke-dasharray='6 5' "
+                : ""
+            )
+            + "/>"
+        );
+
+
+        output.push(
+            "<text "
+            + "x='"
+            + (
+                width - right - 2
+            )
+            + "' "
+            + "y='"
+            + (
+                yy - 3
+            )
+            + "' "
+            + "text-anchor='end' "
+            + "fill='"
+            + color
+            + "' "
+            + "font-size='11'>"
+            + label
+            + " "
+            + formatPrice(value)
+            + "</text>"
+        );
+    }
+
+
+    function verticalLine(
+        timestamp,
+        color,
+        label
+    ){
+
+        if(
+            !timestamp
+            || indexByTime[
+                timestamp
+            ] === undefined
+        ){
+
+            return;
+        }
+
+
+        const xx =
+            x(
+                indexByTime[
+                    timestamp
+                ]
+            );
+
+
+        output.push(
+            "<line "
+            + "x1='"
+            + xx
+            + "' "
+            + "y1='"
+            + top
+            + "' "
+            + "x2='"
+            + xx
+            + "' "
+            + "y2='"
+            + (
+                height - bottom
+            )
+            + "' "
+            + "stroke='"
+            + color
+            + "' "
+            + "stroke-dasharray='3 4'/>"
+        );
+
+
+        output.push(
+            "<text "
+            + "x='"
+            + (
+                xx + 3
+            )
+            + "' "
+            + "y='"
+            + (
+                top + 11
+            )
+            + "' "
+            + "fill='"
+            + color
+            + "' "
+            + "font-size='10'>"
+            + label
+            + "</text>"
+        );
+    }
+
+
+    horizontalLine(
+        data.markers.setup_price,
+        "#58a6ff",
+        "SETUP",
+        false
+    );
+
+
+    horizontalLine(
+        data.markers.sl,
+        "#ff7b72",
+        "SL",
+        true
+    );
+
+
+    horizontalLine(
+        data.markers.confirm_price,
+        "#c084fc",
+        "M15",
+        false
+    );
+
+
+    horizontalLine(
+        data.markers.entry_price,
+        "#f2cc60",
+        "ENTRY",
+        false
+    );
+
+
+    verticalLine(
+        data.markers.setup_time,
+        "#58a6ff",
+        "SETUP"
+    );
+
+
+    verticalLine(
+        data.markers.confirm_time,
+        "#c084fc",
+        "M15"
+    );
+
+
+    verticalLine(
+        data.markers.entry_time,
+        "#f2cc60",
+        "ENTRY"
+    );
+
+
+    svg.setAttribute(
+        "width",
+        width
+    );
+
+
+    svg.setAttribute(
+        "height",
+        height
+    );
+
+
+    svg.setAttribute(
+        "viewBox",
+        "0 0 "
+        + width
+        + " "
+        + height
+    );
+
+
+    svg.innerHTML =
+        output.join("");
+
+
+    const metrics =
+        data.metrics || {};
+
+
+    let info = "";
+
+
+    info += `
+<div class="cards">
+
+<div class="card">
+<b>SETUP</b>
+<span>
+${formatTime(
+    data.setup.time)}
+</span>
+</div>
+
+<div class="card">
+<b>KIERUNEK</b>
+<span class="${
+    data.setup.direction
+    === "LONG"
+    ? "yes"
+    : "bad"
+}">
+${data.setup.direction}
+</span>
+</div>
+
+<div class="card">
+<b>STATUS</b>
+<span class="${
+    data.setup.status
+    === "POTWIERDZONY"
+    ? "yes"
+    : "bad"
+}">
+${data.setup.status}
+</span>
+</div>
+
+<div class="card">
+<b>SL</b>
+<span>
+${formatPrice(
+    data.markers.sl
+)}
+</span>
+</div>
+
+</div>
+`;
+
+
+    info += `
+<div class="cards">
+
+<div class="card">
+<b>MAX R</b>
+<span>
+${formatR(
+    metrics.max_r
+)}
+</span>
+</div>
+
+<div class="card">
+<b>MIN R</b>
+<span>
+${formatR(
+    metrics.min_r
+)}
+</span>
+</div>
+
+<div class="card">
+<b>TRAIL R</b>
+<span>
+${formatR(
+    metrics.trail_r
+)}
+</span>
+</div>
+
+<div class="card">
+<b>EXIT</b>
+<span>
+${metrics.exit_reason || "—"}
+${formatR(
+    metrics.exit_r
+)}
+</span>
+</div>
+
+</div>
+`;
+
+
+    info += `
+<div class="diag-title">
+M15 — 16 świec potwierdzenia
+</div>
+
+<div class="diag-scroll">
+
+<table class="diag">
+
+<thead>
+
+<tr>
+<th>#</th>
+<th>Czas</th>
+<th>Sweep</th>
+<th>EMA20</th>
+<th>Breakout 5</th>
+<th>Świeca</th>
+<th>PEŁNE</th>
+</tr>
+
+</thead>
+
+<tbody>
+`;
+
+
+    (
+        data.m15 || []
+    ).forEach(
+        row => {
+
+            info += `
+<tr>
+
+<td>
+${row.n}
+</td>
+
+<td>
+${formatTime(
+    row.time
+)}
+</td>
+
+<td class="${
+    row.sweep
+    ? "yes"
+    : "bad"
+}">
+${
+    row.sweep
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.ema
+    ? "yes"
+    : "bad"
+}">
+${
+    row.ema
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.breakout
+    ? "yes"
+    : "bad"
+}">
+${
+    row.breakout
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.candle
+    ? "yes"
+    : "bad"
+}">
+${
+    row.candle
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.confirm
+    ? "yes"
+    : "bad"
+}">
+${
+    row.confirm
+    ? "POTW."
+    : "—"
+}
+</td>
+
+</tr>
+`;
+        }
+    );
+
+
+    info += `
+</tbody>
+</table>
+
+</div>
+`;
+
+
+    if(
+        data.setup.status
+        === "POTWIERDZONY"
+    ){
+
+        info += `
+<div class="diag-title">
+M5 — 8 świec wejścia
+</div>
+
+<div class="diag-scroll">
+
+<table class="diag">
+
+<thead>
+
+<tr>
+<th>#</th>
+<th>Czas</th>
+<th>Breakout 3</th>
+<th>EMA20</th>
+<th>Świeca</th>
+<th>ENTRY</th>
+</tr>
+
+</thead>
+
+<tbody>
+`;
+
+
+        (
+            data.m5 || []
+        ).forEach(
+            row => {
+
+                info += `
+<tr>
+
+<td>
+${row.n}
+</td>
+
+<td>
+${formatTime(
+    row.time
+)}
+</td>
+
+<td class="${
+    row.breakout
+    ? "yes"
+    : "bad"
+}">
+${
+    row.breakout
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${    row.ema
+    ? "yes"
+    : "bad"
+}">
+${
+    row.ema
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.candle
+    ? "yes"
+    : "bad"
+}">
+${
+    row.candle
+    ? "✓"
+    : "✗"
+}
+</td>
+
+<td class="${
+    row.entry
+    ? "yes"
+    : "bad"
+}">
+${
+    row.entry
+    ? "ENTRY"
+    : "—"
+}
+</td>
+
+</tr>
+`;
+            }
+        );
+
+
+        info += `
+</tbody>
+</table>
+
+</div>
+`;
+
+    }else{
+
+        const misses = {
+            sweep: 0,
+            ema: 0,
+            breakout: 0,
+            candle: 0
+        };
+
+
+        (
+            data.m15 || []
+        ).forEach(
+            row => {
+
+                if(!row.sweep){
+
+                    misses.sweep++;
+                }
+
+                if(!row.ema){
+
+                    misses.ema++;
+                }
+
+                if(!row.breakout){
+
+                    misses.breakout++;
+                }
+
+                if(!row.candle){
+
+                    misses.candle++;
+                }
+            }
+        );
+
+
+        info += `
+<div class="diag-title">
+Dlaczego NIEPOTWIERDZONY?
+</div>
+
+<div class="legend">
+
+Jedna z 16 świec musi spełnić
+jednocześnie wszystkie 4 warunki.
+
+</div>
+
+<div class="legend">
+
+Braki w oknie:
+
+Sweep ${misses.sweep}/16 ·
+EMA ${misses.ema}/16 ·
+Breakout ${misses.breakout}/16 ·
+Świeca ${misses.candle}/16.
+
+</div>
+`;
+    }
+
+
+    const infoElement =
+        document.getElementById(
+            "chartInfo"
+        );
+
+
+    if(infoElement){
+
+        infoElement.innerHTML =
+            info;
+    }
+
+
+    requestAnimationFrame(
+        () => {
+
+            requestAnimationFrame(
+                () => {
+
+                    const saved =
+                        localStorage.getItem(
+                            CHART_SCROLL_KEY
+                        );
+
+
+                    const setupIndex =
+                        indexByTime[
+                            data.markers
+                                .setup_time
+                        ];
+
+
+                    if(
+                        !center
+                        && saved !== null
+                    ){
+
+                        scroll.scrollLeft =
+                            parseInt(
+                                saved,
+                                10
+                            ) || 0;
+
+                    }else if(
+                        center
+                        && setupIndex
+                        !== undefined
+                    ){
+
+                        scroll.scrollLeft =
+                            Math.max(
+                                0,
+                                x(setupIndex)
+                                - (
+                                    scroll.clientWidth
+                                    * 0.30
+                                )
+                            );
+                    }
+
+
+                    localStorage.setItem(
+                        CHART_SCROLL_KEY,
+                        String(
+                            scroll.scrollLeft
+                        )
+                    );
+                }
+            );
+        }
+    );
+}
+
+
+const setupSelect =
+    document.getElementById(
+        "setupSelect"
+    );
+
+
+if(setupSelect){
+
+    setupSelect.onchange =
+        () => {
+
+            localStorage.setItem(
+                CHART_SETUP_KEY,
+                setupSelect.value
+            );
+
+
+            const tf =
+                localStorage.getItem(
+                    CHART_TF_KEY
+                )
+                || "M15";
+
+
+            fetchChart(
+                setupSelect.value,
+                tf,
+                true
+            );
+        };
+}
+
+
+const chartScroll =
+    document.getElementById(
+        "chartScroll"
+    );
+
+
+if(chartScroll){
+
+    chartScroll.onscroll =
+        () => {
+
+            localStorage.setItem(
+                CHART_SCROLL_KEY,
+                String(
+                    chartScroll.scrollLeft                )
+            );
+        };
+}
+
+
+async function refreshDashboard(){
+
+    saveScroll();
+
+
+    const savedTab =
+        localStorage.getItem(
+            TAB_KEY
+        )
+        || "confirmed";
+
+
+    const savedPageY =
+        window.scrollY || 0;
+
+
+    const savedSetup =
+        localStorage.getItem(
+            CHART_SETUP_KEY
+        );
+
+
+    const savedTf =
+        localStorage.getItem(
+            CHART_TF_KEY
+        )
+        || "M15";
+
+
+    try{
+
+        const response =
+            await fetch(
+                window.location.pathname,
+                {
+                    cache:
+                        "no-store"
+                }
+            );
+
+
+        const text =
+            await response.text();
+
+
+        const parser =
+            new DOMParser();
+
+
+        const doc =
+            parser.parseFromString(
+                text,
+                "text/html"
+            );
+
+
+        const newConfirmed =
+            doc.getElementById(
+                "confirmed"
+            );
+
+
+        const newUnconfirmed =
+            doc.getElementById(
+                "unconfirmed"
+            );
+
+
+        const oldConfirmed =
+            document.getElementById(
+                "confirmed"
+            );
+
+
+        const oldUnconfirmed =
+            document.getElementById(
+                "unconfirmed"
+            );
+
+
+        if(
+            newConfirmed
+            && oldConfirmed
+        ){
+
+            oldConfirmed.replaceWith(
+                newConfirmed
+            );
+        }
+
+
+        if(
+            newUnconfirmed
+            && oldUnconfirmed
+        ){
+
+            oldUnconfirmed.replaceWith(
+                newUnconfirmed
+            );
+        }
+
+
+        const newPrice =
+            doc.querySelector(
+                ".price"
+            );
+
+
+        const oldPrice =
+            document.querySelector(
+                ".price"
+            );
+
+
+        if(
+            newPrice
+            && oldPrice
+        ){
+
+            oldPrice.textContent =
+                newPrice.textContent;
+        }
+
+
+        const newMeta =
+            doc.querySelector(
+                ".meta"
+            );
+
+
+        const oldMeta =
+            document.querySelector(
+                ".meta"
+            );
+
+
+        if(
+            newMeta
+            && oldMeta
+        ){
+
+            oldMeta.textContent =
+                newMeta.textContent;
+        }
+
+
+        const newError =
+            doc.querySelector(
+                ".err"
+            );
+
+
+        const oldError =
+            document.querySelector(
+                ".err"
+            );
+
+
+        if(
+            newError
+            && oldError
+        ){
+
+            oldError.textContent =
+                newError.textContent;
+
+        }else if(
+            newError
+            && !oldError
+        ){
+
+            const title =
+                document.querySelector(
+                    "h1"
+                );
+
+
+            if(title){
+
+                title.insertAdjacentElement(
+                    "afterend",
+                    newError
+                );
+            }
+
+        }else if(
+            !newError
+            && oldError
+        ){
+
+            oldError.remove();
+        }
+
+
+        const newSelect =
+            doc.getElementById(
+                "setupSelect"
+            );
+
+
+        const oldSelect =
+            document.getElementById(
+                "setupSelect"
+            );
+
+
+        if(
+            newSelect
+            && oldSelect
+        ){
+
+            const currentValue =
+                oldSelect.value;
+
+
+            oldSelect.innerHTML =
+                newSelect.innerHTML;
+
+
+            const stillExists =
+                [
+                    ...oldSelect.options
+                ].some(
+                    option =>
+                        option.value
+                        === currentValue
+                );
+
+
+            if(stillExists){
+
+                oldSelect.value =
+                    currentValue;
+
+            }else if(
+                savedSetup
+            ){
+
+                const savedExists =
+                    [
+                        ...oldSelect.options
+                    ].some(
+                        option =>
+                            option.value
+                            === savedSetup
+                    );
+
+
+                if(savedExists){
+
+                    oldSelect.value =
+                        savedSetup;
+                }
+            }
+        }
+
+
+        bindTableScroll();
+
+
+        activateTab(            savedTab
+        );
+
+
+        requestAnimationFrame(
+            () => {
+
+                window.scrollTo(
+                    0,
+                    savedPageY
+                );
+
+
+                restoreScroll();
+            }
+        );
+
+
+        if(
+            savedTab === "chart"
+        ){
+
+            const select =
+                document.getElementById(
+                    "setupSelect"
+                );
+
+
+            if(
+                select
+                && select.value
+            ){
+
+                await fetchChart(
+                    select.value,
+                    savedTf,
+                    false
+                );
+            }
+        }
+
+
+    }catch(error){
+
+        console.log(
+            "Refresh error:",
+            error
+        );
+    }
+
+
+    setTimeout(
+        refreshDashboard,
+        10000
+    );
+}
+
+
+window.addEventListener(
+    "beforeunload",
+    saveScroll
+);
+
+
+window.addEventListener(
+    "load",
+    () => {
+
+        bindTableScroll();
+
+        restoreOpenSetup();
+
+        restoreScroll();
+
+
+        const savedTab =
+            localStorage.getItem(
+                TAB_KEY
+            )
+            || "confirmed";
+
+
+        activateTab(
+            savedTab === "chart"
+            ? "chart"
+            : "setups"
+        );
+
+
+        setTimeout(
+            () => {
+
+                restoreScroll();
+
+            },
+            100
+        );
+
+
+        setTimeout(
+            refreshDashboard,
+            10000
+        );
+    }
+);
+
+</script>
+"""
+    )
+
+    body.append(
+        "</body></html>"
+    )
+
+    return "".join(body)
+
+
+# ============================================================
+# HTTP SERVER
+# ============================================================
+
+class Handler(
+    BaseHTTPRequestHandler
+):
+
+    def do_GET(self):
+
+        path, _, query = (
+            self.path.partition("?")
+        )
+
+
+        if path == "/api/chart":
+
+            try:
+
+                params = (
+                    urllib.parse
+                    .parse_qs(
+                        query
+                    )
+                )
+
+
+                setup_time = int(
+                    params.get(
+                        "setup_time",
+                        [""]
+                    )[0]
+                )
+
+
+                tf = params.get(
+                    "tf",
+                    ["M15"]
+                )[0]
+
+
+                payload = chart_payload(
+                    setup_time,
+                    tf
+                )
+
+
+                raw = json.dumps(
+                    payload,
+                    separators=(
+                        ",",
+                        ":"
+                    )
+                ).encode(
+                    "utf-8"
+                )
+
+
+                self.send_response(
+                    200
+                )
+
+
+            except Exception as e:
+
+                raw = json.dumps({
+                    "ok": False,
+                    "error": repr(e)
+                }).encode(
+                    "utf-8"
+                )
+
+
+                self.send_response(
+                    500
+                )
+
+
+            self.send_header(
+                "Content-Type",
+                "application/json; "
+                "charset=utf-8"
+            )
+
+
+            self.send_header(
+                "Cache-Control",
+                "no-store"
+            )
+
+
+            self.send_header(
+                "Content-Length",
+                str(len(raw))
+            )
+
+
+            self.end_headers()
+
+
+            self.wfile.write(
+                raw
+            )
+
+
+            return
+
+
+        if path == "/health":
+
+            payload = {
+                "ok": True,
+                "last_update":
+                    state_get(
+                        "last_live_update"
+                    ),
+                "error":
+                    state_get(
+                        "latest_error",
+                        ""                    )
+            }
+
+
+            raw = json.dumps(
+                payload
+            ).encode(
+                "utf-8"
+            )
+
+
+            self.send_response(
+                200
+            )
+
+
+            self.send_header(
+                "Content-Type",
+                "application/json; "
+                "charset=utf-8"
+            )
+
+
+            self.send_header(
+                "Content-Length",
+                str(len(raw))
+            )
+
+
+            self.end_headers()
+
+
+            self.wfile.write(
+                raw
+            )
+
+
+            return
+
+
+        raw = dashboard().encode(
+            "utf-8"
+        )
+
+
+        self.send_response(
+            200
+        )
+
+
+        self.send_header(
+            "Content-Type",
+            "text/html; "
+            "charset=utf-8"
+        )
+
+
+        self.send_header(
+            "Cache-Control",
+            "no-store"
+        )
+
+
+        self.send_header(
+            "Content-Length",
+            str(len(raw))
+        )
+
+
+        self.end_headers()
+
+
+        self.wfile.write(
+            raw
+        )
+
+
+    def log_message(
+        self,
+        *_
+    ):
+
+        return
+
+
+# ============================================================
+# ENGINE LOOP
+# ============================================================
+
+def engine_loop():
+
+    init_db()
+
+    rebuild_history()
+
+
+    while True:
+
+        try:
+
+            live_refresh()
+
+        except Exception as e:
+
+            state_set(
+                "latest_error",
+                repr(e)
+            )
+
+
+        time.sleep(
+            POLL_SECONDS
+        )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+
+    init_db()
+
+
+    threading.Thread(
+        target=engine_loop,
+        daemon=True
+    ).start()
+
+
+    HTTPServer(
+        (
+            "0.0.0.0",
+            PORT
+        ),
+        Handler
+    ).serve_forever()
