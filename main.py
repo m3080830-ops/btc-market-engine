@@ -1556,13 +1556,22 @@ def manage_open_positions(
 
         direction = row["direction"]
         entry = row["entry_price"]
-        sl = row["position_sl"]
+        current_sl = row["position_sl"]
 
         if (
             entry is None
-            or sl is None
+            or current_sl is None
         ):
 
+            continue
+
+        original_sl = structural_sl(
+            m15,
+            direction,
+            row["entry_time"]
+        )
+
+        if original_sl is None:
             continue
 
         max_r = (
@@ -1581,8 +1590,6 @@ def manage_open_positions(
 
         trail_r = row["trail_r"]
 
-        current_sl = sl
-
         exit_time = None
         exit_price = None
         reason = None
@@ -1595,14 +1602,14 @@ def manage_open_positions(
             hi_r = r_value(
                 direction,
                 entry,
-                sl,
+                original_sl,
                 c["high"]
             )
 
             lo_r = r_value(
                 direction,
                 entry,
-                sl,
+                original_sl,
                 c["low"]
             )
 
@@ -1683,7 +1690,7 @@ def manage_open_positions(
                 trail_r = r_value(
                     direction,
                     entry,
-                    sl,
+                    original_sl,
                     c["close"]
                 )
 
@@ -1703,13 +1710,13 @@ def manage_open_positions(
                 exit_r=r_value(
                     direction,
                     entry,
-                    sl,
+                    original_sl,
                     exit_price
                 ),
                 trail_r=r_value(
                     direction,
                     entry,
-                    sl,
+                    original_sl,
                     exit_price
                 )
             )
