@@ -1029,8 +1029,6 @@ def find_m5_entry(
 
             ok = (
                 c["close"]
-                > high3
-                and c["close"]
                 > e20[i]
                 and c["close"]
                 > c["open"]
@@ -1040,8 +1038,6 @@ def find_m5_entry(
 
             ok = (
                 c["close"]
-                < low3
-                and c["close"]
                 < e20[i]
                 and c["close"]
                 < c["open"]
