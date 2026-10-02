@@ -2906,7 +2906,6 @@ BTC: {current_price} USDT
 """)
 
     body.append("""
-    body.append("""
 <section
     id="setups"
     class="panel">
