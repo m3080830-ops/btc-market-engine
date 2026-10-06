@@ -455,6 +455,9 @@ def atr(
             result_display = "—"
             stage_display = row["status"]
 
+        status_text = row["status"]
+        final_stage = stage_display
+
         status_class = (
             "yes"
             if row["status"] in (
