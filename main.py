@@ -1816,7 +1816,7 @@ def manage_open_positions(
                 trail_r=r_value(
                     direction,
                     entry,
-                    sl,
+                    original_sl,
                     exit_price
                 )
             )
@@ -1949,7 +1949,8 @@ def live_refresh():
 def chart_candles(
     setup_time,
     interval,
-    total
+    total,
+    end_ts=None
 ):
 
     step = {
@@ -1958,11 +1959,15 @@ def chart_candles(
         "Min5": 300
     }[interval]
 
-    end = min(
-        now_ts(),
-        int(
-            setup_time
-            + total * step * 0.99
+    end = (
+        int(end_ts)
+        if end_ts is not None
+        else min(
+            now_ts(),
+            int(
+                setup_time
+                + total * step * 0.99
+            )
         )
     )
 
