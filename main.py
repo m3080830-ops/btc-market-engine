@@ -303,19 +303,21 @@ def parse_klines(payload):
     )
 
     for i in range(count):
-
-        out.append({
-            "time": int(times[i]),
-            "open": float(opens[i]),
-            "close": float(closes[i]),
-            "high": float(highs[i]),
-            "low": float(lows[i]),
-            "vol": (
-                float(vols[i])
-                if i < len(vols)
-                else 0.0
-            )
-        })
+        try:
+            out.append({
+                "time": int(times[i]),
+                "open": float(opens[i]),
+                "close": float(closes[i]),
+                "high": float(highs[i]),
+                "low": float(lows[i]),
+                "vol": (
+                    float(vols[i])
+                    if i < len(vols)
+                    else 0.0
+                )
+            })
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
 
     return sorted(
         out,
@@ -1612,50 +1614,59 @@ def manage_open_positions(symbol, m5, m15):
 
 
 def live_refresh():
+    errors = []
+
     for symbol in SYMBOLS:
-        h1 = get_klines(symbol, "Min60", H1_HISTORY)
-        m15 = get_klines(symbol, "Min15", 500)
-        m5 = get_klines(symbol, "Min5", 1000)
+        try:
+            h1 = get_klines(symbol, "Min60", H1_HISTORY)
+            m15 = get_klines(symbol, "Min15", 500)
+            m5 = get_klines(symbol, "Min5", 1000)
 
-        with db_conn() as conn:
-            active = conn.execute(
-                """SELECT 1 FROM setups
-                   WHERE symbol=? AND entry_time IS NOT NULL AND exit_time IS NULL
-                   LIMIT 1""",
-                (symbol,)
-            ).fetchone()
+            if not h1 or not m15 or not m5:
+                continue
 
-        if not active:
-            setup = find_latest_setup(h1, m15)
-            if setup:
-                setup["symbol"] = symbol
-                with db_conn() as conn:
-                    duplicate = conn.execute(
-                        "SELECT 1 FROM setups WHERE symbol=? AND setup_time=? LIMIT 1",
-                        (symbol, setup["signal_time"])
-                    ).fetchone()
+            with db_conn() as conn:
+                active = conn.execute(
+                    """SELECT 1 FROM setups
+                       WHERE symbol=? AND entry_time IS NOT NULL AND exit_time IS NULL
+                       LIMIT 1""",
+                    (symbol,)
+                ).fetchone()
 
-                if not duplicate:
-                    entry = build_entry(setup, m15)
-                    if entry:
-                        sl = choose_structural_sl(h1, m15, setup)
-                        plan = planned_trade(h1, m15, setup, entry["price"], sl)
-                        if sl is not None and plan is not None and plan["rr"] >= MIN_SETUP_RR:
-                            upsert_setup(setup)
-                            update_setup(
-                                setup["signal_time"], symbol=symbol,
-                                status="OTWARTA", setup_sl=sl,
-                                entry_time=entry["time"], entry_price=entry["price"],
-                                position_sl=sl, planned_target=plan["target"],
-                                planned_rr=plan["rr"], entry_model=setup["model"],
-                                pa_trigger=",".join(setup.get("pa", [])),
-                                decision_reason=None
-                            )
-        manage_open_positions(symbol, m5, m15)
+            if not active:
+                setup = find_latest_setup(h1, m15)
+                if setup:
+                    setup["symbol"] = symbol
+                    with db_conn() as conn:
+                        duplicate = conn.execute(
+                            "SELECT 1 FROM setups WHERE symbol=? AND setup_time=? LIMIT 1",
+                            (symbol, setup["signal_time"])
+                        ).fetchone()
+
+                    if not duplicate:
+                        entry = build_entry(setup, m15)
+                        if entry:
+                            sl = choose_structural_sl(h1, m15, setup)
+                            plan = planned_trade(h1, m15, setup, entry["price"], sl)
+                            if sl is not None and plan is not None and plan["rr"] >= MIN_SETUP_RR:
+                                upsert_setup(setup)
+                                update_setup(
+                                    setup["signal_time"], symbol=symbol,
+                                    status="OTWARTA", setup_sl=sl,
+                                    entry_time=entry["time"], entry_price=entry["price"],
+                                    position_sl=sl, planned_target=plan["target"],
+                                    planned_rr=plan["rr"], entry_model=setup["model"],
+                                    pa_trigger=",".join(setup.get("pa", [])),
+                                    decision_reason=None
+                                )
+
+            manage_open_positions(symbol, m5, m15)
+
+        except Exception as e:
+            errors.append(f"{symbol}: {repr(e)}")
 
     state_set("last_live_update", now_ts())
-    state_set("latest_error", "")
-
+    state_set("latest_error", " | ".join(errors))
 
 # ============================================================
 # CHART DATA
