@@ -30,7 +30,7 @@ M5_HISTORY = 2000
 
 M15_CONFIRM_CANDLES = 16
 M5_ENTRY_CANDLES = 8
-M5_FALLBACK_CANDLES = 24
+MIN_SETUP_RR = 1.5
 
 PORT = int(
     os.environ.get(
@@ -127,6 +127,10 @@ def init_db():
 
             trail_r REAL,
 
+            planned_target REAL,
+            planned_rr REAL,
+            decision_reason TEXT,
+
             last_update INTEGER NOT NULL DEFAULT 0
         )
         """)
@@ -137,6 +141,23 @@ def init_db():
             value TEXT
         )
         """)
+
+        columns = {
+            row[1]
+            for row in c.execute(
+                "PRAGMA table_info(setups)"
+            ).fetchall()
+        }
+
+        for name, sql_type in (
+            ("planned_target", "REAL"),
+            ("planned_rr", "REAL"),
+            ("decision_reason", "TEXT")
+        ):
+            if name not in columns:
+                c.execute(
+                    f"ALTER TABLE setups ADD COLUMN {name} {sql_type}"
+                )
 
         c.commit()
 
@@ -631,57 +652,118 @@ def find_h1_setups(rows):
 # ============================================================
 
 def structural_sl(
-    m15_rows,
+    rows,
     direction,
     end_time=None
 ):
 
-    r = closed(m15_rows)
+    r = closed(rows)
 
     if end_time is not None:
-
         r = [
-            x
-            for x in r
-            if x["time"] <= end_time
+            x for x in r
+            if x["time"] < end_time
         ]
 
     if len(r) < 20:
         return None
 
-    atr_values = atr(
-        r,
-        14
-    )
+    atr_values = atr(r, 14)
 
     if not atr_values:
         return None
 
     current_atr = atr_values[-1]
 
-    last6 = r[-6:]
-
     if direction == "LONG":
 
-        return (
-            min(
-                x["low"]
-                for x in last6
-            )
-            - current_atr * 0.2
-        )
+        for i in range(len(r) - 3, 1, -1):
 
-    return (
-        max(
-            x["high"]
-            for x in last6
-        )
-        + current_atr * 0.2
+            if (
+                r[i]["low"] < r[i - 1]["low"]
+                and r[i]["low"] < r[i - 2]["low"]
+                and r[i]["low"] < r[i + 1]["low"]
+                and r[i]["low"] < r[i + 2]["low"]
+            ):
+                return r[i]["low"] - current_atr * 0.2
+
+        return min(x["low"] for x in r[-6:]) - current_atr * 0.2
+
+    for i in range(len(r) - 3, 1, -1):
+
+        if (
+            r[i]["high"] > r[i - 1]["high"]
+            and r[i]["high"] > r[i - 2]["high"]
+            and r[i]["high"] > r[i + 1]["high"]
+            and r[i]["high"] > r[i + 2]["high"]
+        ):
+            return r[i]["high"] + current_atr * 0.2
+
+    return max(x["high"] for x in r[-6:]) + current_atr * 0.2
+
+
+def h1_entry(h1_rows, setup):
+
+    for row in sorted(h1_rows, key=lambda x: x["time"]):
+
+        if row["time"] > setup["time"]:
+            return {
+                "time": row["time"],
+                "price": row["open"]
+            }
+
+    return None
+
+
+def setup_trade_plan(h1_rows, setup, entry, sl):
+
+    if entry is None or sl is None:
+        return None
+
+    before = [
+        x for x in closed(h1_rows)
+        if x["time"] < setup["time"]
+    ]
+
+    if len(before) < 10:
+        return None
+
+    window = before[-10:]
+
+    range_high = max(x["high"] for x in window)
+    range_low = min(x["low"] for x in window)
+    range_height = range_high - range_low
+
+    if range_height <= 0:
+        return None
+
+    if setup["direction"] == "LONG":
+        target = range_high + range_height
+    else:
+        target = range_low - range_height
+
+    risk = abs(entry["price"] - sl)
+
+    if risk <= 0:
+        return None
+
+    reward = (
+        target - entry["price"]
+        if setup["direction"] == "LONG"
+        else entry["price"] - target
     )
+
+    return {
+        "target": target,
+        "rr": reward / risk
+    }
 
 
 # ============================================================
 # M15 DIAGNOSTICS
+# ============================================================
+
+
 # ============================================================
 
 def m15_diagnostics(
@@ -1143,14 +1225,11 @@ def simulate_position(
     m5_rows,
     m15_rows,
     setup,
-    entry
+    entry,
+    initial_sl
 ):
 
-    sl = structural_sl(
-        m15_rows,
-        setup["direction"],
-        entry["time"]
-    )
+    sl = initial_sl
 
     if sl is None:
         return None
@@ -1590,11 +1669,7 @@ def manage_open_positions(
 
             continue
 
-        original_sl = structural_sl(
-            m15,
-            direction,
-            row["entry_time"]
-        )
+        original_sl = row["setup_sl"]
 
         if original_sl is None:
             continue
