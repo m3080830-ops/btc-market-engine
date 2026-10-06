@@ -442,21 +442,31 @@ def atr(
             else "short"
         )
 
-        if row["exit_time"]:
-            result_display = fmt_r(row["exit_r"])
-            stage_display = row["exit_reason"] or "EXIT"
-        elif row["entry_time"]:
-            result_display = "OTWARTA"
-            stage_display = "ENTRY"
-        elif row["planned_rr"] is not None:
-            result_display = f"RR {float(row['planned_rr']):.2f}"
-            stage_display = row["status"]
-        else:
-            result_display = "—"
-            stage_display = row["status"]
+        result_display = (
+            fmt_r(row["exit_r"])
+            if row["exit_time"]
+            else (
+                "OTWARTA"
+                if row["entry_time"]
+                else (
+                    fmt_r(row["planned_rr"])
+                    if row["planned_rr"] is not None
+                    else "—"
+                )
+            )
+        )
+
+        final_stage = (
+            row["exit_reason"]
+            if row["exit_time"]
+            else (
+                "OTWARTA"
+                if row["entry_time"]
+                else row["status"]
+            )
+        )
 
         status_text = row["status"]
-        final_stage = stage_display
 
         status_class = (
             "yes"
@@ -467,19 +477,21 @@ def atr(
             else "no"
         )
 
-        max_display = row["position_max_r"]
-        min_display = row["position_min_r"]
+        timeline = (
+            "H1 SETUP"
+            + (
+                " → ENTRY"
+                if row["entry_time"]
+                else ""
+            )
+            + (
+                " → " + final_stage
+                if final_stage
+                else ""
+            )
+        )
+
         sl_display = row["position_sl"] or row["setup_sl"]
-
-        timeline_parts = ["H1 SETUP"]
-
-        if row["entry_time"]:
-            timeline_parts.append("ENTRY")
-
-        if row["exit_time"]:
-            timeline_parts.append(stage_display)
-
-        timeline = " → ".join(timeline_parts)
 
         body.append(
             f"""
@@ -570,12 +582,12 @@ def atr(
 
 <div class="card">
 <b>MAX R</b>
-<span>{fmt_r(max_display)}</span>
+<span>{fmt_r(row["position_max_r"])}</span>
 </div>
 
 <div class="card">
 <b>MIN R</b>
-<span>{fmt_r(min_display)}</span>
+<span>{fmt_r(row["position_min_r"])}</span>
 </div>
 
 <div class="card">
@@ -640,7 +652,7 @@ M5
 <div class="legend">
 
 Świece z MEXC.
-Linie: SETUP, SL, ENTRY, EXIT.
+Linie: SETUP, SL, M15 CONF, M5 ENTRY.
 Pozycja tabeli, strony i wykresu jest zachowywana
 przy odświeżeniu.
 
@@ -1625,21 +1637,6 @@ function renderChart(
         "ENTRY"
     );
 
-
-    verticalLine(
-        data.markers.exit_time,
-        "#8b949e",
-        "EXIT"
-    );
-
-
-    horizontalLine(
-        data.markers.exit_price,
-        "#8b949e",
-        "EXIT",
-        false
-    );
-
     verticalLine(
         data.markers.exit_time,
         "#8b949e",
@@ -1780,7 +1777,7 @@ ${formatR(
 
     info += `
 <div class="diag-title">
-M15 — obserwacja (NIE BLOKUJE WEJŚCIA)
+M15 — 16 świec potwierdzenia
 </div>
 
 <div class="diag-scroll">
@@ -1904,7 +1901,7 @@ ${
 
         info += `
 <div class="diag-title">
-M5 — obserwacja po wejściu
+M5 — 8 świec wejścia
 </div>
 
 <div class="diag-scroll">
