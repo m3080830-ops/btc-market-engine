@@ -1989,15 +1989,21 @@ def chart_payload(
     }
 
     mapping = {
-        "H1": ("Min60", 24),
-        "M15": ("Min15", 36),
-        "M5": ("Min5", 72)
+        "H1": ("Min60", 18),
+        "M15": ("Min15", 30),
+        "M5": ("Min5", 60)
     }
 
     interval, total = mapping.get(
         tf,
         mapping["M15"]
     )
+
+    step = {
+        "Min60": 3600,
+        "Min15": 900,
+        "Min5": 300
+    }[interval]
 
     event_times = [
         x for x in (
@@ -2008,50 +2014,49 @@ def chart_payload(
         if x
     ]
 
-    center = (
-        row["entry_time"]
-        or row["setup_time"]
-    )
+    start_time = min(event_times)
+    end_time = max(event_times)
 
-    if row["exit_time"]:
-        end_time = row["exit_time"]
-    else:
-        end_time = center
-
-    step = {
-        "Min60": 3600,
-        "Min15": 900,
-        "Min5": 300
-    }[interval]
-
-    before = 6
-    after = 6
-
-    if row["entry_time"]:
-        center = row["entry_time"]
-
-    if row["exit_time"]:
-        end_time = row["exit_time"]
-
-    if end_time < center:
-        end_time = center
+    before = 5
+    after = 5
 
     total = min(
         max(
-            12,
-            before
-            + after
-            + int((end_time - center) / step)
-            + 1
+            total,
+            before + after + int(
+                (end_time - start_time) / step
+            ) + 1
         ),
-        96
+        120
     )
 
     candles = chart_candles(
-        center,
+        start_time,
         interval,
         total,
         end_ts=end_time + after * step
+    )
+
+    m15 = chart_candles(
+        row["setup_time"],
+        "Min15",
+        120,
+        end_ts=(
+            row["exit_time"]
+            or row["entry_time"]
+            or now_ts()
+        ) + 5 * 900
+    )
+
+    m5 = chart_candles(
+        row["setup_time"],
+        "Min5",
+        240,
+        end_ts=(
+            row["exit_time"]
+            or row["entry_time"]
+            or now_ts()
+        ) + 5 * 300
     )
 
     markers = {
@@ -2067,16 +2072,34 @@ def chart_payload(
     return {
         "ok": True,
         "tf": tf,
+
         "setup": {
             "time": row["setup_time"],
             "direction": row["direction"],
             "price": row["setup_price"],
             "status": row["status"]
         },
+
         "markers": markers,
         "candles": candles,
-        "m15": [],
-        "m5": [],
+
+        "m15": m15_diagnostics(
+            m15,
+            setup
+        ),
+
+        "m5": (
+            m5_diagnostics(
+                m5,
+                setup,
+                {
+                    "time": row["entry_time"]
+                }
+            )
+            if row["entry_time"]
+            else []
+        ),
+
         "metrics": {
             "max_r": row["position_max_r"],
             "min_r": row["position_min_r"],
@@ -2091,6 +2114,7 @@ def chart_payload(
 
 # ============================================================
 # DASHBOARD
+
 
 # ============================================================
 
@@ -2144,20 +2168,6 @@ def dashboard():
             f"{html.escape(option_label)}"
             f"</option>"
         )
-
-    confirmed = [
-        r
-        for r in rows
-        if r["status"]
-        == "POTWIERDZONY"
-    ]
-
-    unconfirmed = [
-        r
-        for r in rows
-        if r["status"]
-        != "POTWIERDZONY"
-    ]
 
     body = []
 
@@ -2911,65 +2921,30 @@ Brak setupów.
             else "short"
         )
 
-        is_confirmed = (
-            row["status"]
-            == "POTWIERDZONY"
-        )
-
-        max_display = (
-            row["position_max_r"]
-            if row["entry_time"]
-            else row["setup_max_r"]
-        )
-
-        min_display = (
-            row["position_min_r"]
-            if row["entry_time"]
-            else row["setup_min_r"]
-        )
-
-        sl_display = (
-            row["position_sl"]
-            if row["entry_time"]
-            else row["setup_sl"]
-        )
-
-        if row["exit_time"]:
-            final_stage = "SL" if row["exit_reason"] == "SL" else "EXIT"
-            result_display = fmt_r(row["exit_r"])
-        elif row["entry_time"]:
-            final_stage = "M5 ENTRY"
-            result_display = "OTWARTA"
-        elif row["confirm_time"]:
-            final_stage = "M15 CONFIRM"
-            result_display = "BRAK ENTRY"
-        else:
-            final_stage = "H1 SETUP"
-            result_display = "BRAK M15"
-
-        if row["confirm_time"]:
-            timeline = (
-                "H1 SETUP → M15 CONFIRM → "
-                + ("M5 ENTRY → " if row["entry_time"] else "")
-                + (final_stage if row["exit_time"] else final_stage)
+        result_display = (
+            fmt_r(row["exit_r"])
+            if row["exit_time"]
+            else (
+                "OTWARTA"
+                if row["entry_time"]
+                else (
+                    f"RR {float(row['planned_rr']):.2f}"
+                    if row["planned_rr"] is not None
+                    else "—"
+                )
             )
-        else:
-            timeline = "H1 SETUP → M15 BRAK"
+        )
 
-        if is_confirmed:
-            status_text = "POTWIERDZONY"
-            status_class = "yes"
-        else:
-            status_text = "OCZEKUJE"
-            status_class = "no"
+        status_text = row["status"]
 
-        if (
-            not is_confirmed
-            and max_display is not None
-            and max_display > TRAIL_ACTIVATION_R
-        ):
-            status_text = "OCZEKUJE · >1R POTENCJAŁ"
-            status_class = "yes"
+        status_class = (
+            "yes"
+            if row["status"] in (
+                "OTWARTA",
+                "ZAMKNIETA"
+            )
+            else "no"
+        )
 
         body.append(
             f"""
@@ -2998,7 +2973,7 @@ Brak setupów.
 </span>
 
 <span class="setup-r">
-{fmt_r(max_display)}
+{result_display}
 </span>
 
 <span class="setup-chevron">
@@ -3026,6 +3001,21 @@ Brak setupów.
 <div class="card">
 <b>ETAP</b>
 <span>{final_stage}</span>
+</div>
+
+<div class="card">
+<b>WYNIK</b>
+<span>{result_display}</span>
+</div>
+
+<div class="card">
+<b>PLAN RR</b>
+<span>{fmt_r(row["planned_rr"])}</span>
+</div>
+
+<div class="card">
+<b>CEL</b>
+<span>{fmt_num(row["planned_target"])}</span>
 </div>
 
 <div class="card">
@@ -4113,6 +4103,19 @@ function renderChart(
         "ENTRY"
     );
 
+    verticalLine(
+        data.markers.exit_time,
+        "#8b949e",
+        "EXIT"
+    );
+
+    horizontalLine(
+        data.markers.exit_price,
+        "#8b949e",
+        "EXIT",
+        false
+    );
+
 
     svg.setAttribute(
         "width",
@@ -4240,7 +4243,7 @@ ${formatR(
 
     info += `
 <div class="diag-title">
-M15 — 16 świec potwierdzenia
+M15 — obserwacja (NIE BLOKUJE WEJŚCIA)
 </div>
 
 <div class="diag-scroll">
@@ -4364,7 +4367,7 @@ ${
 
         info += `
 <div class="diag-title">
-M5 — 8 świec wejścia
+M5 — obserwacja po wejściu
 </div>
 
 <div class="diag-scroll">
