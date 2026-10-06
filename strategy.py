@@ -317,11 +317,23 @@ def _range_signal(m15, h1_context):
 
 
 def find_latest_setup(h1_rows, m15_rows):
+    # Evaluate the last few closed M15 candles so a signal is not lost
+    # between polling cycles. Entry is taken at the following M15 open.
     h1c = market_context(h1_rows)
-    trend = _trend_signal(m15_rows, h1c)
-    if trend:
-        return trend
-    return _range_signal(m15_rows, h1c)
+    r = _closed(m15_rows)
+    if len(r) < 120:
+        return None
+
+    for end in range(len(r), max(len(r) - 4, 120), -1):
+        prefix = r[:end]
+        trend = _trend_signal(prefix, h1c)
+        if trend:
+            return trend
+        signal = _range_signal(prefix, h1c)
+        if signal:
+            return signal
+
+    return None
 
 
 def find_historical_setups(h1_rows, m15_rows):
