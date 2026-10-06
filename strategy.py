@@ -1,13 +1,23 @@
 # ============================================================
-# BTC MARKET ENGINE - ENTRY STRATEGY
-# Two market regimes:
-# 1) TREND: EMA 9/18/50/100 + retracement + Price Action
-# 2) RANGE: support/resistance + Price Action
+# BTC MARKET ENGINE - MULTI-TIMEFRAME ENTRY STRATEGY
+#
+# H4 = market context / directional bias
+# H1 = setup location + reaction
+# M15 = entry trigger
+#
+# Two models:
+# 1) TREND: H4 bias + H1 EMA/level reaction + M15 confirmation
+# 2) RANGE: H4 neutral + H1 support/resistance reaction + M15 confirmation
+#
+# Important: H4 is a bias, not a second "checkbox wall".  A neutral H4
+# does not kill a valid H1 range setup.  M15 is a trigger, not a full
+# second strategy.
 # ============================================================
 
 MIN_RR = 1.0
 TREND_EMA_GAP_ATR = 0.08
 LEVEL_ATR_TOLERANCE = 0.35
+H1_REACTION_ATR_TOLERANCE = 0.45
 PA_BODY_RATIO = 0.55
 COOLDOWN_CANDLES = 4
 
@@ -53,20 +63,26 @@ def _range(c):
     return max(c["high"] - c["low"], 1e-9)
 
 
-def _trend_structure(rows, direction):
-    if len(rows) < 8:
+def _trend_structure(rows, direction, lookback=12):
+    if len(rows) < lookback:
         return False
-    a = rows[-1]
-    b = rows[-4]
+    r = rows[-lookback:]
     if direction == "LONG":
-        return a["high"] > b["high"] and a["low"] > b["low"]
-    return a["high"] < b["high"] and a["low"] < b["low"]
+        return r[-1]["high"] > r[0]["high"] and r[-1]["low"] > r[0]["low"]
+    return r[-1]["high"] < r[0]["high"] and r[-1]["low"] < r[0]["low"]
 
 
-def market_context(h1_rows):
-    r = _closed(h1_rows)
+def _context_at(rows, ts):
+    r = [x for x in rows if x["time"] <= ts]
+    if len(r) > 1:
+        r = r[:-1]
+    return r
+
+
+def _h4_context(h4_rows):
+    r = _closed(h4_rows)
     if len(r) < 120:
-        return {"regime": "RANGE", "direction": None}
+        return {"regime": "NEUTRAL", "bias": None}
 
     closes = [x["close"] for x in r]
     e9 = _ema(closes, 9)
@@ -77,15 +93,14 @@ def market_context(h1_rows):
     i = len(r) - 1
     a = av[i]
 
-    long_trend = (
+    long_strong = (
         e9[i] > e18[i] > e50[i] > e100[i]
         and e9[i] > e9[i - 3]
         and e18[i] > e18[i - 3]
         and (e9[i] - e18[i]) > a * TREND_EMA_GAP_ATR
         and _trend_structure(r, "LONG")
     )
-
-    short_trend = (
+    short_strong = (
         e9[i] < e18[i] < e50[i] < e100[i]
         and e9[i] < e9[i - 3]
         and e18[i] < e18[i - 3]
@@ -93,20 +108,41 @@ def market_context(h1_rows):
         and _trend_structure(r, "SHORT")
     )
 
-    if long_trend:
+    if long_strong:
+        return {"regime": "TREND", "bias": "LONG", "strength": "STRONG"}
+    if short_strong:
+        return {"regime": "TREND", "bias": "SHORT", "strength": "STRONG"}
+
+    # A softer bias prevents H4 from killing good H1/M15 setups merely
+    # because the four EMAs are not perfectly stacked.
+    long_bias = e9[i] > e18[i] and e18[i] > e100[i] and e9[i] >= e9[i - 3]
+    short_bias = e9[i] < e18[i] and e18[i] < e100[i] and e9[i] <= e9[i - 3]
+
+    if long_bias and not short_bias:
+        return {"regime": "BIAS", "bias": "LONG", "strength": "SOFT"}
+    if short_bias and not long_bias:
+        return {"regime": "BIAS", "bias": "SHORT", "strength": "SOFT"}
+
+    return {"regime": "NEUTRAL", "bias": None, "strength": "NEUTRAL"}
+
+
+def market_context(h1_rows):
+    # Compatibility helper for callers that still ask for a context from H1.
+    # The new decision path is H4 -> H1 -> M15.
+    r = _closed(h1_rows)
+    if len(r) < 120:
+        return {"regime": "RANGE", "direction": None}
+    closes = [x["close"] for x in r]
+    e9 = _ema(closes, 9)
+    e18 = _ema(closes, 18)
+    e50 = _ema(closes, 50)
+    e100 = _ema(closes, 100)
+    i = len(r) - 1
+    if e9[i] > e18[i] > e50[i] > e100[i]:
         return {"regime": "TREND", "direction": "LONG"}
-    if short_trend:
+    if e9[i] < e18[i] < e50[i] < e100[i]:
         return {"regime": "TREND", "direction": "SHORT"}
-
     return {"regime": "RANGE", "direction": None}
-
-
-def _h1_context_at(h1_rows, ts):
-    # Use only H1 candles that had already closed by the M15 signal time.
-    r = [x for x in h1_rows if x["time"] <= ts]
-    if len(r) > 1:
-        r = r[:-1]
-    return market_context(r)
 
 
 def _ema_state(rows):
@@ -153,7 +189,6 @@ def price_action(candle, prev_rows, direction):
     lower = min(candle["open"], candle["close"]) - candle["low"]
     signals = []
 
-    # Rejection / pin-bar type reaction
     if direction == "LONG":
         if lower >= max(body * 1.2, rng * 0.35) and candle["close"] > candle["open"]:
             signals.append("REJECTION")
@@ -161,7 +196,6 @@ def price_action(candle, prev_rows, direction):
         if upper >= max(body * 1.2, rng * 0.35) and candle["close"] < candle["open"]:
             signals.append("REJECTION")
 
-    # Engulfing
     if direction == "LONG":
         engulf = (
             prev["close"] < prev["open"]
@@ -179,24 +213,19 @@ def price_action(candle, prev_rows, direction):
     if engulf:
         signals.append("ENGULFING")
 
-    # Strong directional candle
     if body / rng >= PA_BODY_RATIO:
         if direction == "LONG" and candle["close"] > candle["open"] and candle["close"] >= candle["high"] - rng * 0.2:
             signals.append("IMPULSE")
         if direction == "SHORT" and candle["close"] < candle["open"] and candle["close"] <= candle["low"] + rng * 0.2:
             signals.append("IMPULSE")
 
-    # Sweep + reclaim
     highs = [x["high"] for x in prev_rows[-5:]]
     lows = [x["low"] for x in prev_rows[-5:]]
-    if direction == "LONG":
-        if candle["low"] < min(lows) and candle["close"] > min(lows):
-            signals.append("SWEEP")
-    else:
-        if candle["high"] > max(highs) and candle["close"] < max(highs):
-            signals.append("SWEEP")
+    if direction == "LONG" and candle["low"] < min(lows) and candle["close"] > min(lows):
+        signals.append("SWEEP")
+    if direction == "SHORT" and candle["high"] > max(highs) and candle["close"] < max(highs):
+        signals.append("SWEEP")
 
-    # Local structure break
     highs3 = [x["high"] for x in prev_rows[-3:]]
     lows3 = [x["low"] for x in prev_rows[-3:]]
     if direction == "LONG" and candle["close"] > max(highs3):
@@ -207,72 +236,8 @@ def price_action(candle, prev_rows, direction):
     return {"ok": bool(signals), "signals": signals}
 
 
-def _trend_signal(m15, h1_context):
-    if h1_context["regime"] != "TREND":
-        return None
-
-    r = _closed(m15)
-    if len(r) < 110:
-        return None
-
-    e9, e18, e50, e100, av = _ema_state(r)
-    i = len(r) - 1
-    c = r[i]
-    a = av[i]
-
-    direction = h1_context["direction"]
-
-    aligned = (
-        direction == "LONG"
-        and e9[i] > e18[i] > e50[i] > e100[i]
-        or direction == "SHORT"
-        and e9[i] < e18[i] < e50[i] < e100[i]
-    )
-    if not aligned:
-        return None
-
-    near_9_18 = (
-        c["low"] <= max(e9[i], e18[i]) + a * LEVEL_ATR_TOLERANCE
-        and c["high"] >= min(e9[i], e18[i]) - a * LEVEL_ATR_TOLERANCE
-    )
-    if not near_9_18:
-        return None
-
-    # The retracement may wick through EMA9, but a trend entry must
-    # close on the correct side of EMA18.
-    if direction == "LONG" and c["close"] < e18[i]:
-        return None
-    if direction == "SHORT" and c["close"] > e18[i]:
-        return None
-
-    # Require that the recent move was directional before the pullback.
-    recent = r[-7:-1]
-    if direction == "LONG":
-        impulse = recent[-1]["close"] > recent[0]["close"]
-    else:
-        impulse = recent[-1]["close"] < recent[0]["close"]
-    if not impulse:
-        return None
-
-    pa = price_action(c, r[:-1], direction)
-    if not pa["ok"]:
-        return None
-
-    return {
-        "signal_time": c["time"],
-        "direction": direction,
-        "price": c["close"],
-        "model": "TREND_EMA9_18",
-        "pa": pa["signals"],
-        "ema9": e9[i],
-        "ema18": e18[i],
-        "ema50": e50[i],
-        "ema100": e100[i]
-    }
-
-
-def _range_signal(m15, h1_context):
-    r = _closed(m15)
+def _h1_reaction(h1_rows, direction):
+    r = _closed(h1_rows)
     if len(r) < 60:
         return None
 
@@ -281,86 +246,246 @@ def _range_signal(m15, h1_context):
     c = r[i]
     a = av[i]
 
-    supports, resistances = _swing_levels(r, 50)
-    if not supports and not resistances:
+    if direction == "LONG":
+        near_ema = (
+            c["low"] <= max(e9[i], e18[i]) + a * H1_REACTION_ATR_TOLERANCE
+            and c["high"] >= min(e9[i], e18[i]) - a * H1_REACTION_ATR_TOLERANCE
+        )
+        if not near_ema:
+            return None
+        if c["close"] < e18[i]:
+            return None
+        pa = price_action(c, r[:-1], direction)
+        if not pa["ok"]:
+            return None
+    else:
+        near_ema = (
+            c["high"] >= min(e9[i], e18[i]) - a * H1_REACTION_ATR_TOLERANCE
+            and c["low"] <= max(e9[i], e18[i]) + a * H1_REACTION_ATR_TOLERANCE
+        )
+        if not near_ema:
+            return None
+        if c["close"] > e18[i]:
+            return None
+        pa = price_action(c, r[:-1], direction)
+        if not pa["ok"]:
+            return None
+
+    return {
+        "signal_time": c["time"],
+        "direction": direction,
+        "price": c["close"],
+        "pa": pa["signals"],
+        "ema9": e9[i],
+        "ema18": e18[i],
+        "ema50": e50[i],
+        "ema100": e100[i],
+        "level_type": "EMA9_18"
+    }
+
+
+def _h1_range_reaction(h1_rows):
+    r = _closed(h1_rows)
+    if len(r) < 60:
         return None
 
-    support = min(supports, key=lambda x: abs(c["low"] - x)) if supports else None
-    resistance = min(resistances, key=lambda x: abs(c["high"] - x)) if resistances else None
+    e9, e18, e50, e100, av = _ema_state(r)
+    i = len(r) - 1
+    c = r[i]
+    a = av[i]
+    supports, resistances = _swing_levels(r, 60)
 
-    support_near = support is not None and abs(c["low"] - support) <= a * LEVEL_ATR_TOLERANCE
-    resistance_near = resistance is not None and abs(c["high"] - resistance) <= a * LEVEL_ATR_TOLERANCE
+    if supports:
+        support = min(supports, key=lambda x: abs(c["low"] - x))
+        if abs(c["low"] - support) <= a * LEVEL_ATR_TOLERANCE:
+            pa = price_action(c, r[:-1], "LONG")
+            if pa["ok"]:
+                return {
+                    "signal_time": c["time"],
+                    "direction": "LONG",
+                    "price": c["close"],
+                    "model": "RANGE_SUPPORT_PA",
+                    "level": support,
+                    "pa": pa["signals"],
+                    "ema9": e9[i],
+                    "ema18": e18[i],
+                    "ema50": e50[i],
+                    "ema100": e100[i]
+                }
 
-    if support_near:
-        pa = price_action(c, r[:-1], "LONG")
-        if pa["ok"]:
-            return {
-                "signal_time": c["time"],
-                "direction": "LONG",
-                "price": c["close"],
-                "model": "RANGE_SUPPORT_PA",
-                "level": support,
-                "pa": pa["signals"],
-                "ema9": e9[i],
-                "ema18": e18[i],
-                "ema50": e50[i],
-                "ema100": e100[i]
-            }
-
-    if resistance_near:
-        pa = price_action(c, r[:-1], "SHORT")
-        if pa["ok"]:
-            return {
-                "signal_time": c["time"],
-                "direction": "SHORT",
-                "price": c["close"],
-                "model": "RANGE_RESISTANCE_PA",
-                "level": resistance,
-                "pa": pa["signals"],
-                "ema9": e9[i],
-                "ema18": e18[i],
-                "ema50": e50[i],
-                "ema100": e100[i]
-            }
+    if resistances:
+        resistance = min(resistances, key=lambda x: abs(c["high"] - x))
+        if abs(c["high"] - resistance) <= a * LEVEL_ATR_TOLERANCE:
+            pa = price_action(c, r[:-1], "SHORT")
+            if pa["ok"]:
+                return {
+                    "signal_time": c["time"],
+                    "direction": "SHORT",
+                    "price": c["close"],
+                    "model": "RANGE_RESISTANCE_PA",
+                    "level": resistance,
+                    "pa": pa["signals"],
+                    "ema9": e9[i],
+                    "ema18": e18[i],
+                    "ema50": e50[i],
+                    "ema100": e100[i]
+                }
 
     return None
 
 
-def find_latest_setup(h1_rows, m15_rows):
-    # Evaluate the last few closed M15 candles so a signal is not lost
-    # between polling cycles. Entry is taken at the following M15 open.
-    h1c = market_context(h1_rows)
+def _m15_trigger(m15_rows, direction, after_time):
+    # Trigger must be a CLOSED M15 candle. Entry is the next M15 open.
     r = _closed(m15_rows)
-    if len(r) < 120:
+    candidates = [x for x in r if x["time"] > after_time]
+    if len(candidates) == 0:
         return None
 
-    for end in range(len(r), max(len(r) - 4, 120), -1):
+    c = candidates[-1]
+    prev = r[:-1]
+    pa = price_action(c, prev, direction)
+    if not pa["ok"]:
+        return None
+
+    e9, e18, e50, e100, av = _ema_state(r)
+    i = len(r) - 1
+
+    # Do not demand perfect EMA alignment on M15. H4/H1 already define
+    # the context. M15 only confirms that price actually turned.
+    if direction == "LONG" and c["close"] <= c["open"]:
+        return None
+    if direction == "SHORT" and c["close"] >= c["open"]:
+        return None
+
+    return {
+        "signal_time": c["time"],
+        "direction": direction,
+        "price": c["close"],
+        "model": "TREND_H4_H1_M15" if direction else "M15_TRIGGER",
+        "pa": pa["signals"],
+        "ema9": e9[i],
+        "ema18": e18[i],
+        "ema50": e50[i],
+        "ema100": e100[i]
+    }
+
+
+def _find_h1_setup_before(h1_rows, m15_signal_time, direction):
+    # Look at the latest closed H1 candle before the M15 trigger and a
+    # small window before it. This prevents a missed H1 reaction when the
+    # M15 trigger arrives later in the hour.
+    r = [x for x in _closed(h1_rows) if x["time"] <= m15_signal_time]
+    if len(r) < 60:
+        return None
+
+    for end in range(len(r), max(len(r) - 4, 60), -1):
         prefix = r[:end]
-        trend = _trend_signal(prefix, h1c)
-        if trend:
-            return trend
-        signal = _range_signal(prefix, h1c)
-        if signal:
-            return signal
+        reaction = _h1_reaction(prefix, direction)
+        if reaction:
+            return reaction
+    return None
+
+
+def _trend_signal(h4_rows, h1_rows, m15_rows):
+    h4 = _h4_context(h4_rows)
+    if h4["bias"] is None:
+        return None
+
+    direction = h4["bias"]
+    r15 = _closed(m15_rows)
+    if len(r15) < 110:
+        return None
+
+    # Work backwards through recent closed M15 candles. This is robust to
+    # polling timing and still keeps the actual trigger on M15.
+    for idx in range(len(r15) - 1, max(len(r15) - 5, 109), -1):
+        m15_prefix = r15[:idx + 1]
+        trigger = _m15_trigger(m15_prefix, direction, 0)
+        if not trigger:
+            continue
+
+        h1_setup = _find_h1_setup_before(h1_rows, trigger["signal_time"], direction)
+        if not h1_setup:
+            continue
+
+        trigger["model"] = "TREND_H4_H1_M15"
+        trigger["h4_bias"] = direction
+        trigger["h4_strength"] = h4["strength"]
+        trigger["h1_signal_time"] = h1_setup["signal_time"]
+        trigger["h1_pa"] = h1_setup["pa"]
+        trigger["h1_level_type"] = h1_setup.get("level_type", "EMA9_18")
+        return trigger
 
     return None
 
 
-def find_historical_setups(h1_rows, m15_rows):
-    r = _closed(m15_rows)
-    if len(r) < 120:
+def _range_signal(h4_rows, h1_rows, m15_rows):
+    h4 = _h4_context(h4_rows)
+    if h4["regime"] == "TREND":
+        return None
+
+    h1 = _closed(h1_rows)
+    if len(h1) < 60:
+        return None
+
+    r15 = _closed(m15_rows)
+    if len(r15) < 60:
+        return None
+
+    # H1 identifies the range level; M15 confirms the reaction.
+    h1_reaction = _h1_range_reaction(h1)
+    if not h1_reaction:
+        return None
+
+    direction = h1_reaction["direction"]
+    trigger = _m15_trigger(r15, direction, h1_reaction["signal_time"])
+    if not trigger:
+        return None
+
+    trigger.update({
+        "model": h1_reaction["model"],
+        "h4_bias": h4.get("bias"),
+        "h4_strength": h4.get("strength"),
+        "h1_signal_time": h1_reaction["signal_time"],
+        "h1_level": h1_reaction.get("level"),
+        "h1_pa": h1_reaction["pa"],
+    })
+    return trigger
+
+
+def find_latest_setup(h4_rows, h1_rows, m15_rows):
+    # New hierarchy:
+    # H4 context -> H1 setup -> M15 trigger -> next M15 open.
+    r15 = _closed(m15_rows)
+    if len(r15) < 120:
+        return None
+
+    trend = _trend_signal(h4_rows, h1_rows, m15_rows)
+    if trend:
+        return trend
+
+    return _range_signal(h4_rows, h1_rows, m15_rows)
+
+
+def find_historical_setups(h4_rows, h1_rows, m15_rows):
+    r15 = _closed(m15_rows)
+    if len(r15) < 120:
         return []
 
     out = []
     last_signal = None
 
-    for i in range(110, len(r)):
-        prefix = r[:i + 1]
-        ctx = _h1_context_at(h1_rows, r[i]["time"])
+    # Re-evaluate historical M15 closes. For each trigger, use only H1/H4
+    # candles that were already closed at that moment (no future leakage).
+    for i in range(120, len(r15)):
+        signal_time = r15[i]["time"]
+        h4_at = _context_at(h4_rows, signal_time)
+        h1_at = _context_at(h1_rows, signal_time)
+        m15_prefix = r15[:i + 1]
 
-        signal = _trend_signal(prefix, ctx)
+        signal = _trend_signal(h4_at, h1_at, m15_prefix)
         if signal is None:
-            signal = _range_signal(prefix, ctx)
+            signal = _range_signal(h4_at, h1_at, m15_prefix)
 
         if signal is None:
             continue
@@ -383,19 +508,22 @@ def choose_structural_sl(h1_rows, m15_rows, setup):
 
     av = _atr(m15, 14)[-1]
     supports, resistances = _swing_levels(m15, 60)
-
     candidates = []
 
     if direction == "LONG":
         swings = [x for x in supports if x < setup["price"]]
         if swings:
             candidates.append(max(swings) - av * 0.15)
+        if setup.get("h1_level") is not None and setup["h1_level"] < setup["price"]:
+            candidates.append(setup["h1_level"] - av * 0.15)
         if setup.get("level") is not None and setup["level"] < setup["price"]:
             candidates.append(setup["level"] - av * 0.15)
     else:
         swings = [x for x in resistances if x > setup["price"]]
         if swings:
             candidates.append(min(swings) + av * 0.15)
+        if setup.get("h1_level") is not None and setup["h1_level"] > setup["price"]:
+            candidates.append(setup["h1_level"] + av * 0.15)
         if setup.get("level") is not None and setup["level"] > setup["price"]:
             candidates.append(setup["level"] + av * 0.15)
 
@@ -404,7 +532,6 @@ def choose_structural_sl(h1_rows, m15_rows, setup):
             return min(x["low"] for x in m15[-6:]) - av * 0.15
         return max(x["high"] for x in m15[-6:]) + av * 0.15
 
-    # Choose the structurally valid stop giving the better RR potential.
     valid = []
     for sl in candidates:
         if direction == "LONG" and sl < setup["price"]:
@@ -415,9 +542,7 @@ def choose_structural_sl(h1_rows, m15_rows, setup):
     if not valid:
         return None
 
-    if direction == "LONG":
-        return max(valid)
-    return min(valid)
+    return max(valid) if direction == "LONG" else min(valid)
 
 
 def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
@@ -448,9 +573,7 @@ def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
 
 
 def build_entry(setup, m15_rows):
-    # The signal is a closed M15 candle. The entry is the open of the
-    # immediately following M15 candle. In live mode that candle may
-    # still be forming, so do not discard it with _closed().
+    # Closed M15 trigger -> next M15 candle open.
     for c in sorted(m15_rows, key=lambda x: x["time"]):
         if c["time"] > setup["signal_time"]:
             return {"time": c["time"], "price": c["open"]}
