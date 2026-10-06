@@ -500,49 +500,86 @@ def find_historical_setups(h4_rows, h1_rows, m15_rows):
 
 
 def choose_structural_sl(h1_rows, m15_rows, setup):
+    """
+    Structural SL must sit behind a meaningful level, not a tiny micro-swing.
+
+    Important: this only affects NEW setups. Existing/open trades keep the
+    SL already stored in the database, so changing the rule cannot rewrite
+    or invalidate historical trades.
+    """
     direction = setup["direction"]
     signal_time = setup["signal_time"]
     m15 = [x for x in _closed(m15_rows) if x["time"] <= signal_time]
-    if len(m15) < 10:
+    if len(m15) < 20:
         return None
 
     av = _atr(m15, 14)[-1]
-    supports, resistances = _swing_levels(m15, 60)
+    signal = m15[-1]
+    signal_range = _range(signal)
+
+    # Minimum room is volatility/structure based. This prevents an SL from
+    # being only a few ticks behind a nearby micro swing.
+    min_distance = max(
+        av * 0.80,
+        signal_range * 1.25
+    )
+    buffer = av * 0.15
+
+    supports, resistances = _swing_levels(m15, 80)
     candidates = []
 
     if direction == "LONG":
-        swings = [x for x in supports if x < setup["price"]]
-        if swings:
-            candidates.append(max(swings) - av * 0.15)
+        for level in supports:
+            if level < setup["price"]:
+                sl = level - buffer
+                if setup["price"] - sl >= min_distance:
+                    candidates.append(sl)
+
         if setup.get("h1_level") is not None and setup["h1_level"] < setup["price"]:
-            candidates.append(setup["h1_level"] - av * 0.15)
+            sl = setup["h1_level"] - buffer
+            if setup["price"] - sl >= min_distance:
+                candidates.append(sl)
+
         if setup.get("level") is not None and setup["level"] < setup["price"]:
-            candidates.append(setup["level"] - av * 0.15)
-    else:
-        swings = [x for x in resistances if x > setup["price"]]
-        if swings:
-            candidates.append(min(swings) + av * 0.15)
-        if setup.get("h1_level") is not None and setup["h1_level"] > setup["price"]:
-            candidates.append(setup["h1_level"] + av * 0.15)
-        if setup.get("level") is not None and setup["level"] > setup["price"]:
-            candidates.append(setup["level"] + av * 0.15)
+            sl = setup["level"] - buffer
+            if setup["price"] - sl >= min_distance:
+                candidates.append(sl)
+
+        # If the nearest structural level is too close, use a wider recent
+        # structure rather than throwing away the setup immediately.
+        if not candidates:
+            wider = min(
+                x["low"] for x in m15[-12:]
+            ) - buffer
+            candidates.append(wider)
+
+        # Prefer the tightest SL that is still structurally meaningful.
+        return max(candidates)
+
+    for level in resistances:
+        if level > setup["price"]:
+            sl = level + buffer
+            if sl - setup["price"] >= min_distance:
+                candidates.append(sl)
+
+    if setup.get("h1_level") is not None and setup["h1_level"] > setup["price"]:
+        sl = setup["h1_level"] + buffer
+        if sl - setup["price"] >= min_distance:
+            candidates.append(sl)
+
+    if setup.get("level") is not None and setup["level"] > setup["price"]:
+        sl = setup["level"] + buffer
+        if sl - setup["price"] >= min_distance:
+            candidates.append(sl)
 
     if not candidates:
-        if direction == "LONG":
-            return min(x["low"] for x in m15[-6:]) - av * 0.15
-        return max(x["high"] for x in m15[-6:]) + av * 0.15
+        wider = max(
+            x["high"] for x in m15[-12:]
+        ) + buffer
+        candidates.append(wider)
 
-    valid = []
-    for sl in candidates:
-        if direction == "LONG" and sl < setup["price"]:
-            valid.append(sl)
-        if direction == "SHORT" and sl > setup["price"]:
-            valid.append(sl)
-
-    if not valid:
-        return None
-
-    return max(valid) if direction == "LONG" else min(valid)
+    # Prefer the tightest structurally valid SL.
+    return min(candidates)
 
 
 def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
