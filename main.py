@@ -29,7 +29,7 @@ BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
 
 POLL_SECONDS = 30
 
-DB_FILE = "/tmp/market_history.db"
+DB_FILE = os.environ.get("DB_FILE", "/data/market_history.db")
 
 TRAIL_ACTIVATION_R = 1.0
 
@@ -91,6 +91,10 @@ def fmt_r(v):
 # ============================================================
 
 def db_conn():
+
+    db_dir = os.path.dirname(DB_FILE)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
 
     c = sqlite3.connect(
         DB_FILE,
