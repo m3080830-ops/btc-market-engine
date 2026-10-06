@@ -1738,16 +1738,10 @@ def chart_payload(
         "price": row["setup_price"]
     }
 
-    mapping = {
-        "H1": ("Min60", 18),
-        "M15": ("Min15", 30),
-        "M5": ("Min5", 60)
-    }
-
-    interval, total = mapping.get(
-        tf,
-        mapping["M15"]
-    )
+    # History charts are intentionally M15-only.
+    interval = "Min15"
+    total = 36
+    tf = "M15"
 
     step = {
         "Min60": 3600,
@@ -3436,7 +3430,7 @@ function renderChart(
     }
 
 
-    const width = Math.max(1000, candles.length * 6.2);
+    const width = Math.max(1000, candles.length * 7.0);
 
     const height =
         430;
@@ -3483,11 +3477,9 @@ function renderChart(
 
 
     [
-        data.markers.setup_price,
         data.markers.sl,
-        data.markers.confirm_price,
-        data.markers.entry_price,
         data.markers.trail_price,
+        data.markers.entry_price,
         data.markers.exit_price
     ].forEach(
         value => {
@@ -3719,7 +3711,7 @@ function renderChart(
                     closeY
                 )
                 + "' "
-                + "width='5' "
+                + "width='6' "
                 + "height='"
                 + Math.max(
                     1,
@@ -3881,62 +3873,16 @@ function renderChart(
     }
 
 
-    horizontalLine(
-        data.markers.setup_price,
-        "#58a6ff",
-        "SETUP",
-        false
-    );
-
+    // Clean trade visualization:
+    // vertical lines = ENTRY / EXIT
+    // horizontal lines = initial SL / TRAILING SL
+    // No SETUP/M15/ENTRY horizontal lines.
 
     horizontalLine(
         data.markers.sl,
         "#ff7b72",
         "SL",
         true
-    );
-
-
-    horizontalLine(
-        data.markers.confirm_price,
-        "#c084fc",
-        "M15",
-        false
-    );
-
-
-    horizontalLine(
-        data.markers.entry_price,
-        "#f2cc60",
-        "ENTRY",
-        false
-    );
-
-
-    verticalLine(
-        data.markers.setup_time,
-        "#58a6ff",
-        "SETUP"
-    );
-
-
-    verticalLine(
-        data.markers.confirm_time,
-        "#c084fc",
-        "M15"
-    );
-
-
-    verticalLine(
-        data.markers.entry_time,
-        "#f2cc60",
-        "ENTRY"
-    );
-
-    verticalLine(
-        data.markers.trail_time,
-        "#c084fc",
-        "TRAIL"
     );
 
     horizontalLine(
@@ -3947,19 +3893,16 @@ function renderChart(
     );
 
     verticalLine(
+        data.markers.entry_time,
+        "#f2cc60",
+        "WEJŚCIE"
+    );
+
+    verticalLine(
         data.markers.exit_time,
         "#8b949e",
-        "EXIT"
+        "WYJŚCIE"
     );
-
-    horizontalLine(
-        data.markers.exit_price,
-        "#8b949e",
-        "EXIT",
-        false
-    );
-
-
     svg.setAttribute(
         "width",
         width
