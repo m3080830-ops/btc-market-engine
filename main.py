@@ -9,6 +9,15 @@ import urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from strategy import (
+    find_latest_setup,
+    find_historical_setups,
+    choose_structural_sl,
+    planned_trade,
+    build_entry,
+    MIN_RR as STRATEGY_MIN_RR,
+)
+
 
 # ============================================================
 # CONFIG
@@ -30,7 +39,7 @@ M5_HISTORY = 2000
 
 M15_CONFIRM_CANDLES = 16
 M5_ENTRY_CANDLES = 8
-MIN_SETUP_RR = 1.5
+MIN_SETUP_RR = 1.0
 
 PORT = int(
     os.environ.get(
@@ -130,6 +139,10 @@ def init_db():
             planned_target REAL,
             planned_rr REAL,
             decision_reason TEXT,
+            entry_model TEXT,
+            pa_trigger TEXT,
+            trail_time INTEGER,
+            trail_price REAL,
 
             last_update INTEGER NOT NULL DEFAULT 0
         )
@@ -152,7 +165,11 @@ def init_db():
         for name, sql_type in (
             ("planned_target", "REAL"),
             ("planned_rr", "REAL"),
-            ("decision_reason", "TEXT")
+            ("decision_reason", "TEXT"),
+            ("entry_model", "TEXT"),
+            ("pa_trigger", "TEXT"),
+            ("trail_time", "INTEGER"),
+            ("trail_price", "REAL")
         ):
             if name not in columns:
                 c.execute(
@@ -1495,144 +1512,73 @@ def get_setups(
 def rebuild_history():
 
     try:
-
         h1 = get_klines("Min60", H1_HISTORY)
         m15 = get_klines("Min15", M15_HISTORY)
         m5 = get_klines("Min5", 4000)
 
-        found = find_h1_setups(h1)
+        found = find_historical_setups(h1, m15)
+        active_until = None
 
         for setup in found:
+            entry = build_entry(setup, m15)
+            if entry is None:
+                continue
+
+            if active_until is not None and entry["time"] <= active_until:
+                continue
+
+            sl = choose_structural_sl(h1, m15, setup)
+            plan = planned_trade(h1, m15, setup, entry["price"], sl)
+
+            if sl is None or plan is None or plan["rr"] < MIN_SETUP_RR:
+                continue
 
             upsert_setup(setup)
 
-            entry = h1_entry(
-                h1,
-                setup
-            )
-
-            sl = structural_sl(
-                h1,
-                setup["direction"],
-                setup["time"]
-            )
-
             fields = {
-                "status": "OCZEKUJE",
+                "status": "OTWARTA",
                 "setup_sl": sl,
-                "confirm_time": None,
-                "confirm_price": None,
-                "entry_time": None,
-                "entry_price": None,
-                "position_sl": None,
+                "entry_time": entry["time"],
+                "entry_price": entry["price"],
+                "position_sl": sl,
                 "exit_time": None,
                 "exit_price": None,
                 "exit_reason": None,
                 "exit_r": None,
-                "setup_max_r": None,
-                "setup_min_r": None,
                 "position_max_r": None,
                 "position_min_r": None,
                 "trail_r": None,
-                "planned_target": None,
-                "planned_rr": None,
+                "trail_time": None,
+                "trail_price": None,
+                "planned_target": plan["target"],
+                "planned_rr": plan["rr"],
+                "entry_model": setup["model"],
+                "pa_trigger": ",".join(setup.get("pa", [])),
                 "decision_reason": None
             }
 
-            plan = setup_trade_plan(
-                h1,
-                setup,
-                entry,
-                sl
-            )
-
-            if plan is None:
-
+            sim = simulate_position(m5, m15, setup, entry, sl)
+            if sim:
                 fields.update(
-                    status="ODRZUCONY",
-                    decision_reason="BRAK PLANU RR"
+                    status="ZAMKNIETA" if sim["exit_time"] else "OTWARTA",
+                    exit_time=sim["exit_time"],
+                    exit_price=sim["exit_price"],
+                    exit_reason=sim["reason"],
+                    exit_r=sim["exit_r"],
+                    position_max_r=sim["max_r"],
+                    position_min_r=sim["min_r"],
+                    trail_r=sim["trail_r"]
                 )
+                if sim["exit_time"]:
+                    active_until = sim["exit_time"]
 
-            else:
+            update_setup(setup["signal_time"], **fields)
 
-                fields.update(
-                    planned_target=plan["target"],
-                    planned_rr=plan["rr"]
-                )
-
-                if plan["rr"] < MIN_SETUP_RR:
-
-                    fields.update(
-                        status="ODRZUCONY RR",
-                        decision_reason=(
-                            f"RR {plan['rr']:.2f} < "
-                            f"{MIN_SETUP_RR:.2f}"
-                        )
-                    )
-
-                elif entry:
-
-                    active = any(
-                        other["entry_time"]
-                        and other["exit_time"] is None
-                        and other["setup_time"] != setup["time"]
-                        for other in get_setups(200)
-                    )
-
-                    if not active:
-
-                        sim = simulate_position(
-                            m5,
-                            m15,
-                            setup,
-                            entry,
-                            sl
-                        )
-
-                        fields.update(
-                            status=(
-                                "ZAMKNIETA"
-                                if sim and sim["exit_time"]
-                                else "OTWARTA"
-                            ),
-                            entry_time=entry["time"],
-                            entry_price=entry["price"],
-                            position_sl=sl
-                        )
-
-                        if sim:
-
-                            fields.update(
-                                exit_time=sim["exit_time"],
-                                exit_price=sim["exit_price"],
-                                exit_reason=sim["reason"],
-                                exit_r=sim["exit_r"],
-                                position_max_r=sim["max_r"],
-                                position_min_r=sim["min_r"],
-                                trail_r=sim["trail_r"]
-                            )
-
-            update_setup(
-                setup["time"],
-                **fields
-            )
-
-        state_set(
-            "history_rebuilt",
-            now_ts()
-        )
-
-        state_set(
-            "latest_error",
-            ""
-        )
+        state_set("history_rebuilt", now_ts())
+        state_set("latest_error", "")
 
     except Exception as e:
-
-        state_set(
-            "latest_error",
-            repr(e)
-        )
+        state_set("latest_error", repr(e))
 
 
 # ============================================================
@@ -1772,6 +1718,11 @@ def manage_open_positions(
                         ):
 
                             current_sl = new_stop
+                            update_setup(
+                                row["setup_time"],
+                                trail_time=c["time"],
+                                trail_price=new_stop
+                            )
 
                     else:
 
@@ -1786,6 +1737,11 @@ def manage_open_positions(
                         ):
 
                             current_sl = new_stop
+                            update_setup(
+                                row["setup_time"],
+                                trail_time=c["time"],
+                                trail_price=new_stop
+                            )
 
                 trail_r = r_value(
                     direction,
@@ -1837,109 +1793,57 @@ def live_refresh():
     m15 = get_klines("Min15", 500)
     m5 = get_klines("Min5", 1000)
 
-    latest = h1_setup(h1)
+    # Never open a second position on BTC.
+    with db_conn() as conn:
+        active = conn.execute(
+            """
+            SELECT 1 FROM setups
+            WHERE entry_time IS NOT NULL
+              AND exit_time IS NULL
+            LIMIT 1
+            """
+        ).fetchone()
 
-    if latest:
-        upsert_setup(latest)
+    if not active:
+        setup = find_latest_setup(h1, m15)
 
-    rows = get_setups(200)
-
-    for row in rows:
-
-        setup = {
-            "time": row["setup_time"],
-            "direction": row["direction"],
-            "price": row["setup_price"]
-        }
-
-        sl = row["setup_sl"]
-
-        if sl is None:
-            sl = structural_sl(
-                h1,
-                setup["direction"],
-                setup["time"]
+        if setup:
+            existing = get_setups(200)
+            duplicate = any(
+                row["setup_time"] == setup["signal_time"]
+                for row in existing
             )
 
-        entry = h1_entry(
-            h1,
-            setup
-        )
+            if not duplicate:
+                entry = build_entry(setup, m15)
+                if entry:
+                    sl = choose_structural_sl(h1, m15, setup)
+                    plan = planned_trade(h1, m15, setup, entry["price"], sl)
 
-        fields = {
-            "setup_sl": sl
-        }
+                    if (
+                        sl is not None
+                        and plan is not None
+                        and plan["rr"] >= MIN_SETUP_RR
+                    ):
+                        upsert_setup(setup)
+                        update_setup(
+                            setup["signal_time"],
+                            status="OTWARTA",
+                            setup_sl=sl,
+                            entry_time=entry["time"],
+                            entry_price=entry["price"],
+                            position_sl=sl,
+                            planned_target=plan["target"],
+                            planned_rr=plan["rr"],
+                            entry_model=setup["model"],
+                            pa_trigger=",".join(setup.get("pa", [])),
+                            decision_reason=None
+                        )
 
-        plan = setup_trade_plan(
-            h1,
-            setup,
-            entry,
-            sl
-        )
+    manage_open_positions(m5, m15)
 
-        if plan is None:
-
-            fields.update(
-                status="OCZEKUJE",
-                planned_target=None,
-                planned_rr=None
-            )
-
-        else:
-
-            fields.update(
-                planned_target=plan["target"],
-                planned_rr=plan["rr"]
-            )
-
-            if plan["rr"] < MIN_SETUP_RR:
-
-                fields.update(
-                    status="ODRZUCONY RR",
-                    decision_reason=(
-                        f"RR {plan['rr']:.2f} < "
-                        f"{MIN_SETUP_RR:.2f}"
-                    )
-                )
-
-            elif row["entry_time"] is None and entry:
-
-                active = any(
-                    other["entry_time"]
-                    and other["exit_time"] is None
-                    and other["setup_time"] != row["setup_time"]
-                    for other in get_setups(200)
-                )
-
-                if not active:
-
-                    fields.update(
-                        status="OTWARTA",
-                        entry_time=entry["time"],
-                        entry_price=entry["price"],
-                        position_sl=sl,
-                        decision_reason="RR OK"
-                    )
-
-        update_setup(
-            row["setup_time"],
-            **fields
-        )
-
-    manage_open_positions(
-        m5,
-        m15
-    )
-
-    state_set(
-        "last_live_update",
-        now_ts()
-    )
-
-    state_set(
-        "latest_error",
-        ""
-    )
+    state_set("last_live_update", now_ts())
+    state_set("latest_error", "")
 
 
 # ============================================================
@@ -2083,7 +1987,11 @@ def chart_payload(
         "entry_time": row["entry_time"],
         "entry_price": row["entry_price"],
         "exit_time": row["exit_time"],
-        "exit_price": row["exit_price"]
+        "exit_price": row["exit_price"],
+        "trail_time": row["trail_time"],
+        "trail_price": row["trail_price"],
+        "entry_model": row["entry_model"],
+        "pa_trigger": row["pa_trigger"]
     }
 
     return {
@@ -2094,7 +2002,9 @@ def chart_payload(
             "time": row["setup_time"],
             "direction": row["direction"],
             "price": row["setup_price"],
-            "status": row["status"]
+            "status": row["status"],
+            "model": row["entry_model"],
+            "pa": row["pa_trigger"]
         },
 
         "markers": markers,
@@ -2123,6 +2033,8 @@ def chart_payload(
             "trail_r": row["trail_r"],
             "exit_r": row["exit_r"],
             "exit_reason": row["exit_reason"],
+            "trail_time": row["trail_time"],
+            "trail_price": row["trail_price"],
             "planned_rr": row["planned_rr"],
             "planned_target": row["planned_target"]
         }
