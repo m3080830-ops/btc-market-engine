@@ -1900,7 +1900,7 @@ def dashboard():
         )
 
         options += (
-            f"<option value='{row['setup_time']}'>"
+            f"<option value='{row['id']}'>"
             f"{html.escape(option_label)}"
             f"</option>"
         )
@@ -4163,25 +4163,25 @@ async function refreshDashboard(){
             );
 
 
-        const newPrice =
+        const newAssets =
             doc.querySelector(
-                ".price"
+                ".asset-bar"
             );
 
 
-        const oldPrice =
+        const oldAssets =
             document.querySelector(
-                ".price"
+                ".asset-bar"
             );
 
 
         if(
-            newPrice
-            && oldPrice
+            newAssets
+            && oldAssets
         ){
 
-            oldPrice.textContent =
-                newPrice.textContent;
+            oldAssets.innerHTML =
+                newAssets.innerHTML;
         }
 
 
