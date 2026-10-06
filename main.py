@@ -2875,9 +2875,9 @@ Brak setupów.
     </label>
 </div>
 <div class="summary-grid">
-    <div class="card"><b>ZAMKNIĘTE TREJDY</b><span id="summaryTrades">"+trade_count+"</span></div>
-    <div class="card"><b>NETTO R</b><span id="summaryNetR">"+fmt_r(net_r)+"</span></div>
-    <div class="card"><b>NETTO $</b><span id="summaryNetUsd">"+fmt_num(net_r * DEFAULT_RISK_USD, 2)+" $</span></div>
+    <div class="card"><b>ZAMKNIĘTE TREJDY</b><span id="summaryTrades">{trade_count}</span></div>
+    <div class="card"><b>NETTO R</b><span id="summaryNetR">{fmt_r(net_r)}</span></div>
+    <div class="card"><b>NETTO $</b><span id="summaryNetUsd">{fmt_num(net_r * DEFAULT_RISK_USD, 2)} $</span></div>
 </div>
 </div>
 </section>
@@ -2899,11 +2899,7 @@ Brak setupów.
 
 </select>
 
-<button
-    class="tf"
-    onclick="loadChart('H1')">
-H1
-</button>
+<button class="tf active" onclick="loadChart('M15')">M15</button>
 
 <button
     class="tf"
@@ -3293,11 +3289,7 @@ async function initChart(){
         saved;
 
 
-    const tf =
-        localStorage.getItem(
-            CHART_TF_KEY
-        )
-        || "M15";
+    const tf = "M15";
 
 
     await fetchChart(
@@ -3330,10 +3322,7 @@ async function loadChart(tf){
     );
 
 
-    localStorage.setItem(
-        CHART_TF_KEY,
-        tf
-    );
+    localStorage.setItem(CHART_TF_KEY, "M15");
 
 
     await fetchChart(
@@ -3447,11 +3436,7 @@ function renderChart(
     }
 
 
-    const width =
-        Math.max(
-            1000,
-            candles.length * 9
-        );
+    const width = Math.max(1000, candles.length * 6.2);
 
     const height =
         430;
