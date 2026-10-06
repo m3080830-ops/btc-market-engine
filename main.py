@@ -442,31 +442,18 @@ def atr(
             else "short"
         )
 
-        result_display = (
-            fmt_r(row["exit_r"])
-            if row["exit_time"]
-            else (
-                "OTWARTA"
-                if row["entry_time"]
-                else (
-                    fmt_r(row["planned_rr"])
-                    if row["planned_rr"] is not None
-                    else "—"
-                )
-            )
-        )
-
-        final_stage = (
-            row["exit_reason"]
-            if row["exit_time"]
-            else (
-                "OTWARTA"
-                if row["entry_time"]
-                else row["status"]
-            )
-        )
-
-        status_text = row["status"]
+        if row["exit_time"]:
+            result_display = fmt_r(row["exit_r"])
+            stage_display = row["exit_reason"] or "EXIT"
+        elif row["entry_time"]:
+            result_display = "OTWARTA"
+            stage_display = "ENTRY"
+        elif row["planned_rr"] is not None:
+            result_display = f"RR {float(row['planned_rr']):.2f}"
+            stage_display = row["status"]
+        else:
+            result_display = "—"
+            stage_display = row["status"]
 
         status_class = (
             "yes"
@@ -477,27 +464,19 @@ def atr(
             else "no"
         )
 
-        timeline = (
-            "H1 SETUP"
-            + (
-                " → ENTRY"
-                if row["entry_time"]
-                else ""
-            )
-            + (
-                " → " + final_stage
-                if final_stage
-                else ""
-            )
-        )
-
-        sl_display = (
-            row["position_sl"]
-            or row["setup_sl"]
-        )
-
         max_display = row["position_max_r"]
         min_display = row["position_min_r"]
+        sl_display = row["position_sl"] or row["setup_sl"]
+
+        timeline_parts = ["H1 SETUP"]
+
+        if row["entry_time"]:
+            timeline_parts.append("ENTRY")
+
+        if row["exit_time"]:
+            timeline_parts.append(stage_display)
+
+        timeline = " → ".join(timeline_parts)
 
         body.append(
             f"""
@@ -658,7 +637,7 @@ M5
 <div class="legend">
 
 Świece z MEXC.
-Linie: SETUP, SL, M15 CONF, M5 ENTRY.
+Linie: SETUP, SL, ENTRY, EXIT.
 Pozycja tabeli, strony i wykresu jest zachowywana
 przy odświeżeniu.
 
