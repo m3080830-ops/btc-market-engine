@@ -23,7 +23,8 @@ from strategy import (
 # CONFIG
 # ============================================================
 
-SYMBOL = "BTC_USDT"
+SYMBOLS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"]
+SYMBOL_LABELS = {"BTC_USDT": "BTC", "ETH_USDT": "ETH", "SOL_USDT": "SOL"}
 
 BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
 
@@ -107,39 +108,34 @@ def db_conn():
 
 
 def init_db():
-
     with db_conn() as c:
+        existing = {row[1] for row in c.execute("PRAGMA table_info(setups)").fetchall()}
+        if existing and "symbol" not in existing:
+            c.execute("ALTER TABLE setups RENAME TO setups_legacy")
 
         c.execute("""
         CREATE TABLE IF NOT EXISTS setups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            setup_time INTEGER NOT NULL UNIQUE,
+            symbol TEXT NOT NULL DEFAULT 'BTC_USDT',
+            setup_time INTEGER NOT NULL,
             direction TEXT NOT NULL,
             setup_price REAL NOT NULL,
             setup_sl REAL,
             status TEXT NOT NULL DEFAULT 'NIEPOTWIERDZONY',
-
             confirm_time INTEGER,
             confirm_price REAL,
-
             entry_time INTEGER,
             entry_price REAL,
-
             position_sl REAL,
-
             exit_time INTEGER,
             exit_price REAL,
             exit_reason TEXT,
             exit_r REAL,
-
             setup_max_r REAL,
             setup_min_r REAL,
-
             position_max_r REAL,
             position_min_r REAL,
-
             trail_r REAL,
-
             planned_target REAL,
             planned_rr REAL,
             decision_reason TEXT,
@@ -147,41 +143,37 @@ def init_db():
             pa_trigger TEXT,
             trail_time INTEGER,
             trail_price REAL,
-
-            last_update INTEGER NOT NULL DEFAULT 0
+            last_update INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(symbol, setup_time)
         )
         """)
 
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS state (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-        """)
-
-        columns = {
-            row[1]
-            for row in c.execute(
-                "PRAGMA table_info(setups)"
-            ).fetchall()
-        }
-
-        for name, sql_type in (
-            ("planned_target", "REAL"),
-            ("planned_rr", "REAL"),
-            ("decision_reason", "TEXT"),
-            ("entry_model", "TEXT"),
-            ("pa_trigger", "TEXT"),
-            ("trail_time", "INTEGER"),
-            ("trail_price", "REAL")
-        ):
-            if name not in columns:
-                c.execute(
-                    f"ALTER TABLE setups ADD COLUMN {name} {sql_type}"
+        legacy_exists = c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='setups_legacy'").fetchone()
+        if legacy_exists:
+            c.execute("""
+                INSERT OR IGNORE INTO setups(
+                    id, symbol, setup_time, direction, setup_price, setup_sl,
+                    status, confirm_time, confirm_price, entry_time, entry_price,
+                    position_sl, exit_time, exit_price, exit_reason, exit_r,
+                    setup_max_r, setup_min_r, position_max_r, position_min_r,
+                    trail_r, planned_target, planned_rr, decision_reason,
+                    entry_model, pa_trigger, trail_time, trail_price, last_update
                 )
+                SELECT
+                    id, 'BTC_USDT', setup_time, direction, setup_price, setup_sl,
+                    status, confirm_time, confirm_price, entry_time, entry_price,
+                    position_sl, exit_time, exit_price, exit_reason, exit_r,
+                    setup_max_r, setup_min_r, position_max_r, position_min_r,
+                    trail_r, planned_target, planned_rr, decision_reason,
+                    entry_model, pa_trigger, trail_time, trail_price, last_update
+                FROM setups_legacy
+            """)
+            c.execute("DROP TABLE setups_legacy")
 
+        c.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_setups_symbol_time ON setups(symbol, setup_time DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_setups_open ON setups(symbol, entry_time, exit_time)")
         c.commit()
-
 
 def state_get(key, default=None):
 
@@ -332,6 +324,7 @@ def parse_klines(payload):
 
 
 def get_klines(
+    symbol,
     interval,
     total,
     end_ts=None
@@ -369,7 +362,7 @@ def get_klines(
         })
 
         url = (
-            f"{BASE_URL}/{SYMBOL}?"
+            f"{BASE_URL}/{symbol}?"
             f"{qs}"
         )
 
@@ -1425,20 +1418,22 @@ def upsert_setup(s):
         c.execute(
             """
             INSERT INTO setups(
+                symbol,
                 setup_time,
                 direction,
                 setup_price,
                 status,
                 last_update
             )
-            VALUES(?,?,?,?,?)
+            VALUES(?,?,?,?,?,?)
 
-            ON CONFLICT(setup_time)
+            ON CONFLICT(symbol, setup_time)
             DO UPDATE SET
                 direction=excluded.direction,
                 setup_price=excluded.setup_price
             """,
             (
+                s["symbol"],
                 s["time"],
                 s["direction"],
                 s["price"],
@@ -1450,45 +1445,21 @@ def upsert_setup(s):
         c.commit()
 
 
-def update_setup(
-    setup_time,
-    **fields
-):
-
+def update_setup(setup_time, symbol=None, **fields):
     if not fields:
         return
-
     fields["last_update"] = now_ts()
-
-    keys = list(
-        fields.keys()
-    )
-
-    sql = (
-        "UPDATE setups SET "
-        + ", ".join(
-            f"{k}=?"
-            for k in keys
-        )
-        + " WHERE setup_time=?"
-    )
-
-    values = [
-        fields[k]
-        for k in keys
-    ]
-
-    values.append(
-        setup_time
-    )
-
+    keys = list(fields.keys())
+    where = "setup_time=?"
+    values = [fields[k] for k in keys]
+    if symbol is not None:
+        where = "symbol=? AND setup_time=?"
+        values.extend([symbol, setup_time])
+    else:
+        values.append(setup_time)
+    sql = "UPDATE setups SET " + ", ".join(f"{k}=?" for k in keys) + " WHERE " + where
     with db_conn() as c:
-
-        c.execute(
-            sql,
-            values
-        )
-
+        c.execute(sql, values)
         c.commit()
 
 
@@ -1502,7 +1473,7 @@ def get_setups(
             """
             SELECT *
             FROM setups
-            ORDER BY setup_time DESC
+            ORDER BY setup_time DESC, id DESC
             LIMIT ?
             """,
             (limit,)
@@ -1514,73 +1485,55 @@ def get_setups(
 # ============================================================
 
 def rebuild_history():
-
     try:
-        h1 = get_klines("Min60", H1_HISTORY)
-        m15 = get_klines("Min15", M15_HISTORY)
-        m5 = get_klines("Min5", 4000)
+        for symbol in SYMBOLS:
+            h1 = get_klines(symbol, "Min60", H1_HISTORY)
+            m15 = get_klines(symbol, "Min15", M15_HISTORY)
+            m5 = get_klines(symbol, "Min5", 4000)
+            found = find_historical_setups(h1, m15)
+            active_until = None
 
-        found = find_historical_setups(h1, m15)
-        active_until = None
+            for setup in found:
+                setup["symbol"] = symbol
+                entry = build_entry(setup, m15)
+                if entry is None:
+                    continue
+                if active_until is not None and entry["time"] <= active_until:
+                    continue
+                sl = choose_structural_sl(h1, m15, setup)
+                plan = planned_trade(h1, m15, setup, entry["price"], sl)
+                if sl is None or plan is None or plan["rr"] < MIN_SETUP_RR:
+                    continue
 
-        for setup in found:
-            entry = build_entry(setup, m15)
-            if entry is None:
-                continue
+                upsert_setup(setup)
+                fields = {
+                    "status": "OTWARTA", "setup_sl": sl,
+                    "entry_time": entry["time"], "entry_price": entry["price"],
+                    "position_sl": sl, "exit_time": None, "exit_price": None,
+                    "exit_reason": None, "exit_r": None,
+                    "position_max_r": None, "position_min_r": None, "trail_r": None,
+                    "trail_time": None, "trail_price": None,
+                    "planned_target": plan["target"], "planned_rr": plan["rr"],
+                    "entry_model": setup["model"],
+                    "pa_trigger": ",".join(setup.get("pa", [])),
+                    "decision_reason": None
+                }
 
-            if active_until is not None and entry["time"] <= active_until:
-                continue
-
-            sl = choose_structural_sl(h1, m15, setup)
-            plan = planned_trade(h1, m15, setup, entry["price"], sl)
-
-            if sl is None or plan is None or plan["rr"] < MIN_SETUP_RR:
-                continue
-
-            upsert_setup(setup)
-
-            fields = {
-                "status": "OTWARTA",
-                "setup_sl": sl,
-                "entry_time": entry["time"],
-                "entry_price": entry["price"],
-                "position_sl": sl,
-                "exit_time": None,
-                "exit_price": None,
-                "exit_reason": None,
-                "exit_r": None,
-                "position_max_r": None,
-                "position_min_r": None,
-                "trail_r": None,
-                "trail_time": None,
-                "trail_price": None,
-                "planned_target": plan["target"],
-                "planned_rr": plan["rr"],
-                "entry_model": setup["model"],
-                "pa_trigger": ",".join(setup.get("pa", [])),
-                "decision_reason": None
-            }
-
-            sim = simulate_position(m5, m15, setup, entry, sl)
-            if sim:
-                fields.update(
-                    status="ZAMKNIETA" if sim["exit_time"] else "OTWARTA",
-                    exit_time=sim["exit_time"],
-                    exit_price=sim["exit_price"],
-                    exit_reason=sim["reason"],
-                    exit_r=sim["exit_r"],
-                    position_max_r=sim["max_r"],
-                    position_min_r=sim["min_r"],
-                    trail_r=sim["trail_r"]
-                )
-                if sim["exit_time"]:
-                    active_until = sim["exit_time"]
-
-            update_setup(setup["signal_time"], **fields)
+                sim = simulate_position(m5, m15, setup, entry, sl)
+                if sim:
+                    fields.update(
+                        status="ZAMKNIETA" if sim["exit_time"] else "OTWARTA",
+                        exit_time=sim["exit_time"], exit_price=sim["exit_price"],
+                        exit_reason=sim["reason"], exit_r=sim["exit_r"],
+                        position_max_r=sim["max_r"], position_min_r=sim["min_r"],
+                        trail_r=sim["trail_r"]
+                    )
+                    if sim["exit_time"]:
+                        active_until = sim["exit_time"]
+                update_setup(setup["signal_time"], symbol=symbol, **fields)
 
         state_set("history_rebuilt", now_ts())
         state_set("latest_error", "")
-
     except Exception as e:
         state_set("latest_error", repr(e))
 
@@ -1589,262 +1542,116 @@ def rebuild_history():
 # LIVE POSITION MANAGEMENT
 # ============================================================
 
-def manage_open_positions(
-    m5,
-    m15
-):
-
+def manage_open_positions(symbol, m5, m15):
     with db_conn() as c:
-
         open_rows = c.execute(
-            """
-            SELECT *
-            FROM setups
-            WHERE entry_time IS NOT NULL
-              AND exit_time IS NULL
-            ORDER BY entry_time
-            """
+            """SELECT * FROM setups
+               WHERE symbol=? AND entry_time IS NOT NULL AND exit_time IS NULL
+               ORDER BY entry_time""",
+            (symbol,)
         ).fetchall()
 
     for row in open_rows:
-
         direction = row["direction"]
         entry = row["entry_price"]
         current_sl = row["position_sl"]
-
-        if (
-            entry is None
-            or current_sl is None
-        ):
-
+        if entry is None or current_sl is None:
             continue
-
         original_sl = row["setup_sl"]
-
         if original_sl is None:
             continue
 
-        max_r = (
-            row["position_max_r"]
-            if row["position_max_r"]
-            is not None
-            else 0.0
-        )
-
-        min_r = (
-            row["position_min_r"]
-            if row["position_min_r"]
-            is not None
-            else 0.0
-        )
-
+        max_r = row["position_max_r"] if row["position_max_r"] is not None else 0.0
+        min_r = row["position_min_r"] if row["position_min_r"] is not None else 0.0
         trail_r = row["trail_r"]
-
         exit_time = None
         exit_price = None
         reason = None
 
         for c in closed(m5):
-
             if c["time"] < row["entry_time"]:
                 continue
+            hi_r = r_value(direction, entry, original_sl, c["high"])
+            lo_r = r_value(direction, entry, original_sl, c["low"])
+            max_r = max(max_r, hi_r, lo_r)
+            min_r = min(min_r, hi_r, lo_r)
 
-            hi_r = r_value(
-                direction,
-                entry,
-                original_sl,
-                c["high"]
-            )
-
-            lo_r = r_value(
-                direction,
-                entry,
-                original_sl,
-                c["low"]
-            )
-
-            max_r = max(
-                max_r,
-                hi_r,
-                lo_r
-            )
-
-            min_r = min(
-                min_r,
-                hi_r,
-                lo_r
-            )
-
-            if (
-                direction == "LONG"
-                and c["low"] <= current_sl
-            ):
-
-                exit_time = c["time"]
-                exit_price = current_sl
-                reason = "SL"
+            if direction == "LONG" and c["low"] <= current_sl:
+                exit_time, exit_price, reason = c["time"], current_sl, "SL"
+                break
+            if direction == "SHORT" and c["high"] >= current_sl:
+                exit_time, exit_price, reason = c["time"], current_sl, "SL"
                 break
 
-            if (
-                direction == "SHORT"
-                and c["high"] >= current_sl
-            ):
-
-                exit_time = c["time"]
-                exit_price = current_sl
-                reason = "SL"
-                break
-
-            if max_r > TRAIL_ACTIVATION_R:
-
-                recent = [
-                    x
-                    for x in closed(m15)
-                    if (
-                        row["entry_time"]
-                        <= x["time"]
-                        <= c["time"]
-                    )
-                ][-3:]
-
+            if max_r >= TRAIL_ACTIVATION_R:
+                recent = [x for x in closed(m15) if row["entry_time"] <= x["time"] <= c["time"]][-3:]
                 if len(recent) == 3:
-
                     if direction == "LONG":
-
-                        new_stop = min(
-                            x["low"]
-                            for x in recent
-                        )
-
-                        if (
-                            new_stop > current_sl
-                            and new_stop < c["close"]
-                        ):
-
+                        new_stop = min(x["low"] for x in recent)
+                        if new_stop > current_sl and new_stop < c["close"]:
                             current_sl = new_stop
-                            update_setup(
-                                row["setup_time"],
-                                trail_time=c["time"],
-                                trail_price=new_stop
-                            )
-
+                            update_setup(row["setup_time"], symbol=symbol, trail_time=c["time"], trail_price=new_stop)
                     else:
-
-                        new_stop = max(
-                            x["high"]
-                            for x in recent
-                        )
-
-                        if (
-                            new_stop < current_sl
-                            and new_stop > c["close"]
-                        ):
-
+                        new_stop = max(x["high"] for x in recent)
+                        if new_stop < current_sl and new_stop > c["close"]:
                             current_sl = new_stop
-                            update_setup(
-                                row["setup_time"],
-                                trail_time=c["time"],
-                                trail_price=new_stop
-                            )
-
-                trail_r = r_value(
-                    direction,
-                    entry,
-                    original_sl,
-                    c["close"]
-                )
+                            update_setup(row["setup_time"], symbol=symbol, trail_time=c["time"], trail_price=new_stop)
+                trail_r = r_value(direction, entry, original_sl, c["close"])
 
         fields = {
-            "position_max_r": max_r,
-            "position_min_r": min_r,
-            "trail_r": trail_r,
-            "position_sl": current_sl
+            "position_max_r": max_r, "position_min_r": min_r,
+            "trail_r": trail_r, "position_sl": current_sl
         }
-
         if exit_time is not None:
-
             fields.update(
-                exit_time=exit_time,
-                exit_price=exit_price,
-                exit_reason=reason,
-                exit_r=r_value(
-                    direction,
-                    entry,
-                    original_sl,
-                    exit_price
-                ),
-                trail_r=r_value(
-                    direction,
-                    entry,
-                    original_sl,
-                    exit_price
-                )
+                exit_time=exit_time, exit_price=exit_price, exit_reason=reason,
+                exit_r=r_value(direction, entry, original_sl, exit_price),
+                trail_r=r_value(direction, entry, original_sl, exit_price)
             )
+        update_setup(row["setup_time"], symbol=symbol, **fields)
 
-        update_setup(
-            row["setup_time"],
-            **fields
-        )
-
-
-# ============================================================
-# LIVE REFRESH
-# ============================================================
 
 def live_refresh():
+    for symbol in SYMBOLS:
+        h1 = get_klines(symbol, "Min60", H1_HISTORY)
+        m15 = get_klines(symbol, "Min15", 500)
+        m5 = get_klines(symbol, "Min5", 1000)
 
-    h1 = get_klines("Min60", H1_HISTORY)
-    m15 = get_klines("Min15", 500)
-    m5 = get_klines("Min5", 1000)
+        with db_conn() as conn:
+            active = conn.execute(
+                """SELECT 1 FROM setups
+                   WHERE symbol=? AND entry_time IS NOT NULL AND exit_time IS NULL
+                   LIMIT 1""",
+                (symbol,)
+            ).fetchone()
 
-    # Never open a second position on BTC.
-    with db_conn() as conn:
-        active = conn.execute(
-            """
-            SELECT 1 FROM setups
-            WHERE entry_time IS NOT NULL
-              AND exit_time IS NULL
-            LIMIT 1
-            """
-        ).fetchone()
+        if not active:
+            setup = find_latest_setup(h1, m15)
+            if setup:
+                setup["symbol"] = symbol
+                with db_conn() as conn:
+                    duplicate = conn.execute(
+                        "SELECT 1 FROM setups WHERE symbol=? AND setup_time=? LIMIT 1",
+                        (symbol, setup["signal_time"])
+                    ).fetchone()
 
-    if not active:
-        setup = find_latest_setup(h1, m15)
-
-        if setup:
-            existing = get_setups(200)
-            duplicate = any(
-                row["setup_time"] == setup["signal_time"]
-                for row in existing
-            )
-
-            if not duplicate:
-                entry = build_entry(setup, m15)
-                if entry:
-                    sl = choose_structural_sl(h1, m15, setup)
-                    plan = planned_trade(h1, m15, setup, entry["price"], sl)
-
-                    if (
-                        sl is not None
-                        and plan is not None
-                        and plan["rr"] >= MIN_SETUP_RR
-                    ):
-                        upsert_setup(setup)
-                        update_setup(
-                            setup["signal_time"],
-                            status="OTWARTA",
-                            setup_sl=sl,
-                            entry_time=entry["time"],
-                            entry_price=entry["price"],
-                            position_sl=sl,
-                            planned_target=plan["target"],
-                            planned_rr=plan["rr"],
-                            entry_model=setup["model"],
-                            pa_trigger=",".join(setup.get("pa", [])),
-                            decision_reason=None
-                        )
-
-    manage_open_positions(m5, m15)
+                if not duplicate:
+                    entry = build_entry(setup, m15)
+                    if entry:
+                        sl = choose_structural_sl(h1, m15, setup)
+                        plan = planned_trade(h1, m15, setup, entry["price"], sl)
+                        if sl is not None and plan is not None and plan["rr"] >= MIN_SETUP_RR:
+                            upsert_setup(setup)
+                            update_setup(
+                                setup["signal_time"], symbol=symbol,
+                                status="OTWARTA", setup_sl=sl,
+                                entry_time=entry["time"], entry_price=entry["price"],
+                                position_sl=sl, planned_target=plan["target"],
+                                planned_rr=plan["rr"], entry_model=setup["model"],
+                                pa_trigger=",".join(setup.get("pa", [])),
+                                decision_reason=None
+                            )
+        manage_open_positions(symbol, m5, m15)
 
     state_set("last_live_update", now_ts())
     state_set("latest_error", "")
@@ -1855,6 +1662,7 @@ def live_refresh():
 # ============================================================
 
 def chart_candles(
+    symbol,
     setup_time,
     interval,
     total,
@@ -1880,6 +1688,7 @@ def chart_candles(
     )
 
     return get_klines(
+        symbol,
         interval,
         total,
         end_ts=end
@@ -1887,7 +1696,7 @@ def chart_candles(
 
 
 def chart_payload(
-    setup_time,
+    setup_id,
     tf
 ):
 
@@ -1897,9 +1706,9 @@ def chart_payload(
             """
             SELECT *
             FROM setups
-            WHERE setup_time=?
+            WHERE id=?
             """,
-            (int(setup_time),)
+            (int(setup_id),)
         ).fetchone()
 
     if not row:
@@ -1908,6 +1717,7 @@ def chart_payload(
             "error": "Nie znaleziono setupu."
         }
 
+    symbol = row["symbol"]
     setup = {
         "time": row["setup_time"],
         "direction": row["direction"],
@@ -1954,6 +1764,7 @@ def chart_payload(
     )
 
     candles = chart_candles(
+        symbol,
         start_time,
         interval,
         total,
@@ -1961,6 +1772,7 @@ def chart_payload(
     )
 
     m15 = chart_candles(
+        symbol,
         row["setup_time"],
         "Min15",
         120,
@@ -1972,6 +1784,7 @@ def chart_payload(
     )
 
     m5 = chart_candles(
+        symbol,
         row["setup_time"],
         "Min5",
         240,
@@ -2001,6 +1814,7 @@ def chart_payload(
     return {
         "ok": True,
         "tf": tf,
+        "symbol": symbol,
 
         "setup": {
             "time": row["setup_time"],
@@ -2065,24 +1879,13 @@ def dashboard():
         "last_live_update"
     )
 
-    current_price = "—"
-
-    try:
-
-        latest = get_klines(
-            "Min1",
-            2
-        )
-
-        if latest:
-
-            current_price = fmt_num(
-                latest[-1]["close"]
-            )
-
-    except Exception:
-
-        pass
+    current_prices = {}
+    for symbol in SYMBOLS:
+        try:
+            latest = get_klines(symbol, "Min1", 2)
+            current_prices[symbol] = fmt_num(latest[-1]["close"]) if latest else "—"
+        except Exception:
+            current_prices[symbol] = "—"
 
     options = ""
 
@@ -2091,7 +1894,7 @@ def dashboard():
             continue
 
         option_label = (
-            f"{fmt_ts(row['setup_time'])}"
+            f"{SYMBOL_LABELS.get(row['symbol'], row['symbol'])} · {fmt_ts(row['setup_time'])}"
             f" · {row['direction']}"
             f" · {row['entry_model'] or 'ENTRY'}"
         )
@@ -2116,7 +1919,7 @@ def dashboard():
     content="width=device-width,initial-scale=1"
 >
 
-<title>BTC Market Engine</title>
+<title>Crypto Market Engine</title>
 
 <style>
 
@@ -2173,6 +1976,38 @@ h1{
     color:var(--muted);
     font-size:12px;
     line-height:1.5;
+}
+
+.asset-bar{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:8px;
+    margin:10px 0 14px;
+}
+
+.asset-card{
+    padding:10px 12px;
+    border:1px solid #27313b;
+    border-radius:15px;
+    background:#10151b;
+    min-width:0;
+}
+
+.asset-card b{
+    display:block;
+    color:#8993a1;
+    font-size:10px;
+    margin-bottom:4px;
+    letter-spacing:.6px;
+}
+
+.asset-card span{
+    display:block;
+    font-size:15px;
+    font-weight:800;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
 }
 
 .price{
@@ -2485,6 +2320,16 @@ tbody tr:hover{
     min-width:0;
 }
 
+.setup-symbol{
+    background:#202731;
+    color:#fff !important;
+    border:1px solid #343d49;
+    border-radius:8px;
+    padding:4px 7px;
+    font-size:10px !important;
+    font-weight:900;
+}
+
 .setup-main{
     flex:1 1 auto;
     overflow:hidden;
@@ -2595,6 +2440,20 @@ tbody tr:hover{
     h1{
         font-size:25px;
         margin-top:2px;
+    }
+
+    .asset-bar{
+        grid-template-columns:repeat(3,minmax(0,1fr));
+        gap:6px;
+    }
+
+    .asset-card{
+        padding:9px 8px;
+        border-radius:13px;
+    }
+
+    .asset-card span{
+        font-size:12px;
     }
 
     .price{
@@ -2777,13 +2636,13 @@ tbody tr:hover{
 """)
 
     body.append(
-        "<h1>BTC MARKET ENGINE</h1>"
+        "<h1>CRYPTO MARKET ENGINE</h1>"
     )
 
     body.append(
         f"""
-<div class="price">
-BTC: {current_price} USDT
+<div class="asset-bar">
+{''.join(f'<div class="asset-card"><b>{SYMBOL_LABELS[symbol]}</b><span>{current_prices.get(symbol, "—")} USDT</span></div>' for symbol in SYMBOLS)}
 </div>
 """
     )
@@ -2882,13 +2741,14 @@ Brak setupów.
             f"""
 <div
     class="setup-item collapsed"
-    data-setup="{row["setup_time"]}">
+    data-setup="{row["id"]}">
 
 <div
     class="setup-summary"
     onclick="toggleSetupRow(this)">
 
 <div class="setup-main">
+<span class="setup-symbol">{SYMBOL_LABELS.get(row["symbol"], row["symbol"])}</span>
 <span>{fmt_ts(row["setup_time"])}</span>
 <span class="{direction_class}">{row["direction"]}</span>
 </div>
@@ -2909,6 +2769,11 @@ Brak setupów.
 </div>
 
 <div class="setup-grid">
+
+<div class="card">
+<b>INSTRUMENT</b>
+<span>{html.escape(SYMBOL_LABELS.get(row["symbol"], row["symbol"]))}</span>
+</div>
 
 <div class="card">
 <b>MODEL</b>
@@ -3053,25 +2918,25 @@ r"""
 <script>
 
 const TAB_KEY =
-    "btc_active_tab_v6";
+    "crypto_active_tab_v1";
 
 const PAGE_Y_KEY =
-    "btc_page_y_v5";
+    "crypto_page_y_v1";
 
 const CONF_SCROLL_KEY =
-    "btc_confirmed_scroll_v5";
+    "crypto_confirmed_scroll_v1";
 
 const UNCONF_SCROLL_KEY =
-    "btc_unconfirmed_scroll_v5";
+    "crypto_unconfirmed_scroll_v1";
 
 const CHART_SETUP_KEY =
-    "btc_chart_setup_v5";
+    "crypto_chart_setup_v1";
 
 const CHART_TF_KEY =
-    "btc_chart_tf_v5";
+    "crypto_chart_tf_v1";
 
 const CHART_SCROLL_KEY =
-    "btc_chart_scroll_v5";
+    "crypto_chart_scroll_v1";
 
 
 function activateTab(name){
@@ -3170,7 +3035,7 @@ function toggleSetupRow(summary){
         )
     ){
         localStorage.removeItem(
-            "btc_open_setup_v6"
+            "crypto_open_setup_v1"
         );
     }else{
         localStorage.setItem(
@@ -3411,7 +3276,7 @@ async function fetchChart(
 
         const response =
             await fetch(
-                "/api/chart?setup_time="
+                "/api/chart?setup_id="
                 + encodeURIComponent(
                     setupTime
                 )
@@ -4298,52 +4163,6 @@ async function refreshDashboard(){
             );
 
 
-        const newConfirmed =
-            doc.getElementById(
-                "confirmed"
-            );
-
-
-        const newUnconfirmed =
-            doc.getElementById(
-                "unconfirmed"
-            );
-
-
-        const oldConfirmed =
-            document.getElementById(
-                "confirmed"
-            );
-
-
-        const oldUnconfirmed =
-            document.getElementById(
-                "unconfirmed"
-            );
-
-
-        if(
-            newConfirmed
-            && oldConfirmed
-        ){
-
-            oldConfirmed.replaceWith(
-                newConfirmed
-            );
-        }
-
-
-        if(
-            newUnconfirmed
-            && oldUnconfirmed
-        ){
-
-            oldUnconfirmed.replaceWith(
-                newUnconfirmed
-            );
-        }
-
-
         const newPrice =
             doc.querySelector(
                 ".price"
@@ -4646,9 +4465,9 @@ class Handler(
                 )
 
 
-                setup_time = int(
+                setup_id = int(
                     params.get(
-                        "setup_time",
+                        "setup_id",
                         [""]
                     )[0]
                 )
@@ -4661,7 +4480,7 @@ class Handler(
 
 
                 payload = chart_payload(
-                    setup_time,
+                    setup_id,
                     tf
                 )
 
