@@ -2083,33 +2083,20 @@ def dashboard():
     options = ""
 
     for row in rows:
+        if not row["entry_time"]:
+            continue
 
         option_label = (
             f"{fmt_ts(row['setup_time'])}"
             f" · {row['direction']}"
-            f" · {row['status']}"
+            f" · {row['entry_model'] or 'ENTRY'}"
         )
 
         options += (
-            f"<option "
-            f"value='{row['setup_time']}'>"
+            f"<option value='{row['setup_time']}'>"
             f"{html.escape(option_label)}"
             f"</option>"
         )
-
-    confirmed = [
-        r
-        for r in rows
-        if r["status"]
-        == "POTWIERDZONY"
-    ]
-
-    unconfirmed = [
-        r
-        for r in rows
-        if r["status"]
-        != "POTWIERDZONY"
-    ]
 
     body = []
 
@@ -2858,8 +2845,7 @@ Brak setupów.
 
         direction_class = (
             "long"
-            if row["direction"]
-            == "LONG"
+            if row["direction"] == "LONG"
             else "short"
         )
 
@@ -2869,35 +2855,22 @@ Brak setupów.
         elif row["entry_time"]:
             result_display = "OTWARTA"
             stage_display = "ENTRY"
-        elif row["planned_rr"] is not None:
-            result_display = f"RR {float(row['planned_rr']):.2f}"
-            stage_display = row["status"]
         else:
-            result_display = "—"
-            stage_display = row["status"]
+            # Only executed trades belong in the user-facing setup history.
+            continue
 
-        status_text = row["status"]
-
-        status_class = (
-            "yes"
-            if row["status"] in (
-                "OTWARTA",
-                "ZAMKNIETA"
-            )
-            else "no"
+        model_display = row["entry_model"] or "—"
+        trail_display = (
+            fmt_num(row["trail_price"])
+            if row["trail_price"] is not None
+            else "—"
         )
 
-        max_display = row["position_max_r"]
-        min_display = row["position_min_r"]
-        sl_display = row["position_sl"] or row["setup_sl"]
-
-        timeline_parts = ["H1 SETUP"]
-
-        if row["entry_time"]:
-            timeline_parts.append("ENTRY")
-
+        timeline_parts = ["ENTRY"]
+        if row["trail_time"]:
+            timeline_parts.append("TRAIL")
         if row["exit_time"]:
-            timeline_parts.append(stage_display)
+            timeline_parts.append("EXIT")
 
         timeline = " → ".join(timeline_parts)
 
@@ -2912,29 +2885,14 @@ Brak setupów.
     onclick="toggleSetupRow(this)">
 
 <div class="setup-main">
-<span>
-{fmt_ts(row["setup_time"])}
-</span>
-
-<span class="{direction_class}">
-{row["direction"]}
-</span>
+<span>{fmt_ts(row["setup_time"])}</span>
+<span class="{direction_class}">{row["direction"]}</span>
 </div>
 
 <div class="setup-summary-right">
-
-<span class="{status_class}">
-{status_text}
-</span>
-
-<span class="setup-r">
-{result_display}
-</span>
-
-<span class="setup-chevron">
-›
-</span>
-
+<span class="{direction_class}">{model_display}</span>
+<span class="setup-r">{result_display}</span>
+<span class="setup-chevron">›</span>
 </div>
 
 </div>
@@ -2949,33 +2907,8 @@ Brak setupów.
 <div class="setup-grid">
 
 <div class="card">
-<b>WYNIK</b>
-<span>{result_display}</span>
-</div>
-
-<div class="card">
-<b>ETAP</b>
-<span>{stage_display}</span>
-</div>
-
-<div class="card">
-<b>PLAN RR</b>
-<span>{fmt_r(row["planned_rr"])}</span>
-</div>
-
-<div class="card">
-<b>CEL</b>
-<span>{fmt_num(row["planned_target"])}</span>
-</div>
-
-<div class="card">
-<b>SETUP</b>
-<span>{fmt_num(row["setup_price"])}</span>
-</div>
-
-<div class="card">
-<b>SL</b>
-<span>{fmt_num(sl_display)}</span>
+<b>MODEL</b>
+<span>{html.escape(model_display)}</span>
 </div>
 
 <div class="card">
@@ -2984,41 +2917,45 @@ Brak setupów.
 </div>
 
 <div class="card">
-<b>EXIT</b>
+<b>POCZĄTKOWY SL</b>
+<span>{fmt_num(row["setup_sl"])}</span>
+</div>
+
+<div class="card">
+<b>TRAILING SL</b>
+<span>{trail_display}</span>
+</div>
+
+<div class="card">
+<b>WYJŚCIE</b>
 <span>{fmt_num(row["exit_price"])}</span>
 </div>
 
 <div class="card">
+<b>WYNIK</b>
+<span>{result_display}</span>
+</div>
+
+<div class="card">
 <b>MAX R</b>
-<span>{fmt_r(max_display)}</span>
+<span>{fmt_r(row["position_max_r"])}</span>
 </div>
 
 <div class="card">
 <b>MIN R</b>
-<span>{fmt_r(min_display)}</span>
+<span>{fmt_r(row["position_min_r"])}</span>
 </div>
 
 <div class="card">
-<b>TRAIL R</b>
-<span>{fmt_r(row["trail_r"])}</span>
+<b>PA</b>
+<span>{html.escape(row["pa_trigger"] or "—")}</span>
 </div>
 
 <div class="card">
-<b>EXIT</b>
-<span>{html.escape(row["exit_reason"] or "—")}</span>
+<b>RR</b>
+<span>{fmt_r(row["planned_rr"])}</span>
 </div>
 
-</div>
-
-<div class="setup-note">
-DECYZJA:
-{html.escape(row["decision_reason"] or row["status"])}
-·
-PLAN RR:
-{fmt_r(row["planned_rr"])}
-·
-CEL:
-{fmt_num(row["planned_target"])}
 </div>
 
 </div>
@@ -3071,7 +3008,7 @@ M5
 <div class="legend">
 
 Świece z MEXC.
-Linie: SETUP, SL, ENTRY, EXIT.
+Linie: ENTRY, początkowy SL, TRAILING SL, EXIT.
 Pozycja tabeli, strony i wykresu jest zachowywana
 przy odświeżeniu.
 
@@ -3323,6 +3260,12 @@ function formatTime(ts){
     + " UTC";
 }
 
+
+function escapeHtml(value){
+    return String(value ?? "").replace(/[&<>"']/g, function(ch){
+        return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch];
+    });
+}
 
 function formatPrice(value){
 
@@ -3611,7 +3554,9 @@ function renderChart(
         data.markers.setup_price,
         data.markers.sl,
         data.markers.confirm_price,
-        data.markers.entry_price
+        data.markers.entry_price,
+        data.markers.trail_price,
+        data.markers.exit_price
     ].forEach(
         value => {
 
@@ -4057,6 +4002,19 @@ function renderChart(
     );
 
     verticalLine(
+        data.markers.trail_time,
+        "#c084fc",
+        "TRAIL"
+    );
+
+    horizontalLine(
+        data.markers.trail_price,
+        "#c084fc",
+        "TRAIL",
+        true
+    );
+
+    verticalLine(
         data.markers.exit_time,
         "#8b949e",
         "EXIT"
@@ -4101,98 +4059,57 @@ function renderChart(
 
     let info = "";
 
-
     info += `
 <div class="cards">
 
 <div class="card">
-<b>SETUP</b>
-<span>
-${formatTime(
-    data.setup.time)}
-</span>
+<b>MODEL</b>
+<span>${escapeHtml(data.setup.model || "—")}</span>
 </div>
 
 <div class="card">
-<b>KIERUNEK</b>
-<span class="${
-    data.setup.direction
-    === "LONG"
-    ? "yes"
-    : "bad"
-}">
+<b>DIRECTION</b>
+<span class="${data.setup.direction === "LONG" ? "yes" : "bad"}">
 ${data.setup.direction}
 </span>
 </div>
 
 <div class="card">
-<b>STATUS</b>
-<span class="${
-    data.setup.status
-    === "POTWIERDZONY"
-    ? "yes"
-    : "bad"
-}">
-${data.setup.status}
-</span>
+<b>ENTRY</b>
+<span>${formatPrice(data.markers.entry_price)}</span>
 </div>
 
 <div class="card">
-<b>SL</b>
-<span>
-${formatPrice(
-    data.markers.sl
-)}
-</span>
+<b>POCZĄTKOWY SL</b>
+<span>${formatPrice(data.markers.sl)}</span>
 </div>
 
 </div>
-`;
 
-
-    info += `
 <div class="cards">
 
 <div class="card">
-<b>MAX R</b>
-<span>
-${formatR(
-    metrics.max_r
-)}
-</span>
-</div>
-
-<div class="card">
-<b>MIN R</b>
-<span>
-${formatR(
-    metrics.min_r
-)}
-</span>
-</div>
-
-<div class="card">
-<b>TRAIL R</b>
-<span>
-${formatR(
-    metrics.trail_r
-)}
-</span>
+<b>TRAILING SL</b>
+<span>${formatPrice(data.markers.trail_price)}</span>
 </div>
 
 <div class="card">
 <b>EXIT</b>
-<span>
-${metrics.exit_reason || "—"}
-${formatR(
-    metrics.exit_r
-)}
-</span>
+<span>${formatPrice(data.markers.exit_price)}</span>
+</div>
+
+<div class="card">
+<b>EXIT R</b>
+<span>${formatR(metrics.exit_r)}</span>
+</div>
+
+<div class="card">
+<b>PA</b>
+<span>${escapeHtml(data.setup.pa || "—")}</span>
 </div>
 
 </div>
 `;
-
 
     info += `
 <div class="diag-title">
