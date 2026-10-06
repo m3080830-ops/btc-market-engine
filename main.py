@@ -1506,10 +1506,7 @@ def rebuild_history():
 
             upsert_setup(setup)
 
-            entry = h1_entry(
-                h1,
-                setup
-            )
+            entry = h1_entry(h1, setup)
 
             sl = structural_sl(
                 h1,
@@ -1529,8 +1526,6 @@ def rebuild_history():
                 "exit_price": None,
                 "exit_reason": None,
                 "exit_r": None,
-                "setup_max_r": None,
-                "setup_min_r": None,
                 "position_max_r": None,
                 "position_min_r": None,
                 "trail_r": None,
@@ -1548,10 +1543,8 @@ def rebuild_history():
 
             if plan is None:
 
-                fields.update(
-                    status="ODRZUCONY",
-                    decision_reason="BRAK PLANU RR"
-                )
+                fields["status"] = "ODRZUCONY"
+                fields["decision_reason"] = "BRAK PLANU RR"
 
             else:
 
@@ -1562,24 +1555,27 @@ def rebuild_history():
 
                 if plan["rr"] < MIN_SETUP_RR:
 
-                    fields.update(
-                        status="ODRZUCONY RR",
-                        decision_reason=(
-                            f"RR {plan['rr']:.2f} < "
-                            f"{MIN_SETUP_RR:.2f}"
-                        )
+                    fields["status"] = "ODRZUCONY RR"
+                    fields["decision_reason"] = (
+                        f"RR {plan['rr']:.2f} < "
+                        f"{MIN_SETUP_RR:.2f}"
                     )
 
                 elif entry:
 
-                    active = any(
-                        other["entry_time"]
-                        and other["exit_time"] is None
-                        and other["setup_time"] != setup["time"]
-                        for other in get_setups(200)
+                    active_exists = any(
+                        row["entry_time"]
+                        and row["exit_time"] is None
+                        and row["setup_time"] != setup["time"]
+                        for row in get_setups(200)
                     )
 
-                    if not active:
+                    if active_exists:
+
+                        fields["status"] = "OCZEKUJE"
+                        fields["decision_reason"] = "AKTYWNA POZYCJA"
+
+                    else:
 
                         sim = simulate_position(
                             m5,
@@ -1597,7 +1593,8 @@ def rebuild_history():
                             ),
                             entry_time=entry["time"],
                             entry_price=entry["price"],
-                            position_sl=sl
+                            position_sl=sl,
+                            decision_reason="RR OK"
                         )
 
                         if sim:
@@ -1617,15 +1614,8 @@ def rebuild_history():
                 **fields
             )
 
-        state_set(
-            "history_rebuilt",
-            now_ts()
-        )
-
-        state_set(
-            "latest_error",
-            ""
-        )
+        state_set("history_rebuilt", now_ts())
+        state_set("latest_error", "")
 
     except Exception as e:
 
@@ -1637,6 +1627,9 @@ def rebuild_history():
 
 # ============================================================
 # LIVE POSITION MANAGEMENT
+# ============================================================
+
+
 # ============================================================
 
 def manage_open_positions(
@@ -1855,6 +1848,7 @@ def live_refresh():
         sl = row["setup_sl"]
 
         if sl is None:
+
             sl = structural_sl(
                 h1,
                 setup["direction"],
@@ -1867,7 +1861,9 @@ def live_refresh():
         )
 
         fields = {
-            "setup_sl": sl
+            "setup_sl": sl,
+            "confirm_time": None,
+            "confirm_price": None
         }
 
         plan = setup_trade_plan(
@@ -1877,15 +1873,7 @@ def live_refresh():
             sl
         )
 
-        if plan is None:
-
-            fields.update(
-                status="OCZEKUJE",
-                planned_target=None,
-                planned_rr=None
-            )
-
-        else:
+        if plan:
 
             fields.update(
                 planned_target=plan["target"],
@@ -1926,10 +1914,7 @@ def live_refresh():
             **fields
         )
 
-    manage_open_positions(
-        m5,
-        m15
-    )
+    manage_open_positions(m5, m15)
 
     state_set(
         "last_live_update",
@@ -1946,10 +1931,14 @@ def live_refresh():
 # CHART DATA
 # ============================================================
 
+
+# ============================================================
+
 def chart_candles(
-    setup_time,
+    center_time,
     interval,
-    total
+    total,
+    end_ts=None
 ):
 
     step = {
@@ -1958,12 +1947,10 @@ def chart_candles(
         "Min5": 300
     }[interval]
 
-    end = min(
-        now_ts(),
-        int(
-            setup_time
-            + total * step * 0.99
-        )
+    end = (
+        int(end_ts)
+        if end_ts is not None
+        else int(center_time + (total // 2) * step)
     )
 
     return get_klines(
@@ -1986,17 +1973,13 @@ def chart_payload(
             FROM setups
             WHERE setup_time=?
             """,
-            (
-                int(setup_time),
-            )
+            (int(setup_time),)
         ).fetchone()
 
     if not row:
-
         return {
             "ok": False,
-            "error":
-                "Nie znaleziono setupu."
+            "error": "Nie znaleziono setupu."
         }
 
     setup = {
@@ -2006,18 +1989,9 @@ def chart_payload(
     }
 
     mapping = {
-        "H1": (
-            "Min60",
-            300
-        ),
-        "M15": (
-            "Min15",
-            1000
-        ),
-        "M5": (
-            "Min5",
-            2400
-        )
+        "H1": ("Min60", 24),
+        "M15": ("Min15", 36),
+        "M5": ("Min5", 72)
     }
 
     interval, total = mapping.get(
@@ -2025,173 +1999,99 @@ def chart_payload(
         mapping["M15"]
     )
 
-    candles = chart_candles(
-        row["setup_time"],
-        interval,
-        total
-    )
-
-    m15 = chart_candles(
-        row["setup_time"],
-        "Min15",
-        500
-    )
-
-    m5 = chart_candles(
-        row["setup_time"],
-        "Min5",
-        1600
-    )
-
-    if row["confirm_time"]:
-
-        confirm = {
-            "time": row["confirm_time"],
-            "price": row["confirm_price"]
-        }
-
-    else:
-
-        confirm = confirm_m15(
-            m15,
-            setup
+    event_times = [
+        x for x in (
+            row["setup_time"],
+            row["entry_time"],
+            row["exit_time"]
         )
+        if x
+    ]
+
+    center = (
+        row["entry_time"]
+        or row["setup_time"]
+    )
+
+    if row["exit_time"]:
+        end_time = row["exit_time"]
+    else:
+        end_time = center
+
+    step = {
+        "Min60": 3600,
+        "Min15": 900,
+        "Min5": 300
+    }[interval]
+
+    before = 6
+    after = 6
 
     if row["entry_time"]:
+        center = row["entry_time"]
 
-        entry = {
-            "time": row["entry_time"],
-            "price": row["entry_price"]
-        }
+    if row["exit_time"]:
+        end_time = row["exit_time"]
 
-    elif confirm:
+    if end_time < center:
+        end_time = center
 
-        entry = find_m5_entry(
-            m5,
-            setup,
-            confirm
-        )
+    total = min(
+        max(
+            12,
+            before
+            + after
+            + int((end_time - center) / step)
+            + 1
+        ),
+        96
+    )
 
-    else:
-
-        old_limit = M5_ENTRY_CANDLES
-        M5_ENTRY_CANDLES = M5_FALLBACK_CANDLES
-
-        try:
-            entry = find_m5_entry(
-                m5,
-                setup,
-                setup
-            )
-        finally:
-            M5_ENTRY_CANDLES = old_limit
+    candles = chart_candles(
+        center,
+        interval,
+        total,
+        end_ts=end_time + after * step
+    )
 
     markers = {
-        "setup_time":
-            row["setup_time"],
-
-        "setup_price":
-            row["setup_price"],
-
-        "sl": (
-            row["position_sl"]
-            if row["entry_time"]
-            else row["setup_sl"]
-        ),
-
-        "confirm_time": (
-            confirm["time"]
-            if confirm
-            else None
-        ),
-
-        "confirm_price": (
-            confirm["price"]
-            if confirm
-            else None
-        ),
-
-        "entry_time": (
-            entry["time"]
-            if entry
-            else None
-        ),
-
-        "entry_price": (
-            entry["price"]
-            if entry
-            else None
-        )
+        "setup_time": row["setup_time"],
+        "setup_price": row["setup_price"],
+        "sl": row["setup_sl"],
+        "entry_time": row["entry_time"],
+        "entry_price": row["entry_price"],
+        "exit_time": row["exit_time"],
+        "exit_price": row["exit_price"]
     }
 
     return {
         "ok": True,
-
         "tf": tf,
-
         "setup": {
-            "time":
-                row["setup_time"],
-
-            "direction":
-                row["direction"],
-
-            "price":
-                row["setup_price"],
-
-            "status":
-                row["status"]
+            "time": row["setup_time"],
+            "direction": row["direction"],
+            "price": row["setup_price"],
+            "status": row["status"]
         },
-
-        "markers":
-            markers,
-
-        "candles":
-            candles,
-
-        "m15":
-            m15_diagnostics(
-                m15,
-                setup
-            ),
-
-        "m5": (
-            m5_diagnostics(
-                m5,
-                setup,
-                confirm
-            )
-            if confirm
-            else []
-        ),
-
+        "markers": markers,
+        "candles": candles,
+        "m15": [],
+        "m5": [],
         "metrics": {
-            "max_r": (
-                row["position_max_r"]
-                if row["entry_time"]
-                else row["setup_max_r"]
-            ),
-
-            "min_r": (
-                row["position_min_r"]
-                if row["entry_time"]
-                else row["setup_min_r"]
-            ),
-
-            "trail_r":
-                row["trail_r"],
-
-            "exit_r":
-                row["exit_r"],
-
-            "exit_reason":
-                row["exit_reason"]
+            "max_r": row["position_max_r"],
+            "min_r": row["position_min_r"],
+            "trail_r": row["trail_r"],
+            "exit_r": row["exit_r"],
+            "exit_reason": row["exit_reason"],
+            "planned_rr": row["planned_rr"],
+            "planned_target": row["planned_target"]
         }
     }
 
 
 # ============================================================
 # DASHBOARD
+
 # ============================================================
 
 def dashboard():
