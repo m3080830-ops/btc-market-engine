@@ -1436,7 +1436,7 @@ def upsert_setup(s):
             """,
             (
                 s["symbol"],
-                s["time"],
+                s["signal_time"],
                 s["direction"],
                 s["price"],
                 "NIEPOTWIERDZONY",
