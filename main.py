@@ -1505,8 +1505,17 @@ def rebuild_history():
         for setup in found:
 
             upsert_setup(setup)
-            entry = h1_entry(h1, setup)
-            sl = structural_sl(h1, setup["direction"], setup["time"])
+
+            entry = h1_entry(
+                h1,
+                setup
+            )
+
+            sl = structural_sl(
+                h1,
+                setup["direction"],
+                setup["time"]
+            )
 
             fields = {
                 "status": "OCZEKUJE",
@@ -1530,12 +1539,19 @@ def rebuild_history():
                 "decision_reason": None
             }
 
-            plan = setup_trade_plan(h1, setup, entry, sl)
+            plan = setup_trade_plan(
+                h1,
+                setup,
+                entry,
+                sl
+            )
 
             if plan is None:
 
-                fields["status"] = "ODRZUCONY"
-                fields["decision_reason"] = "BRAK PLANU RR"
+                fields.update(
+                    status="ODRZUCONY",
+                    decision_reason="BRAK PLANU RR"
+                )
 
             else:
 
@@ -1546,29 +1562,31 @@ def rebuild_history():
 
                 if plan["rr"] < MIN_SETUP_RR:
 
-                    fields["status"] = "ODRZUCONY RR"
-                    fields["decision_reason"] = (
-                        f"RR {plan['rr']:.2f} < {MIN_SETUP_RR:.2f}"
+                    fields.update(
+                        status="ODRZUCONY RR",
+                        decision_reason=(
+                            f"RR {plan['rr']:.2f} < "
+                            f"{MIN_SETUP_RR:.2f}"
+                        )
                     )
 
                 elif entry:
 
-                    active_exists = any(
-                        row["entry_time"]
-                        and row["exit_time"] is None
-                        and row["setup_time"] != setup["time"]
-                        for row in get_setups(200)
+                    active = any(
+                        other["entry_time"]
+                        and other["exit_time"] is None
+                        and other["setup_time"] != setup["time"]
+                        for other in get_setups(200)
                     )
 
-                    if active_exists:
-
-                        fields["status"] = "OCZEKUJE"
-                        fields["decision_reason"] = "AKTYWNA POZYCJA"
-
-                    else:
+                    if not active:
 
                         sim = simulate_position(
-                            m5, m15, setup, entry, sl
+                            m5,
+                            m15,
+                            setup,
+                            entry,
+                            sl
                         )
 
                         fields.update(
@@ -1579,8 +1597,7 @@ def rebuild_history():
                             ),
                             entry_time=entry["time"],
                             entry_price=entry["price"],
-                            position_sl=sl,
-                            decision_reason="RR OK"
+                            position_sl=sl
                         )
 
                         if sim:
@@ -1595,16 +1612,27 @@ def rebuild_history():
                                 trail_r=sim["trail_r"]
                             )
 
-            update_setup(setup["time"], **fields)
+            update_setup(
+                setup["time"],
+                **fields
+            )
 
-        state_set("history_rebuilt", now_ts())
-        state_set("latest_error", "")
+        state_set(
+            "history_rebuilt",
+            now_ts()
+        )
+
+        state_set(
+            "latest_error",
+            ""
+        )
 
     except Exception as e:
 
-        state_set("latest_error", repr(e))
-
-
+        state_set(
+            "latest_error",
+            repr(e)
+        )
 
 
 # ============================================================
@@ -1827,19 +1855,37 @@ def live_refresh():
         sl = row["setup_sl"]
 
         if sl is None:
-            sl = structural_sl(h1, setup["direction"], setup["time"])
+            sl = structural_sl(
+                h1,
+                setup["direction"],
+                setup["time"]
+            )
 
-        entry = h1_entry(h1, setup)
+        entry = h1_entry(
+            h1,
+            setup
+        )
 
         fields = {
-            "setup_sl": sl,
-            "confirm_time": None,
-            "confirm_price": None
+            "setup_sl": sl
         }
 
-        plan = setup_trade_plan(h1, setup, entry, sl)
+        plan = setup_trade_plan(
+            h1,
+            setup,
+            entry,
+            sl
+        )
 
-        if plan:
+        if plan is None:
+
+            fields.update(
+                status="OCZEKUJE",
+                planned_target=None,
+                planned_rr=None
+            )
+
+        else:
 
             fields.update(
                 planned_target=plan["target"],
@@ -1851,7 +1897,8 @@ def live_refresh():
                 fields.update(
                     status="ODRZUCONY RR",
                     decision_reason=(
-                        f"RR {plan['rr']:.2f} < {MIN_SETUP_RR:.2f}"
+                        f"RR {plan['rr']:.2f} < "
+                        f"{MIN_SETUP_RR:.2f}"
                     )
                 )
 
@@ -1874,14 +1921,25 @@ def live_refresh():
                         decision_reason="RR OK"
                     )
 
-        update_setup(row["setup_time"], **fields)
+        update_setup(
+            row["setup_time"],
+            **fields
+        )
 
-    manage_open_positions(m5, m15)
+    manage_open_positions(
+        m5,
+        m15
+    )
 
-    state_set("last_live_update", now_ts())
-    state_set("latest_error", "")
+    state_set(
+        "last_live_update",
+        now_ts()
+    )
 
-
+    state_set(
+        "latest_error",
+        ""
+    )
 
 
 # ============================================================
@@ -1889,10 +1947,9 @@ def live_refresh():
 # ============================================================
 
 def chart_candles(
-    center_time,
+    setup_time,
     interval,
-    total,
-    end_ts=None
+    total
 ):
 
     step = {
@@ -1901,13 +1958,19 @@ def chart_candles(
         "Min5": 300
     }[interval]
 
-    end = (
-        int(end_ts)
-        if end_ts is not None
-        else int(center_time + (total // 2) * step)
+    end = min(
+        now_ts(),
+        int(
+            setup_time
+            + total * step * 0.99
+        )
     )
 
-    return get_klines(interval, total, end_ts=end)
+    return get_klines(
+        interval,
+        total,
+        end_ts=end
+    )
 
 
 def chart_payload(
@@ -1932,16 +1995,22 @@ def chart_payload(
             "error": "Nie znaleziono setupu."
         }
 
-    mapping = {
-        "H1": ("Min60", 24),
-        "M15": ("Min15", 36),
-        "M5": ("Min5", 72)
+    setup = {
+        "time": row["setup_time"],
+        "direction": row["direction"],
+        "price": row["setup_price"]
     }
 
-    interval, total = mapping.get(tf, mapping["M15"])
+    mapping = {
+        "H1": ("Min60", 18),
+        "M15": ("Min15", 30),
+        "M5": ("Min5", 60)
+    }
 
-    center = row["entry_time"] or row["setup_time"]
-    end_time = row["exit_time"] or center
+    interval, total = mapping.get(
+        tf,
+        mapping["M15"]
+    )
 
     step = {
         "Min60": 3600,
@@ -1949,49 +2018,100 @@ def chart_payload(
         "Min5": 300
     }[interval]
 
-    before = 6
-    after = 6
+    events = [
+        x for x in (
+            row["setup_time"],
+            row["entry_time"],
+            row["exit_time"]
+        )
+        if x
+    ]
+
+    start_time = min(events)
+    end_time = max(events)
 
     total = min(
         max(
-            12,
-            before + after
-            + int(max(0, end_time - center) / step)
-            + 1
+            total,
+            11 + int(
+                (end_time - start_time) / step
+            )
         ),
-        96
+        120
     )
 
     candles = chart_candles(
-        center,
+        start_time,
         interval,
         total,
-        end_ts=end_time + after * step
+        end_ts=end_time + 5 * step
     )
+
+    m15 = chart_candles(
+        row["setup_time"],
+        "Min15",
+        120,
+        end_ts=(
+            row["exit_time"]
+            or row["entry_time"]
+            or now_ts()
+        ) + 5 * 900
+    )
+
+    m5 = chart_candles(
+        row["setup_time"],
+        "Min5",
+        240,
+        end_ts=(
+            row["exit_time"]
+            or row["entry_time"]
+            or now_ts()
+        ) + 5 * 300
+    )
+
+    markers = {
+        "setup_time": row["setup_time"],
+        "setup_price": row["setup_price"],
+        "sl": row["setup_sl"],
+        "confirm_time": None,
+        "confirm_price": None,
+        "entry_time": row["entry_time"],
+        "entry_price": row["entry_price"],
+        "exit_time": row["exit_time"],
+        "exit_price": row["exit_price"]
+    }
 
     return {
         "ok": True,
         "tf": tf,
+
         "setup": {
             "time": row["setup_time"],
             "direction": row["direction"],
             "price": row["setup_price"],
             "status": row["status"]
         },
-        "markers": {
-            "setup_time": row["setup_time"],
-            "setup_price": row["setup_price"],
-            "sl": row["setup_sl"],
-            "confirm_time": None,
-            "confirm_price": None,
-            "entry_time": row["entry_time"],
-            "entry_price": row["entry_price"],
-            "exit_time": row["exit_time"],
-            "exit_price": row["exit_price"]
-        },
+
+        "markers": markers,
         "candles": candles,
-        "m15": [],
-        "m5": [],
+
+        "m15": m15_diagnostics(
+            m15,
+            setup
+        ),
+
+        "m5": (
+            m5_diagnostics(
+                m5,
+                setup,
+                {
+                    "time": row["entry_time"]
+                }
+            )
+            if row["entry_time"]
+            else []
+        ),
+
         "metrics": {
             "max_r": row["position_max_r"],
             "min_r": row["position_min_r"],
@@ -2004,10 +2124,9 @@ def chart_payload(
     }
 
 
-
-
 # ============================================================
 # DASHBOARD
+
 # ============================================================
 
 def dashboard():
@@ -2048,89 +2167,945 @@ def dashboard():
 
     for row in rows:
 
-        direction_class = (
-            "long"
-            if row["direction"] == "LONG"
-            else "short"
+        option_label = (
+            f"{fmt_ts(row['setup_time'])}"
+            f" · {row['direction']}"
+            f" · {row['status']}"
         )
 
-        result_display = (
-            fmt_r(row["exit_r"])
-            if row["exit_time"]
-            else (
-                "OTWARTA"
-                if row["entry_time"]
-                else (
-                    fmt_r(row["planned_rr"])
-                    if row["planned_rr"] is not None
-                    else "—"
-                )
-            )
+        options += (
+            f"<option "
+            f"value='{row['setup_time']}'>"
+            f"{html.escape(option_label)}"
+            f"</option>"
         )
 
-        final_stage = (
-            row["exit_reason"]
-            if row["exit_time"]
-            else (
-                "OTWARTA"
-                if row["entry_time"]
-                else row["status"]
-            )
-        )
+    confirmed = [
+        r
+        for r in rows
+        if r["status"]
+        == "POTWIERDZONY"
+    ]
 
-        status_text = row["status"]
-        status_class = (
-            "yes"
-            if row["status"] in ("OTWARTA", "ZAMKNIETA")
-            else "no"
-        )
+    unconfirmed = [
+        r
+        for r in rows
+        if r["status"]
+        != "POTWIERDZONY"
+    ]
 
-        timeline = (
-            "H1 SETUP"
-            + (" → ENTRY" if row["entry_time"] else "")
-            + (" → " + final_stage if final_stage else "")
-        )
+    body = []
 
-        sl_display = row["position_sl"] or row["setup_sl"]
+    body.append("""
+<!doctype html>
+<html>
+<head>
+
+<meta charset="utf-8">
+
+<meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+>
+
+<title>BTC Market Engine</title>
+
+<style>
+
+:root{
+    --bg:#080a0d;
+    --panel:#11151b;
+    --panel2:#0d1116;
+    --line:#252c35;
+    --text:#f3f6fa;
+    --muted:#8993a1;
+    --green:#35e58a;
+    --red:#ff6475;
+    --blue:#59a8ff;
+    --gold:#f2cc60;
+    --purple:#c084fc;
+}
+
+*{
+    box-sizing:border-box;
+}
+
+html{
+    scroll-behavior:auto;
+}
+
+body{
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Arial,
+        sans-serif;
+    background:
+        radial-gradient(
+            circle at top,
+            #151a21 0,
+            #080a0d 42%,
+            #080a0d 100%
+        );
+    color:var(--text);
+    margin:0;
+    padding:14px;
+    min-width:0;
+}
+
+h1{
+    font-size:26px;
+    line-height:1.05;
+    margin:4px 0 5px;
+    letter-spacing:-.5px;
+}
+
+.meta{
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.5;
+}
+
+.price{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    margin:10px 0 14px;
+    padding:8px 12px;
+    border:1px solid #27313b;
+    border-radius:999px;
+    background:#10151b;
+    color:#dce3eb;
+    font-size:15px;
+    font-weight:700;
+}
+
+.err{
+    background:#42151d;
+    border:1px solid #7d2735;
+    color:#ffd9df;
+    padding:12px;
+    border-radius:14px;
+    margin:10px 0;
+    line-height:1.4;
+}
+
+.tabs{
+    display:flex;
+    gap:8px;
+    position:sticky;
+    top:0;
+    z-index:20;
+    margin:12px -2px 14px;
+    padding:8px 2px;
+    background:rgba(8,10,13,.94);
+    backdrop-filter:blur(12px);
+    overflow-x:auto;
+    scrollbar-width:none;
+}
+
+.tabs::-webkit-scrollbar{
+    display:none;
+}
+
+.tab,
+.tf,
+.select{
+    background:#10151b;
+    color:#b9c2ce;
+    border:1px solid #2a323c;
+    border-radius:13px;
+    padding:12px 14px;
+    cursor:pointer;
+    font-size:13px;
+    font-weight:700;
+    outline:none;
+    min-height:46px;
+}
+
+.tab{
+    flex:0 0 auto;
+    white-space:nowrap;
+}
+
+.tab.active{
+    color:#fff;
+    background:#202731;
+    border-color:#56616e;
+    box-shadow:0 4px 18px rgba(0,0,0,.25);
+}
+
+.select{
+    width:100%;
+    min-height:52px;
+    appearance:auto;
+    -webkit-appearance:auto;
+}
+
+.select:focus{
+    border-color:#667483;
+    background:#171d25;
+    color:#fff;
+}
+
+.select option{
+    background:#11151b;
+    color:#ddd;
+    padding:12px;
+}
+
+.panel{
+    display:none;
+}
+
+.panel.active{
+    display:block;
+}
+
+.table-wrap{
+    overflow:auto;
+    border:1px solid var(--line);
+    border-radius:18px;
+    background:var(--panel);
+    max-height:70vh;
+    box-shadow:
+        0 10px 30px rgba(0,0,0,.22);
+}
+
+table{
+    border-collapse:collapse;
+    width:max-content;
+    min-width:1200px;
+}
+
+th,
+td{
+    padding:11px 12px;
+    border-bottom:1px solid #20262e;
+    white-space:nowrap;
+    font-size:13px;
+}
+
+th{
+    position:sticky;
+    top:0;
+    background:#151a21;
+    z-index:2;
+    color:#aeb8c5;
+    text-align:left;
+}
+
+tbody tr:last-child td{
+    border-bottom:0;
+}
+
+tbody tr:hover{
+    background:#151a21;
+}
+
+.long,
+.yes{
+    color:var(--green);
+}
+
+.short,
+.bad{
+    color:var(--red);
+}
+
+.no{
+    color:#9aa3ae;
+}
+
+.empty{
+    padding:26px 20px;
+    color:#7f8996;
+}
+
+.toolbar{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+    margin:10px 0 12px;
+    padding:12px;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:18px;
+}
+
+.toolbar .select{
+    flex:1 1 100%;
+}
+
+.legend{
+    color:#8993a1;
+    font-size:12px;
+    line-height:1.55;
+    margin:8px 0;
+}
+
+.chart-scroll{
+    position:relative;
+    overflow:auto;
+    border:1px solid var(--line);
+    border-radius:18px;
+    background:#090c10;
+    max-height:58vh;
+    min-height:340px;
+    padding-left:70px;
+    -webkit-overflow-scrolling:touch;
+}
+
+.chart-yaxis{
+    position:absolute;
+    left:0;
+    top:0;
+    bottom:0;
+    width:70px;
+    background:#090c10;
+    z-index:10;
+    pointer-events:none;
+    border-right:1px solid #20262e;
+}
+
+.chart-yaxis-label{
+    position:absolute;
+    right:7px;
+    transform:translateY(-50%);
+    color:#6f7a87;
+    font-size:10px;
+    white-space:nowrap;
+}
+
+#chart{
+    display:block;
+    height:400px;
+    min-width:900px;
+}
+
+.info{
+    margin-top:12px;
+    border:1px solid var(--line);
+    border-radius:18px;
+    background:var(--panel);
+    padding:12px;
+}
+
+.cards{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:8px;
+    margin-bottom:9px;
+}
+
+.card{
+    background:#0d1116;
+    border:1px solid #242b34;
+    border-radius:14px;
+    padding:11px;
+    min-width:0;
+}
+
+.card b{
+    display:block;
+    color:#7f8996;
+    font-size:10px;
+    margin-bottom:6px;
+    letter-spacing:.4px;}
+
+.card span{
+    display:block;
+    font-weight:800;
+    overflow:hidden;
+    text-overflow:ellipsis;
+}
+
+.diag-title{
+    font-weight:800;
+    margin:13px 0 7px;
+    font-size:14px;
+}
+
+.diag-scroll{
+    overflow:auto;
+    border:1px solid #252c35;
+    border-radius:13px;
+    -webkit-overflow-scrolling:touch;
+}
+
+.diag{
+    min-width:100%;
+}
+
+.diag td,
+.diag th{
+    font-size:12px;
+    padding:8px;
+}
+
+
+.setup-list{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+}
+
+.setup-item{
+    border:1px solid var(--line);
+    border-radius:16px;
+    background:var(--panel);
+    overflow:hidden;
+}
+
+.setup-summary{
+    min-height:54px;
+    padding:10px 12px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px;
+    cursor:pointer;
+    user-select:none;
+}
+
+.setup-main,
+.setup-summary-right{
+    display:flex;
+    align-items:center;
+    gap:9px;
+    min-width:0;
+}
+
+.setup-main{
+    flex:1 1 auto;
+    overflow:hidden;
+}
+
+.setup-main > span:first-child{
+    color:#dbe2ea;
+    font-size:12px;
+    white-space:nowrap;
+}
+
+.setup-main > span:nth-child(2){
+    font-size:12px;
+    font-weight:900;
+}
+
+.setup-summary-right{
+    flex:0 0 auto;
+}
+
+.setup-summary-right > span{
+    font-size:11px;
+    font-weight:800;
+    white-space:nowrap;
+}
+
+.setup-r{
+    min-width:54px;
+    text-align:right;
+}
+
+.setup-chevron{
+    font-size:22px !important;
+    line-height:1;
+    color:#7f8996;
+    transition:transform .15s ease;
+}
+
+.setup-item:not(.collapsed) .setup-chevron{
+    transform:rotate(90deg);
+}
+
+.setup-details{
+    display:none;
+    padding:0 10px 10px;
+    border-top:1px solid #20262e;
+}
+
+.setup-item:not(.collapsed) .setup-details{
+    display:block;
+}
+
+.setup-grid{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:7px;
+    padding-top:9px;
+}
+
+.setup-note{
+    margin-top:8px;
+    color:#8993a1;
+    font-size:11px;
+    line-height:1.5;
+}
+
+@media(max-width:700px){
+    .setup-summary{
+        min-height:50px;
+        padding:9px 10px;
+    }
+
+    .setup-main{
+        gap:7px;
+    }
+
+    .setup-main > span:first-child{
+        font-size:10px;
+    }
+
+    .setup-main > span:nth-child(2){
+        font-size:11px;
+    }
+
+    .setup-summary-right{
+        gap:6px;
+    }
+
+    .setup-summary-right > span{
+        font-size:10px;
+    }
+
+    .setup-r{
+        min-width:45px;
+    }
+
+    .setup-grid{
+        grid-template-columns:repeat(2,minmax(0,1fr));
+    }
+
+
+
+    body{
+        margin:0;
+        padding:12px;
+    }
+
+    h1{
+        font-size:25px;
+        margin-top:2px;
+    }
+
+    .price{
+        font-size:14px;
+        margin-top:9px;
+    }
+
+    .tabs{
+        margin-top:10px;
+        margin-bottom:12px;
+    }
+
+    .tab{
+        min-height:44px;
+        padding:11px 13px;
+    }
+
+    .table-wrap{
+        border-radius:18px;
+        max-height:none;
+        overflow:visible;
+        background:transparent;
+        border:0;
+        box-shadow:none;
+    }
+
+    .table-wrap table{
+        width:100%;
+        min-width:0;
+        border-collapse:separate;
+        border-spacing:0 10px;
+    }
+
+    .table-wrap thead{
+        display:none;
+    }
+
+    .table-wrap tbody,
+    .table-wrap tr,
+    .table-wrap td{
+        display:block;
+        width:100%;
+    }
+
+    .table-wrap tbody tr{
+        background:var(--panel);
+        border:1px solid var(--line);
+        border-radius:18px;
+        overflow:hidden;
+        box-shadow:
+            0 8px 24px rgba(0,0,0,.20);
+    }
+
+    .table-wrap tbody tr:hover{
+        background:var(--panel);
+    }
+
+    .table-wrap td{
+        display:grid;
+        grid-template-columns:42% 58%;
+        gap:8px;
+        align-items:center;
+        padding:10px 13px;
+        white-space:normal;
+        border-bottom:1px solid #20262e;
+        font-size:13px;
+        min-height:43px;
+    }
+
+    .table-wrap td:last-child{
+        border-bottom:0;
+    }
+
+    .table-wrap td::before{
+        color:#7f8996;
+        font-size:10px;
+        font-weight:800;
+        text-transform:uppercase;
+        letter-spacing:.45px;
+    }
+
+    .table-wrap td:nth-child(1)::before{content:"Setup";}
+    .table-wrap td:nth-child(2)::before{content:"Kierunek";}
+    .table-wrap td:nth-child(3)::before{content:"Setup price";}
+    .table-wrap td:nth-child(4)::before{content:"Status";}
+    .table-wrap td:nth-child(5)::before{content:"M15";}
+    .table-wrap td:nth-child(6)::before{content:"Entry";}
+    .table-wrap td:nth-child(7)::before{content:"SL";}
+    .table-wrap td:nth-child(8)::before{content:"Exit";}
+    .table-wrap td:nth-child(9)::before{content:"Exit R";}
+    .table-wrap td:nth-child(10)::before{content:"Max R";}
+    .table-wrap td:nth-child(11)::before{content:"Min R";}
+    .table-wrap td:nth-child(12)::before{content:"Trail R";}
+    .table-wrap td:nth-child(13)::before{content:"Powód";}
+
+    .table-wrap td.empty{
+        display:block;
+        padding:24px 18px;
+        color:#7f8996;
+        text-align:center;
+    }
+
+    .table-wrap td.empty::before{
+        content:none;
+    }
+
+    .toolbar{
+        padding:11px;
+        border-radius:17px;
+    }
+
+    .tf{
+        flex:1 1 0;
+        min-width:0;
+        padding:10px 9px;
+    }
+
+    .chart-scroll{
+        min-height:300px;
+        max-height:52vh;
+        border-radius:18px;
+        padding-left:60px;
+    }
+
+    .chart-yaxis{
+        width:60px;
+    }
+
+    .chart-yaxis-label{
+        font-size:9px;
+    }
+
+    #chart{
+        height:330px;
+        min-width:820px;
+    }
+
+    .info{
+        border-radius:18px;
+        padding:10px;
+    }
+
+    .cards{
+        grid-template-columns:repeat(2,minmax(0,1fr));
+        gap:7px;
+    }
+
+    .card{
+        border-radius:13px;
+        padding:10px;
+    }
+
+    .card span{
+        font-size:14px;
+    }
+
+    .diag-scroll{
+        border-radius:13px;
+    }
+
+    .diag{
+        min-width:650px;
+    }
+}
+
+@media(min-width:701px){
+
+    body{
+        max-width:1400px;
+        margin:0 auto;
+        padding:20px;
+    }
+}
+
+</style>
+
+</head>
+
+<body>
+""")
+
+    body.append(
+        "<h1>BTC MARKET ENGINE</h1>"
+    )
+
+    body.append(
+        f"""
+<div class="price">
+BTC: {current_price} USDT
+</div>
+"""
+    )
+
+    body.append(
+        f"""
+<div class="meta">Ostatnia aktualizacja:
+{fmt_ts(last_update)}
+· auto refresh 10 s
+</div>
+"""
+    )
+
+    if latest_error:
 
         body.append(
             f"""
-<div class="setup-item collapsed" data-setup="{row["setup_time"]}">
-<div class="setup-summary" onclick="toggleSetupRow(this)">
+<div class="err">
+{html.escape(latest_error)}
+</div>
+"""
+        )
+
+    body.append("""
+<div class="tabs">
+
+<button
+    id="setupsTab"
+    class="tab"
+    onclick="activateTab('setups')">
+    SETUPY
+</button>
+
+<button
+    id="chartTab"
+    class="tab"
+    onclick="activateTab('chart')">
+    WYKRESY
+</button>
+
+</div>
+""")
+
+    body.append("""
+<section
+    id="setups"
+    class="panel">
+
+<div class="setup-list">
+""")
+
+    if not rows:
+
+        body.append(
+            """
+<div class="empty">
+Brak setupów.
+</div>
+"""
+        )
+
+    for row in rows:
+
+        direction_class = (
+            "long"
+            if row["direction"]
+            == "LONG"
+            else "short"
+        )
+
+        if row["exit_time"]:
+            result_display = fmt_r(row["exit_r"])
+            stage_display = row["exit_reason"] or "EXIT"
+        elif row["entry_time"]:
+            result_display = "OTWARTA"
+            stage_display = "ENTRY"
+        elif row["planned_rr"] is not None:
+            result_display = f"RR {float(row['planned_rr']):.2f}"
+            stage_display = row["status"]
+        else:
+            result_display = "—"
+            stage_display = row["status"]
+
+        status_text = row["status"]
+
+        status_class = (
+            "yes"
+            if row["status"] in (
+                "OTWARTA",
+                "ZAMKNIETA"
+            )
+            else "no"
+        )
+
+        max_display = row["position_max_r"]
+        min_display = row["position_min_r"]
+        sl_display = row["position_sl"] or row["setup_sl"]
+
+        timeline_parts = ["H1 SETUP"]
+
+        if row["entry_time"]:
+            timeline_parts.append("ENTRY")
+
+        if row["exit_time"]:
+            timeline_parts.append(stage_display)
+
+        timeline = " → ".join(timeline_parts)
+
+        body.append(
+            f"""
+<div
+    class="setup-item collapsed"
+    data-setup="{row["setup_time"]}">
+
+<div
+    class="setup-summary"
+    onclick="toggleSetupRow(this)">
+
 <div class="setup-main">
-<span>{fmt_ts(row["setup_time"])}</span>
-<span class="{direction_class}">{row["direction"]}</span>
+<span>
+{fmt_ts(row["setup_time"])}
+</span>
+
+<span class="{direction_class}">
+{row["direction"]}
+</span>
 </div>
+
 <div class="setup-summary-right">
-<span class="{status_class}">{status_text}</span>
-<span class="setup-r">{result_display}</span>
-<span class="setup-chevron">›</span>
+
+<span class="{status_class}">
+{status_text}
+</span>
+
+<span class="setup-r">
+{result_display}
+</span>
+
+<span class="setup-chevron">
+›
+</span>
+
 </div>
+
 </div>
 
 <div class="setup-details">
+
 <div class="setup-stage">
 <b>PRZEBIEG</b>
-<span>{html.escape(timeline)}</span>
+<span>{timeline}</span>
 </div>
 
 <div class="setup-grid">
 
-<div class="card"><b>WYNIK</b><span>{result_display}</span></div>
-<div class="card"><b>ETAP</b><span>{html.escape(final_stage)}</span></div>
-<div class="card"><b>PLAN RR</b><span>{fmt_r(row["planned_rr"])}</span></div>
-<div class="card"><b>CEL</b><span>{fmt_num(row["planned_target"])}</span></div>
-<div class="card"><b>SETUP</b><span>{fmt_num(row["setup_price"])}</span></div>
-<div class="card"><b>SL</b><span>{fmt_num(sl_display)}</span></div>
-<div class="card"><b>ENTRY</b><span>{fmt_num(row["entry_price"])}</span></div>
-<div class="card"><b>EXIT</b><span>{fmt_num(row["exit_price"])}</span></div>
-<div class="card"><b>MAX R</b><span>{fmt_r(row["position_max_r"])}</span></div>
-<div class="card"><b>MIN R</b><span>{fmt_r(row["position_min_r"])}</span></div>
-<div class="card"><b>TRAIL R</b><span>{fmt_r(row["trail_r"])}</span></div>
-<div class="card"><b>POWÓD</b><span>{html.escape(row["decision_reason"] or row["exit_reason"] or "—")}</span></div>
+<div class="card">
+<b>WYNIK</b>
+<span>{result_display}</span>
+</div>
+
+<div class="card">
+<b>ETAP</b>
+<span>{stage_display}</span>
+</div>
+
+<div class="card">
+<b>PLAN RR</b>
+<span>{fmt_r(row["planned_rr"])}</span>
+</div>
+
+<div class="card">
+<b>CEL</b>
+<span>{fmt_num(row["planned_target"])}</span>
+</div>
+
+<div class="card">
+<b>SETUP</b>
+<span>{fmt_num(row["setup_price"])}</span>
+</div>
+
+<div class="card">
+<b>SL</b>
+<span>{fmt_num(sl_display)}</span>
+</div>
+
+<div class="card">
+<b>ENTRY</b>
+<span>{fmt_num(row["entry_price"])}</span>
+</div>
+
+<div class="card">
+<b>EXIT</b>
+<span>{fmt_num(row["exit_price"])}</span>
+</div>
+
+<div class="card">
+<b>MAX R</b>
+<span>{fmt_r(max_display)}</span>
+</div>
+
+<div class="card">
+<b>MIN R</b>
+<span>{fmt_r(min_display)}</span>
+</div>
+
+<div class="card">
+<b>TRAIL R</b>
+<span>{fmt_r(row["trail_r"])}</span>
+</div>
+
+<div class="card">
+<b>EXIT</b>
+<span>{html.escape(row["exit_reason"] or "—")}</span>
+</div>
 
 </div>
+
+<div class="setup-note">
+DECYZJA:
+{html.escape(row["decision_reason"] or row["status"])}
+·
+PLAN RR:
+{fmt_r(row["planned_rr"])}
+·
+CEL:
+{fmt_num(row["planned_target"])}
 </div>
+
+</div>
+
 </div>
 """
         )
@@ -2179,7 +3154,7 @@ M5
 <div class="legend">
 
 Świece z MEXC.
-Linie: SETUP, SL, M15 CONF, M5 ENTRY.
+Linie: SETUP, SL, ENTRY, EXIT.
 Pozycja tabeli, strony i wykresu jest zachowywana
 przy odświeżeniu.
 
@@ -3304,7 +4279,7 @@ ${formatR(
 
     info += `
 <div class="diag-title">
-M15 — 16 świec potwierdzenia
+M15 — obserwacja (NIE BLOKUJE WEJŚCIA)
 </div>
 
 <div class="diag-scroll">
@@ -3422,13 +4397,12 @@ ${
 
 
     if(
-        data.setup.status
-        === "POTWIERDZONY"
+        data.markers.entry_time
     ){
 
         info += `
 <div class="diag-title">
-M5 — 8 świec wejścia
+M5 — obserwacja po wejściu
 </div>
 
 <div class="diag-scroll">
@@ -3730,7 +4704,7 @@ async function refreshDashboard(){
         localStorage.getItem(
             TAB_KEY
         )
-        || "confirmed";
+        || "setups";
 
 
     const savedPageY =
@@ -4060,7 +5034,7 @@ window.addEventListener(
             localStorage.getItem(
                 TAB_KEY
             )
-            || "setups";
+            || "confirmed";
 
 
         activateTab(
