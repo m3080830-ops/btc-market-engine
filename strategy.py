@@ -73,10 +73,10 @@ def _trend_structure(rows, direction, lookback=12):
 
 
 def _context_at(rows, ts):
-    r = [x for x in rows if x["time"] <= ts]
-    if len(r) > 1:
-        r = r[:-1]
-    return r
+    # Return candles up to the signal time. The timeframe-specific
+    # context functions apply _closed() themselves, so we do not remove
+    # the last candle here (avoids dropping two candles in history mode).
+    return [x for x in rows if x["time"] <= ts]
 
 
 def _h4_context(h4_rows):
