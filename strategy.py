@@ -102,7 +102,10 @@ def market_context(h1_rows):
 
 
 def _h1_context_at(h1_rows, ts):
-    r = [x for x in _closed(h1_rows) if x["time"] <= ts]
+    # Use only H1 candles that had already closed by the M15 signal time.
+    r = [x for x in h1_rows if x["time"] <= ts]
+    if len(r) > 1:
+        r = r[:-1]
     return market_context(r)
 
 
@@ -233,6 +236,13 @@ def _trend_signal(m15, h1_context):
         and c["high"] >= min(e9[i], e18[i]) - a * LEVEL_ATR_TOLERANCE
     )
     if not near_9_18:
+        return None
+
+    # The retracement may wick through EMA9, but a trend entry must
+    # close on the correct side of EMA18.
+    if direction == "LONG" and c["close"] < e18[i]:
+        return None
+    if direction == "SHORT" and c["close"] > e18[i]:
         return None
 
     # Require that the recent move was directional before the pullback.
@@ -438,8 +448,10 @@ def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
 
 
 def build_entry(setup, m15_rows):
-    r = _closed(m15_rows)
-    for c in r:
+    # The signal is a closed M15 candle. The entry is the open of the
+    # immediately following M15 candle. In live mode that candle may
+    # still be forming, so do not discard it with _closed().
+    for c in sorted(m15_rows, key=lambda x: x["time"]):
         if c["time"] > setup["signal_time"]:
             return {"time": c["time"], "price": c["open"]}
     return None
