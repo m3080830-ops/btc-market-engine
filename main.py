@@ -1901,6 +1901,10 @@ def dashboard():
         except Exception:
             current_prices[symbol] = "—"
 
+    closed_rows = [row for row in rows if row["exit_time"] and row["exit_r"] is not None]
+    net_r = sum(float(row["exit_r"]) for row in closed_rows)
+    trade_count = len(closed_rows)
+
     options = ""
 
     for row in rows:
@@ -2375,6 +2379,14 @@ tbody tr:hover{
     text-align:right;
 }
 
+.setup-chart-link{
+    color:#59a8ff;
+    font-size:11px !important;
+    font-weight:900 !important;
+    cursor:pointer;
+    white-space:nowrap;
+}
+
 .setup-chevron{
     font-size:22px !important;
     line-height:1;
@@ -2770,6 +2782,7 @@ Brak setupów.
 <div class="setup-summary-right">
 <span class="{direction_class}">{model_display}</span>
 <span class="setup-r">{result_display}</span>
+<span class="setup-chart-link" onclick="event.stopPropagation(); openSetupChart({row["id"]})">Wykres →</span>
 <span class="setup-chevron">›</span>
 </div>
 
@@ -2848,6 +2861,24 @@ Brak setupów.
         )
 
     body.append("""
+</div>
+
+<div class="history-summary">
+<div class="summary-head">
+    <div>
+        <div class="summary-title">PODSUMOWANIE HISTORII</div>
+        <div class="summary-note">Tylko zamknięte pozycje.</div>
+    </div>
+    <label class="risk-control">
+        1R = $
+        <input id="riskUsd" type="number" min="0" step="1" value="100" onchange="updateHistorySummary()">
+    </label>
+</div>
+<div class="summary-grid">
+    <div class="card"><b>ZAMKNIĘTE TREJDY</b><span id="summaryTrades">"+trade_count+"</span></div>
+    <div class="card"><b>NETTO R</b><span id="summaryNetR">"+fmt_r(net_r)+"</span></div>
+    <div class="card"><b>NETTO $</b><span id="summaryNetUsd">"+fmt_num(net_r * DEFAULT_RISK_USD, 2)+" $</span></div>
+</div>
 </div>
 </section>
 """)
@@ -3185,7 +3216,40 @@ function formatR(value){
 }
 
 
+function openSetupChart(id){
+    const select = document.getElementById("setupSelect");
+    if(!select){ return; }
+    localStorage.setItem(CHART_SETUP_KEY, String(id));
+    activateTab("chart");
+    setTimeout(function(){
+        select.value = String(id);
+        loadChart(localStorage.getItem(CHART_TF_KEY) || "M15");
+    }, 40);
+}
+
+function updateHistorySummary(){
+    const input = document.getElementById("riskUsd");
+    const netR = document.getElementById("summaryNetR");
+    const netUsd = document.getElementById("summaryNetUsd");
+    if(!input || !netR || !netUsd){ return; }
+    const risk = Math.max(0, Number(input.value) || 0);
+    const r = Number(String(netR.textContent).replace(/[+R]/g, "")) || 0;
+    const usd = r * risk;
+    netUsd.textContent = (usd >= 0 ? "+" : "") + usd.toFixed(2) + " $";
+    localStorage.setItem("crypto_risk_usd_v1", String(risk));
+}
+
+function restoreRiskUsd(){
+    const input = document.getElementById("riskUsd");
+    if(!input){ return; }
+    const saved = localStorage.getItem("crypto_risk_usd_v1");
+    if(saved !== null){ input.value = saved; }
+    updateHistorySummary();
+}
+
 async function initChart(){
+
+    restoreRiskUsd();
 
     const select =
         document.getElementById(
