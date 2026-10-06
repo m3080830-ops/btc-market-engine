@@ -34,7 +34,8 @@ DB_FILE = os.environ.get("DB_FILE", "/data/market_history.db")
 
 TRAIL_ACTIVATION_R = 1.0
 
-H1_HISTORY = 200
+H4_HISTORY = 200
+H1_HISTORY = 300
 M15_HISTORY = 2000
 M5_HISTORY = 2000
 
@@ -1489,10 +1490,11 @@ def get_setups(
 def rebuild_history():
     try:
         for symbol in SYMBOLS:
+            h4 = get_klines(symbol, "Hour4", H4_HISTORY)
             h1 = get_klines(symbol, "Min60", H1_HISTORY)
             m15 = get_klines(symbol, "Min15", M15_HISTORY)
             m5 = get_klines(symbol, "Min5", 4000)
-            found = find_historical_setups(h1, m15)
+            found = find_historical_setups(h4, h1, m15)
             active_until = None
 
             for setup in found:
@@ -1618,11 +1620,12 @@ def live_refresh():
 
     for symbol in SYMBOLS:
         try:
+            h4 = get_klines(symbol, "Hour4", H4_HISTORY)
             h1 = get_klines(symbol, "Min60", H1_HISTORY)
             m15 = get_klines(symbol, "Min15", 500)
             m5 = get_klines(symbol, "Min5", 1000)
 
-            if not h1 or not m15 or not m5:
+            if not h4 or not h1 or not m15 or not m5:
                 continue
 
             with db_conn() as conn:
@@ -1634,7 +1637,7 @@ def live_refresh():
                 ).fetchone()
 
             if not active:
-                setup = find_latest_setup(h1, m15)
+                setup = find_latest_setup(h4, h1, m15)
                 if setup:
                     setup["symbol"] = symbol
                     with db_conn() as conn:
