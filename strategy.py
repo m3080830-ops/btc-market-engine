@@ -334,40 +334,74 @@ def _h1_range_reaction(h1_rows):
     return None
 
 
-def _m15_trigger(m15_rows, direction, after_time):
-    # Trigger must be a CLOSED M15 candle. Entry is the next M15 open.
+def _m15_trigger(
+    m15_rows,
+    direction,
+    after_time,
+    anchor_low=None,
+    anchor_high=None,
+    max_bars=4
+):
+    """
+    M15 is the entry trigger, not a free-standing signal.
+
+    It must:
+      1) happen after the H1 reaction,
+      2) happen close to the H1 reaction zone,
+      3) close in the intended direction,
+      4) contain valid price action.
+
+    This prevents a valid H1 reaction from being followed by an entry
+    several candles later at the top/bottom of the move.
+    """
     r = _closed(m15_rows)
     candidates = [x for x in r if x["time"] > after_time]
-    if len(candidates) == 0:
+    if not candidates:
         return None
 
-    c = candidates[-1]
-    prev = r[:-1]
-    pa = price_action(c, prev, direction)
-    if not pa["ok"]:
+    candidates = candidates[:max_bars]
+    if not candidates:
         return None
 
     e9, e18, e50, e100, av = _ema_state(r)
-    i = len(r) - 1
 
-    # Do not demand perfect EMA alignment on M15. H4/H1 already define
-    # the context. M15 only confirms that price actually turned.
-    if direction == "LONG" and c["close"] <= c["open"]:
-        return None
-    if direction == "SHORT" and c["close"] >= c["open"]:
-        return None
+    for c in candidates:
+        i = r.index(c)
+        a = av[i]
+        prev = r[:i]
+        pa = price_action(c, prev, direction)
+        if not pa["ok"]:
+            continue
 
-    return {
-        "signal_time": c["time"],
-        "direction": direction,
-        "price": c["close"],
-        "model": "TREND_H4_H1_M15" if direction else "M15_TRIGGER",
-        "pa": pa["signals"],
-        "ema9": e9[i],
-        "ema18": e18[i],
-        "ema50": e50[i],
-        "ema100": e100[i]
-    }
+        # The trigger candle itself must interact with the H1 reaction zone.
+        # A PA candle far away from the level is continuation, not our setup.
+        if anchor_low is not None and anchor_high is not None:
+            tolerance = max(a * 0.60, _range(c) * 0.25)
+            touches_zone = (
+                c["low"] <= anchor_high + tolerance
+                and c["high"] >= anchor_low - tolerance
+            )
+            if not touches_zone:
+                continue
+
+        if direction == "LONG" and c["close"] <= c["open"]:
+            continue
+        if direction == "SHORT" and c["close"] >= c["open"]:
+            continue
+
+        return {
+            "signal_time": c["time"],
+            "direction": direction,
+            "price": c["close"],
+            "model": "TREND_H4_H1_M15" if direction else "M15_TRIGGER",
+            "pa": pa["signals"],
+            "ema9": e9[i],
+            "ema18": e18[i],
+            "ema50": e50[i],
+            "ema100": e100[i]
+        }
+
+    return None
 
 
 def _find_h1_setup_before(h1_rows, m15_signal_time, direction):
@@ -396,27 +430,39 @@ def _trend_signal(h4_rows, h1_rows, m15_rows):
     if len(r15) < 110:
         return None
 
-    # Work backwards through recent closed M15 candles. This is robust to
-    # polling timing and still keeps the actual trigger on M15.
-    for idx in range(len(r15) - 1, max(len(r15) - 5, 109), -1):
-        m15_prefix = r15[:idx + 1]
-        trigger = _m15_trigger(m15_prefix, direction, 0)
-        if not trigger:
-            continue
+    # IMPORTANT: H1 reaction comes first. Only then may M15 trigger.
+    h1_setup = _find_h1_setup_before(h1_rows, r15[-1]["time"], direction)
+    if not h1_setup:
+        return None
 
-        h1_setup = _find_h1_setup_before(h1_rows, trigger["signal_time"], direction)
-        if not h1_setup:
-            continue
+    if h1_setup.get("level_type") == "EMA9_18":
+        anchor_low = min(h1_setup["ema9"], h1_setup["ema18"])
+        anchor_high = max(h1_setup["ema9"], h1_setup["ema18"])
+    else:
+        level = h1_setup.get("level")
+        if level is None:
+            return None
+        anchor_low = level
+        anchor_high = level
 
-        trigger["model"] = "TREND_H4_H1_M15"
-        trigger["h4_bias"] = direction
-        trigger["h4_strength"] = h4["strength"]
-        trigger["h1_signal_time"] = h1_setup["signal_time"]
-        trigger["h1_pa"] = h1_setup["pa"]
-        trigger["h1_level_type"] = h1_setup.get("level_type", "EMA9_18")
-        return trigger
+    trigger = _m15_trigger(
+        r15,
+        direction,
+        h1_setup["signal_time"],
+        anchor_low=anchor_low,
+        anchor_high=anchor_high,
+        max_bars=4
+    )
+    if not trigger:
+        return None
 
-    return None
+    trigger["model"] = "TREND_H4_H1_M15"
+    trigger["h4_bias"] = direction
+    trigger["h4_strength"] = h4["strength"]
+    trigger["h1_signal_time"] = h1_setup["signal_time"]
+    trigger["h1_pa"] = h1_setup["pa"]
+    trigger["h1_level_type"] = h1_setup.get("level_type", "EMA9_18")
+    return trigger
 
 
 def _range_signal(h4_rows, h1_rows, m15_rows):
@@ -432,13 +478,24 @@ def _range_signal(h4_rows, h1_rows, m15_rows):
     if len(r15) < 60:
         return None
 
-    # H1 identifies the range level; M15 confirms the reaction.
+    # H1 identifies the range level; M15 confirms the reaction at that level.
     h1_reaction = _h1_range_reaction(h1)
     if not h1_reaction:
         return None
 
     direction = h1_reaction["direction"]
-    trigger = _m15_trigger(r15, direction, h1_reaction["signal_time"])
+    level = h1_reaction.get("level")
+    if level is None:
+        return None
+
+    trigger = _m15_trigger(
+        r15,
+        direction,
+        h1_reaction["signal_time"],
+        anchor_low=level,
+        anchor_high=level,
+        max_bars=4
+    )
     if not trigger:
         return None
 
@@ -447,7 +504,7 @@ def _range_signal(h4_rows, h1_rows, m15_rows):
         "h4_bias": h4.get("bias"),
         "h4_strength": h4.get("strength"),
         "h1_signal_time": h1_reaction["signal_time"],
-        "h1_level": h1_reaction.get("level"),
+        "h1_level": level,
         "h1_pa": h1_reaction["pa"],
     })
     return trigger
