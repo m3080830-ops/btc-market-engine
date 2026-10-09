@@ -2417,39 +2417,62 @@ tbody tr:hover{
 }
 
 @media(max-width:700px){
+    /* Two-row mobile summary prevents narrow columns and wrapped timestamps. */
     .setup-summary{
-        min-height:50px;
-        padding:9px 10px;
+        min-height:0;
+        padding:11px 12px;
+        display:grid;
+        grid-template-columns:minmax(0,1fr);
+        gap:9px;
+        align-items:stretch;
     }
 
     .setup-main{
-        gap:7px;
+        display:grid;
+        grid-template-columns:auto minmax(0,1fr) auto;
+        align-items:center;
+        gap:9px;
+        overflow:visible;
     }
 
     .setup-main > span:first-child{
-        font-size:10px;
+        font-size:11px;
+        white-space:nowrap;
     }
 
     .setup-main > span:nth-child(2){
         font-size:11px;
+        white-space:nowrap;
+        overflow:hidden;
+        text-overflow:ellipsis;
     }
 
     .setup-summary-right{
-        gap:6px;
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        gap:8px;
+        width:100%;
+        min-width:0;
     }
 
     .setup-summary-right > span{
-        font-size:10px;
+        font-size:11px;
+    }
+
+    .setup-summary-right > span:nth-child(1){
+        overflow:hidden;
+        text-overflow:ellipsis;
     }
 
     .setup-r{
-        min-width:45px;
+        min-width:48px;
+        text-align:right;
     }
 
     .setup-grid{
         grid-template-columns:repeat(2,minmax(0,1fr));
     }
-
 
 
     body{
