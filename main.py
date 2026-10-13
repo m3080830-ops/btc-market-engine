@@ -153,6 +153,15 @@ def init_db():
         columns_now = {row[1] for row in c.execute("PRAGMA table_info(setups)").fetchall()}
         if "position_last_candle" not in columns_now:
             c.execute("ALTER TABLE setups ADD COLUMN position_last_candle INTEGER")
+            # Existing open positions were already managed by the previous loop.
+            # Resume from the latest fully closed M5 candle to avoid replaying old bars.
+            last_closed_m5 = (int(time.time()) // 300) * 300 - 300
+            c.execute(
+                """UPDATE setups
+                   SET position_last_candle=?
+                   WHERE entry_time IS NOT NULL AND exit_time IS NULL""",
+                (last_closed_m5,)
+            )
 
         legacy_exists = c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='setups_legacy'").fetchone()
         if legacy_exists:
