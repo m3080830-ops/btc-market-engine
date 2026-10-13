@@ -144,10 +144,15 @@ def init_db():
             pa_trigger TEXT,
             trail_time INTEGER,
             trail_price REAL,
+            position_last_candle INTEGER,
             last_update INTEGER NOT NULL DEFAULT 0,
             UNIQUE(symbol, setup_time)
         )
         """)
+
+        columns_now = {row[1] for row in c.execute("PRAGMA table_info(setups)").fetchall()}
+        if "position_last_candle" not in columns_now:
+            c.execute("ALTER TABLE setups ADD COLUMN position_last_candle INTEGER")
 
         legacy_exists = c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='setups_legacy'").fetchone()
         if legacy_exists:
@@ -1264,15 +1269,20 @@ def simulate_position(
     max_r = 0.0
     min_r = 0.0
     trail_r = None
+    trail_time = None
+    trail_price = None
+    last_candle = None
 
     exit_time = None
     exit_price = None
     reason = None
 
+    closed_m15 = closed(m15_rows)
     for c in closed(m5_rows):
 
         if c["time"] < entry["time"]:
             continue
+        last_candle = c["time"]
 
         hi_r = r_value(
             setup["direction"],
@@ -1324,8 +1334,8 @@ def simulate_position(
 
             recent = [
                 x
-                for x in closed(m15_rows)
-                if x["time"] <= c["time"]
+                for x in closed_m15
+                if entry["time"] <= x["time"] <= c["time"]
             ][-3:]
 
             if len(recent) == 3:
@@ -1343,6 +1353,8 @@ def simulate_position(
                     ):
 
                         sl = new_stop
+                        trail_time = c["time"]
+                        trail_price = new_stop
 
                 else:
 
@@ -1357,6 +1369,8 @@ def simulate_position(
                     ):
 
                         sl = new_stop
+                        trail_time = c["time"]
+                        trail_price = new_stop
 
             trail_r = r_value(
                 setup["direction"],
@@ -1390,7 +1404,7 @@ def simulate_position(
         )
 
     return {
-        "sl": original_sl,
+        "sl": sl,
         "exit_time": exit_time,
         "exit_price": exit_price,
         "reason": reason,
@@ -1406,7 +1420,10 @@ def simulate_position(
         ),
         "max_r": max_r,
         "min_r": min_r,
-        "trail_r": trail_r
+        "trail_r": trail_r,
+        "trail_time": trail_time,
+        "trail_price": trail_price,
+        "last_candle": last_candle
     }
 
 
@@ -1530,7 +1547,11 @@ def rebuild_history():
                         exit_time=sim["exit_time"], exit_price=sim["exit_price"],
                         exit_reason=sim["reason"], exit_r=sim["exit_r"],
                         position_max_r=sim["max_r"], position_min_r=sim["min_r"],
-                        trail_r=sim["trail_r"]
+                        trail_r=sim["trail_r"],
+                        position_sl=sim["sl"],
+                        trail_time=sim["trail_time"],
+                        trail_price=sim["trail_price"],
+                        position_last_candle=sim["last_candle"]
                     )
                     if sim["exit_time"]:
                         active_until = sim["exit_time"]
@@ -1572,39 +1593,47 @@ def manage_open_positions(symbol, m5, m15):
         exit_price = None
         reason = None
 
-        for c in closed(m5):
-            if c["time"] < row["entry_time"]:
-                continue
-            hi_r = r_value(direction, entry, original_sl, c["high"])
-            lo_r = r_value(direction, entry, original_sl, c["low"])
-            max_r = max(max_r, hi_r, lo_r)
-            min_r = min(min_r, hi_r, lo_r)
+        last_candle = row["position_last_candle"]
+        processed_candle = last_candle
+        closed_m5 = closed(m5)
+        closed_m15 = closed(m15)
 
-            if direction == "LONG" and c["low"] <= current_sl:
-                exit_time, exit_price, reason = c["time"], current_sl, "SL"
+        for candle in closed_m5:
+            candle_time = candle["time"]
+            if candle_time < row["entry_time"] or (last_candle is not None and candle_time <= last_candle):
+                continue
+            hi_r = r_value(direction, entry, original_sl, candle["high"])
+            lo_r = r_value(direction, entry, original_sl, candle["low"])
+            max_r = max(max_r, hi_r, lo_r)
+            min_r = min(min_r, lo_r, hi_r)
+            processed_candle = candle_time
+
+            if direction == "LONG" and candle["low"] <= current_sl:
+                exit_time, exit_price, reason = candle_time, current_sl, "SL"
                 break
-            if direction == "SHORT" and c["high"] >= current_sl:
-                exit_time, exit_price, reason = c["time"], current_sl, "SL"
+            if direction == "SHORT" and candle["high"] >= current_sl:
+                exit_time, exit_price, reason = candle_time, current_sl, "SL"
                 break
 
             if max_r >= TRAIL_ACTIVATION_R:
-                recent = [x for x in closed(m15) if row["entry_time"] <= x["time"] <= c["time"]][-3:]
+                recent = [x for x in closed_m15 if row["entry_time"] <= x["time"] <= candle_time][-3:]
                 if len(recent) == 3:
                     if direction == "LONG":
                         new_stop = min(x["low"] for x in recent)
-                        if new_stop > current_sl and new_stop < c["close"]:
+                        if new_stop > current_sl and new_stop < candle["close"]:
                             current_sl = new_stop
-                            update_setup(row["setup_time"], symbol=symbol, trail_time=c["time"], trail_price=new_stop)
+                            update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=new_stop)
                     else:
                         new_stop = max(x["high"] for x in recent)
-                        if new_stop < current_sl and new_stop > c["close"]:
+                        if new_stop < current_sl and new_stop > candle["close"]:
                             current_sl = new_stop
-                            update_setup(row["setup_time"], symbol=symbol, trail_time=c["time"], trail_price=new_stop)
-                trail_r = r_value(direction, entry, original_sl, c["close"])
+                            update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=new_stop)
+                trail_r = r_value(direction, entry, original_sl, candle["close"])
 
         fields = {
             "position_max_r": max_r, "position_min_r": min_r,
-            "trail_r": trail_r, "position_sl": current_sl
+            "trail_r": trail_r, "position_sl": current_sl,
+            "position_last_candle": processed_candle
         }
         if exit_time is not None:
             fields.update(
