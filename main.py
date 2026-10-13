@@ -2925,7 +2925,7 @@ Brak setupów.
 """
         )
 
-    body.append("""
+    summary_html = """
 </div>
 
 <div class="history-summary">
@@ -2936,17 +2936,23 @@ Brak setupów.
     </div>
     <label class="risk-control">
         1R = $
-        <input id="riskUsd" type="number" min="0" step="0.01" value="{DEFAULT_RISK_USD:g}" oninput="updateHistorySummary()">
+        <input id="riskUsd" type="number" min="0" step="0.01" value="__DEFAULT_RISK_USD__" oninput="updateHistorySummary()">
     </label>
 </div>
 <div class="summary-grid">
-    <div class="card"><b>ZAMKNIĘTE TREJDY</b><span id="summaryTrades">{trade_count}</span></div>
-    <div class="card"><b>NETTO R</b><span id="summaryNetR" data-net-r="{net_r:.8f}">{fmt_r(net_r)}</span></div>
-    <div class="card"><b>NETTO $</b><span id="summaryNetUsd">{fmt_num(net_r * DEFAULT_RISK_USD, 2)} $</span></div>
+    <div class="card"><b>ZAMKNIĘTE TREJDY</b><span id="summaryTrades">__TRADE_COUNT__</span></div>
+    <div class="card"><b>NETTO R</b><span id="summaryNetR" data-net-r="__NET_R_RAW__">__NET_R_DISPLAY__</span></div>
+    <div class="card"><b>NETTO $</b><span id="summaryNetUsd">__NET_USD__ $</span></div>
 </div>
 </div>
 </section>
-""")
+"""
+    summary_html = summary_html.replace("__DEFAULT_RISK_USD__", f"{DEFAULT_RISK_USD:g}")
+    summary_html = summary_html.replace("__TRADE_COUNT__", str(trade_count))
+    summary_html = summary_html.replace("__NET_R_RAW__", f"{net_r:.8f}")
+    summary_html = summary_html.replace("__NET_R_DISPLAY__", fmt_r(net_r))
+    summary_html = summary_html.replace("__NET_USD__", fmt_num(net_r * DEFAULT_RISK_USD, 2))
+    body.append(summary_html)
 
     body.append(
         f"""
