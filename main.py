@@ -1339,7 +1339,7 @@ def simulate_position(
             reason = "SL"
             break
 
-        if max_r > TRAIL_ACTIVATION_R:
+        if max_r >= TRAIL_ACTIVATION_R:
 
             recent = [
                 x
