@@ -1767,10 +1767,9 @@ def chart_payload(
         "price": row["setup_price"]
     }
 
-    # History charts are intentionally M15-only.
-    interval = "Min15"
+    tf = "M5" if str(tf).upper() == "M5" else "M15"
+    interval = "Min5" if tf == "M5" else "Min15"
     total = 36
-    tf = "M15"
 
     step = {
         "Min60": 3600,
@@ -1788,16 +1787,11 @@ def chart_payload(
     ]
 
     start_time = min(events)
-    end_time = max(events)
+    end_time = row["exit_time"] or now_ts()
 
     total = min(
-        max(
-            total,
-            11 + int(
-                (end_time - start_time) / step
-            )
-        ),
-        120
+        max(total, 11 + int(max(0, end_time - start_time) / step)),
+        240 if tf == "M5" else 120
     )
 
     candles = chart_candles(
@@ -2945,7 +2939,7 @@ Brak setupów.
 
 </select>
 
-<button class="tf active" onclick="loadChart('M15')">M15</button>
+<button class="tf active" onclick="loadChart('M5')">M5</button>
 
 <button
     class="tf"
@@ -3265,7 +3259,7 @@ function openSetupChart(id){
     activateTab("chart");
     setTimeout(function(){
         select.value = String(id);
-        loadChart(localStorage.getItem(CHART_TF_KEY) || "M15");
+        loadChart(localStorage.getItem(CHART_TF_KEY) || "M5");
     }, 40);
 }
 
@@ -3927,8 +3921,14 @@ function renderChart(
 
     // Clean trade visualization:
     // vertical lines = ENTRY / EXIT
-    // horizontal lines = initial SL / TRAILING SL
-    // No SETUP/M15/ENTRY horizontal lines.
+    // horizontal lines = ENTRY / initial SL / TRAILING SL.
+
+    horizontalLine(
+        data.markers.entry_price,
+        "#f2cc60",
+        "ENTRY",
+        true
+    );
 
     horizontalLine(
         data.markers.sl,
