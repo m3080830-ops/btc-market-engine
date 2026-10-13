@@ -33,6 +33,9 @@ POLL_SECONDS = 30
 DB_FILE = os.environ.get("DB_FILE", "/data/market_history.db")
 
 TRAIL_ACTIVATION_R = 1.0
+DEFAULT_RISK_USD = 100.0
+# Hide website history dated 10 October 2026 and earlier (UTC).
+HISTORY_CUTOFF_TS = int(datetime(2026, 10, 11, tzinfo=timezone.utc).timestamp())
 
 H4_HISTORY = 200
 H1_HISTORY = 300
@@ -1493,10 +1496,22 @@ def update_setup(setup_time, symbol=None, **fields):
 
 
 def get_setups(
-    limit=100
+    limit=200,
+    since_ts=None
 ):
 
     with db_conn() as c:
+        if since_ts is not None:
+            return c.execute(
+                """
+                SELECT *
+                FROM setups
+                WHERE setup_time >= ?
+                ORDER BY setup_time DESC, id DESC
+                LIMIT ?
+                """,
+                (int(since_ts), int(limit))
+            ).fetchall()
 
         return c.execute(
             """
@@ -1505,7 +1520,7 @@ def get_setups(
             ORDER BY setup_time DESC, id DESC
             LIMIT ?
             """,
-            (limit,)
+            (int(limit),)
         ).fetchall()
 
 
@@ -1907,7 +1922,8 @@ def chart_payload(
 def dashboard():
 
     rows = get_setups(
-        200
+        1000,
+        since_ts=HISTORY_CUTOFF_TS
     )
 
     latest_error = state_get(
@@ -2920,12 +2936,12 @@ Brak setupów.
     </div>
     <label class="risk-control">
         1R = $
-        <input id="riskUsd" type="number" min="0" step="1" value="100" onchange="updateHistorySummary()">
+        <input id="riskUsd" type="number" min="0" step="0.01" value="{DEFAULT_RISK_USD:g}" oninput="updateHistorySummary()">
     </label>
 </div>
 <div class="summary-grid">
     <div class="card"><b>ZAMKNIĘTE TREJDY</b><span id="summaryTrades">{trade_count}</span></div>
-    <div class="card"><b>NETTO R</b><span id="summaryNetR">{fmt_r(net_r)}</span></div>
+    <div class="card"><b>NETTO R</b><span id="summaryNetR" data-net-r="{net_r:.8f}">{fmt_r(net_r)}</span></div>
     <div class="card"><b>NETTO $</b><span id="summaryNetUsd">{fmt_num(net_r * DEFAULT_RISK_USD, 2)} $</span></div>
 </div>
 </div>
@@ -3278,7 +3294,7 @@ function updateHistorySummary(){
     const netUsd = document.getElementById("summaryNetUsd");
     if(!input || !netR || !netUsd){ return; }
     const risk = Math.max(0, Number(input.value) || 0);
-    const r = Number(String(netR.textContent).replace(/[+R]/g, "")) || 0;
+    const r = Number(netR.dataset.netR) || 0;
     const usd = r * risk;
     netUsd.textContent = (usd >= 0 ? "+" : "") + usd.toFixed(2) + " $";
     localStorage.setItem("crypto_risk_usd_v1", String(risk));
