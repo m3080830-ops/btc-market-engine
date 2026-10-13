@@ -1943,9 +1943,23 @@ def dashboard():
         except Exception:
             current_prices[symbol] = "—"
 
-    closed_rows = [row for row in rows if row["exit_time"] and row["exit_r"] is not None]
+    closed_rows = [
+        row for row in rows
+        if row["exit_time"] and row["exit_r"] is not None
+    ]
     net_r = sum(float(row["exit_r"]) for row in closed_rows)
-    trade_count = len(closed_rows)
+
+    # NETTO $ is the signed price movement from ENTRY to EXIT,
+    # not R multiplied by an assumed monetary risk amount.
+    net_price_move = sum(
+        (
+            float(row["exit_price"]) - float(row["entry_price"])
+            if row["direction"] == "LONG"
+            else float(row["entry_price"]) - float(row["exit_price"])
+        )
+        for row in closed_rows
+        if row["entry_price"] is not None and row["exit_price"] is not None
+    )
 
     options = ""
 
@@ -2934,24 +2948,16 @@ Brak setupów.
         <div class="summary-title">PODSUMOWANIE HISTORII</div>
         <div class="summary-note">Tylko zamknięte pozycje.</div>
     </div>
-    <label class="risk-control">
-        1R = $
-        <input id="riskUsd" type="number" min="0" step="0.01" value="__DEFAULT_RISK_USD__" oninput="updateHistorySummary()">
-    </label>
 </div>
 <div class="summary-grid">
-    <div class="card"><b>ZAMKNIĘTE TREJDY</b><span id="summaryTrades">__TRADE_COUNT__</span></div>
-    <div class="card"><b>NETTO R</b><span id="summaryNetR" data-net-r="__NET_R_RAW__">__NET_R_DISPLAY__</span></div>
-    <div class="card"><b>NETTO $</b><span id="summaryNetUsd">__NET_USD__ $</span></div>
+    <div class="card"><b>NETTO R</b><span id="summaryNetR">__NET_R_DISPLAY__</span></div>
+    <div class="card"><b>NETTO $ RUCHU CENY</b><span id="summaryNetUsd">__NET_USD__ $</span></div>
 </div>
 </div>
 </section>
 """
-    summary_html = summary_html.replace("__DEFAULT_RISK_USD__", f"{DEFAULT_RISK_USD:g}")
-    summary_html = summary_html.replace("__TRADE_COUNT__", str(trade_count))
-    summary_html = summary_html.replace("__NET_R_RAW__", f"{net_r:.8f}")
     summary_html = summary_html.replace("__NET_R_DISPLAY__", fmt_r(net_r))
-    summary_html = summary_html.replace("__NET_USD__", fmt_num(net_r * DEFAULT_RISK_USD, 2))
+    summary_html = summary_html.replace("__NET_USD__", fmt_num(net_price_move, 2))
     body.append(summary_html)
 
     body.append(
@@ -3295,23 +3301,11 @@ function openSetupChart(id){
 }
 
 function updateHistorySummary(){
-    const input = document.getElementById("riskUsd");
-    const netR = document.getElementById("summaryNetR");
-    const netUsd = document.getElementById("summaryNetUsd");
-    if(!input || !netR || !netUsd){ return; }
-    const risk = Math.max(0, Number(input.value) || 0);
-    const r = Number(netR.dataset.netR) || 0;
-    const usd = r * risk;
-    netUsd.textContent = (usd >= 0 ? "+" : "") + usd.toFixed(2) + " $";
-    localStorage.setItem("crypto_risk_usd_v1", String(risk));
+    // Values are calculated server-side from closed trade records.
 }
 
 function restoreRiskUsd(){
-    const input = document.getElementById("riskUsd");
-    if(!input){ return; }
-    const saved = localStorage.getItem("crypto_risk_usd_v1");
-    if(saved !== null){ input.value = saved; }
-    updateHistorySummary();
+    // Kept as a no-op for compatibility with chart initialization.
 }
 
 async function initChart(){
