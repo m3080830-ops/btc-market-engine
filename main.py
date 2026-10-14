@@ -32,7 +32,9 @@ POLL_SECONDS = 30
 
 DB_FILE = os.environ.get("DB_FILE", "/data/market_history.db")
 
+BREAK_EVEN_ACTIVATION_R = 0.5
 TRAIL_ACTIVATION_R = 1.0
+TRAIL_LOOKBACK_M5 = 3
 DEFAULT_RISK_USD = 100.0
 # Hide website history dated 10 October 2026 and earlier (UTC).
 HISTORY_CUTOFF_TS = int(datetime(2026, 10, 11, tzinfo=timezone.utc).timestamp())
@@ -1342,54 +1344,45 @@ def simulate_position(
             reason = "SL"
             break
 
+        # Protect the position at break-even once it has reached +0.5R.
+        if max_r >= BREAK_EVEN_ACTIVATION_R:
+            be_stop = entry_price
+            if setup["direction"] == "LONG" and be_stop > sl and be_stop < c["close"]:
+                sl = be_stop
+                trail_time = c["time"]
+                trail_price = be_stop
+            elif setup["direction"] == "SHORT" and be_stop < sl and be_stop > c["close"]:
+                sl = be_stop
+                trail_time = c["time"]
+                trail_price = be_stop
+
+        # After +1R, trail behind the recent closed M5 structure.
         if max_r >= TRAIL_ACTIVATION_R:
-
             recent = [
-                x
-                for x in closed_m15
+                x for x in closed(m5_rows)
                 if entry["time"] <= x["time"] <= c["time"]
-            ][-3:]
+            ][-TRAIL_LOOKBACK_M5:]
 
-            if len(recent) == 3:
-
+            if len(recent) == TRAIL_LOOKBACK_M5:
                 if setup["direction"] == "LONG":
-
-                    new_stop = min(
-                        x["low"]
-                        for x in recent
-                    )
-
-                    if (
-                        new_stop > sl
-                        and new_stop < c["close"]
-                    ):
-
+                    new_stop = min(x["low"] for x in recent)
+                    if new_stop > sl and new_stop < c["close"]:
                         sl = new_stop
                         trail_time = c["time"]
                         trail_price = new_stop
-
                 else:
-
-                    new_stop = max(
-                        x["high"]
-                        for x in recent
-                    )
-
-                    if (
-                        new_stop < sl
-                        and new_stop > c["close"]
-                    ):
-
+                    new_stop = max(x["high"] for x in recent)
+                    if new_stop < sl and new_stop > c["close"]:
                         sl = new_stop
                         trail_time = c["time"]
                         trail_price = new_stop
 
-            trail_r = r_value(
-                setup["direction"],
-                entry_price,
-                original_sl,
-                c["close"]
-            )
+        trail_r = r_value(
+            setup["direction"],
+            entry_price,
+            original_sl,
+            c["close"]
+        )
 
     if exit_time is None:
 
@@ -1639,9 +1632,20 @@ def manage_open_positions(symbol, m5, m15):
                 exit_time, exit_price, reason = candle_time, current_sl, "SL"
                 break
 
+            # Move SL to entry after +0.5R; never loosen an existing stop.
+            if max_r >= BREAK_EVEN_ACTIVATION_R:
+                be_stop = entry
+                if direction == "LONG" and be_stop > current_sl and be_stop < candle["close"]:
+                    current_sl = be_stop
+                    update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=be_stop)
+                elif direction == "SHORT" and be_stop < current_sl and be_stop > candle["close"]:
+                    current_sl = be_stop
+                    update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=be_stop)
+
+            # Once +1R is reached, trail behind the latest three closed M5 candles.
             if max_r >= TRAIL_ACTIVATION_R:
-                recent = [x for x in closed_m15 if row["entry_time"] <= x["time"] <= candle_time][-3:]
-                if len(recent) == 3:
+                recent = [x for x in closed_m5 if row["entry_time"] <= x["time"] <= candle_time][-TRAIL_LOOKBACK_M5:]
+                if len(recent) == TRAIL_LOOKBACK_M5:
                     if direction == "LONG":
                         new_stop = min(x["low"] for x in recent)
                         if new_stop > current_sl and new_stop < candle["close"]:
@@ -1652,7 +1656,7 @@ def manage_open_positions(symbol, m5, m15):
                         if new_stop < current_sl and new_stop > candle["close"]:
                             current_sl = new_stop
                             update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=new_stop)
-                trail_r = r_value(direction, entry, original_sl, candle["close"])
+            trail_r = r_value(direction, entry, original_sl, candle["close"])
 
         fields = {
             "position_max_r": max_r, "position_min_r": min_r,
