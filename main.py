@@ -1572,6 +1572,11 @@ def rebuild_history():
                     )
                     if sim["exit_time"]:
                         active_until = sim["exit_time"]
+                    else:
+                        # One open position per instrument: once a historical
+                        # simulation is still open, ignore every later setup
+                        # for this symbol during this rebuild.
+                        active_until = now_ts()
                 update_setup(setup["signal_time"], symbol=symbol, **fields)
 
         state_set("history_rebuilt", now_ts())
