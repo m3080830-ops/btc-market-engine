@@ -1513,7 +1513,7 @@ def rebuild_history():
             for setup in found:
                 setup["symbol"] = symbol
                 entry = find_m5_entry(
-                    m5, setup, {"time": setup["signal_time"]}
+                    m5, setup, {"time": setup["signal_time"] + 900}
                 )
                 if entry is None:
                     continue
@@ -1689,7 +1689,7 @@ def live_refresh():
 
                     if not duplicate:
                         entry = find_m5_entry(
-                            m5, setup, {"time": setup["signal_time"]}
+                            m5, setup, {"time": setup["signal_time"] + 900}
                         )
                         if entry:
                             sl = choose_structural_sl(
