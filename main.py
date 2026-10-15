@@ -1098,62 +1098,83 @@ def find_m5_entry(
     setup,
     confirmation
 ):
-    # M15 remains the setup/confirmation source. M5 refines the entry.
-    r = closed(m5_rows)
-    after = [x for x in r if x["time"] > confirmation["time"]]
-    candidates = after[:M5_ENTRY_CANDLES]
-    if len(r) < 21 or not candidates:
-        return None
 
-    closes = [x["close"] for x in r]
-    e20 = ema(closes, 20)
-    by_time = {x["time"]: i for i, x in enumerate(r)}
-    all_rows = sorted(m5_rows, key=lambda x: x["time"])
+    r = closed(m5_rows)
+
+    after = [
+        x
+        for x in r
+        if x["time"]
+        > confirmation["time"]
+    ]
+
+    candidates = after[
+        :M5_ENTRY_CANDLES
+    ]
+
+    closes = [
+        x["close"]
+        for x in r
+    ]
+    e20 = ema(
+        closes,        20
+    )
+
+    by_time = {
+        x["time"]: i
+        for i, x in enumerate(r)
+    }
 
     for c in candidates:
-        i = by_time[c["time"]]
+
+        i = by_time[
+            c["time"]
+        ]
+
         if i < 3:
             continue
 
-        prior = r[i - 3:i]
-        high3 = max(x["high"] for x in prior)
-        low3 = min(x["low"] for x in prior)
+        high3 = max(
+            x["high"]
+            for x in r[i - 3:i]
+        )
+
+        low3 = min(
+            x["low"]
+            for x in r[i - 3:i]
+        )
 
         if setup["direction"] == "LONG":
+
             ok = (
-                c["close"] > e20[i]
-                and c["close"] > c["open"]
-                and c["close"] >= high3
+                c["close"]
+                > e20[i]
+                and c["close"]
+                > c["open"]
             )
+
         else:
+
             ok = (
-                c["close"] < e20[i]
-                and c["close"] < c["open"]
-                and c["close"] <= low3
+                c["close"]
+                < e20[i]
+                and c["close"]
+                < c["open"]
             )
 
-        if not ok:
-            continue
+        if (
+            ok
+            and i + 1 < len(r)
+        ):
 
-        next_candle = next((x for x in all_rows if x["time"] > c["time"]), None)
-        if next_candle is None:
-            continue
-
-        # Avoid chasing an already-extended move: skip if entry is too far
-        # from the M5 confirmation close relative to recent M5 volatility.
-        recent_ranges = [x["high"] - x["low"] for x in r[max(0, i - 13):i + 1]]
-        recent_ranges = sorted(recent_ranges)
-        median_range = recent_ranges[len(recent_ranges) // 2] if recent_ranges else 0
-        if median_range > 0 and abs(next_candle["open"] - c["close"]) > median_range * 1.5:
-            continue
-
-        return {
-            "signal_time": c["time"],
-            "time": next_candle["time"],
-            "price": next_candle["open"]
-        }
+            return {
+                "signal_time": c["time"],
+                "time": r[i + 1]["time"],
+                "price": r[i + 1]["open"]
+            }
 
     return None
+
 
 # ============================================================
 # R CALCULATIONS
@@ -1512,17 +1533,12 @@ def rebuild_history():
 
             for setup in found:
                 setup["symbol"] = symbol
-                entry = find_m5_entry(
-                    m5, setup, {"time": setup["signal_time"] + 900}
-                )
+                entry = build_entry(setup, m15)
                 if entry is None:
                     continue
                 if active_until is not None and entry["time"] <= active_until:
                     continue
-                sl = choose_structural_sl(
-                    h1, m15, setup, m5_rows=m5,
-                    entry_time=entry["time"], entry_price=entry["price"]
-                )
+                sl = choose_structural_sl(h1, m15, setup)
                 plan = planned_trade(h1, m15, setup, entry["price"], sl)
                 if sl is None or plan is None or plan["rr"] < MIN_SETUP_RR:
                     continue
@@ -1688,14 +1704,9 @@ def live_refresh():
                         ).fetchone()
 
                     if not duplicate:
-                        entry = find_m5_entry(
-                            m5, setup, {"time": setup["signal_time"] + 900}
-                        )
+                        entry = build_entry(setup, m15)
                         if entry:
-                            sl = choose_structural_sl(
-                                h1, m15, setup, m5_rows=m5,
-                                entry_time=entry["time"], entry_price=entry["price"]
-                            )
+                            sl = choose_structural_sl(h1, m15, setup)
                             plan = planned_trade(h1, m15, setup, entry["price"], sl)
                             if sl is not None and plan is not None and plan["rr"] >= MIN_SETUP_RR:
                                 upsert_setup(setup)
@@ -2968,6 +2979,20 @@ Brak setupów.
 {options}
 
 </select>
+
+<button class="tf active" onclick="loadChart('M5')">M5</button>
+
+<button
+    class="tf"
+    onclick="loadChart('M15')">
+M15
+</button>
+
+<button
+    class="tf"
+    onclick="loadChart('M5')">
+M5
+</button>
 
 </div>
 
