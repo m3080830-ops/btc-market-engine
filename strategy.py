@@ -556,87 +556,109 @@ def find_historical_setups(h4_rows, h1_rows, m15_rows):
     return out
 
 
-def choose_structural_sl(h1_rows, m15_rows, setup):
+def choose_structural_sl(
+    h1_rows,
+    m15_rows,
+    setup,
+    m5_rows=None,
+    entry_time=None,
+    entry_price=None
+):
     """
-    Structural SL must sit behind a meaningful level, not a tiny micro-swing.
-
-    Important: this only affects NEW setups. Existing/open trades keep the
-    SL already stored in the database, so changing the rule cannot rewrite
-    or invalidate historical trades.
+    Trend setups use the nearest confirmed M5 pullback swing where available.
+    Range setups retain the prior M15/H1 structural logic.
+    Very wide trend stops are rejected instead of being artificially tightened.
     """
     direction = setup["direction"]
     signal_time = setup["signal_time"]
+    reference_price = entry_price if entry_price is not None else setup["price"]
     m15 = [x for x in _closed(m15_rows) if x["time"] <= signal_time]
     if len(m15) < 20:
         return None
 
-    av = _atr(m15, 14)[-1]
+    av15 = _atr(m15, 14)[-1]
     signal = m15[-1]
     signal_range = _range(signal)
+    buffer15 = av15 * 0.15
+    is_trend = str(setup.get("model", "")).startswith("TREND")
 
-    # Minimum room is volatility/structure based. This prevents an SL from
-    # being only a few ticks behind a nearby micro swing.
-    min_distance = max(
-        av * 0.80,
-        signal_range * 1.25
-    )
-    buffer = av * 0.15
+    if is_trend and m5_rows:
+        cutoff = entry_time if entry_time is not None else signal_time
+        m5 = [x for x in _closed(m5_rows) if x["time"] < cutoff]
+        m5 = m5[-48:]
+        if len(m5) >= 8:
+            av5 = _atr(m5, 14)[-1]
+            buffer5 = av5 * 0.15
+            swing_candidates = []
 
+            # Confirmed 5-candle pivots: two candles on each side.
+            for i in range(max(2, len(m5) - 36), len(m5) - 2):
+                candle = m5[i]
+                if direction == "LONG":
+                    if candle["low"] < m5[i-1]["low"] and candle["low"] < m5[i-2]["low"] and candle["low"] <= m5[i+1]["low"] and candle["low"] <= m5[i+2]["low"]:
+                        level = candle["low"] - buffer5
+                        if level < reference_price:
+                            swing_candidates.append(level)
+                else:
+                    if candle["high"] > m5[i-1]["high"] and candle["high"] > m5[i-2]["high"] and candle["high"] >= m5[i+1]["high"] and candle["high"] >= m5[i+2]["high"]:
+                        level = candle["high"] + buffer5
+                        if level > reference_price:
+                            swing_candidates.append(level)
+
+            if swing_candidates:
+                # Closest valid confirmed swing behind the entry.
+                sl = max(swing_candidates) if direction == "LONG" else min(swing_candidates)
+                risk = abs(reference_price - sl)
+                # Reject outlier risk rather than forcing a stop inside market noise.
+                max_risk = max(av15 * 3.5, signal_range * 3.0)
+                if risk > 0 and risk <= max_risk:
+                    return sl
+                return None
+
+            # No confirmed M5 pullback swing: use the legacy structural method
+            # only if it passes the same wide-risk guard below.
+
+    # Existing structural method is preserved for RANGE and as a guarded
+    # fallback for trend setups without a usable M5 swing.
+    min_distance = max(av15 * 0.80, signal_range * 1.25)
     supports, resistances = _swing_levels(m15, 80)
     candidates = []
 
     if direction == "LONG":
         for level in supports:
-            if level < setup["price"]:
-                sl = level - buffer
-                if setup["price"] - sl >= min_distance:
+            sl = level - buffer15
+            if level < reference_price and reference_price - sl >= min_distance:
+                candidates.append(sl)
+        for level_key in ("h1_level", "level"):
+            level = setup.get(level_key)
+            if level is not None and level < reference_price:
+                sl = level - buffer15
+                if reference_price - sl >= min_distance:
                     candidates.append(sl)
-
-        if setup.get("h1_level") is not None and setup["h1_level"] < setup["price"]:
-            sl = setup["h1_level"] - buffer
-            if setup["price"] - sl >= min_distance:
-                candidates.append(sl)
-
-        if setup.get("level") is not None and setup["level"] < setup["price"]:
-            sl = setup["level"] - buffer
-            if setup["price"] - sl >= min_distance:
-                candidates.append(sl)
-
-        # If the nearest structural level is too close, use a wider recent
-        # structure rather than throwing away the setup immediately.
         if not candidates:
-            wider = min(
-                x["low"] for x in m15[-12:]
-            ) - buffer
-            candidates.append(wider)
-
-        # Prefer the tightest SL that is still structurally meaningful.
-        return max(candidates)
-
-    for level in resistances:
-        if level > setup["price"]:
-            sl = level + buffer
-            if sl - setup["price"] >= min_distance:
+            candidates.append(min(x["low"] for x in m15[-12:]) - buffer15)
+        sl = max(candidates)
+    else:
+        for level in resistances:
+            sl = level + buffer15
+            if level > reference_price and sl - reference_price >= min_distance:
                 candidates.append(sl)
+        for level_key in ("h1_level", "level"):
+            level = setup.get(level_key)
+            if level is not None and level > reference_price:
+                sl = level + buffer15
+                if sl - reference_price >= min_distance:
+                    candidates.append(sl)
+        if not candidates:
+            candidates.append(max(x["high"] for x in m15[-12:]) + buffer15)
+        sl = min(candidates)
 
-    if setup.get("h1_level") is not None and setup["h1_level"] > setup["price"]:
-        sl = setup["h1_level"] + buffer
-        if sl - setup["price"] >= min_distance:
-            candidates.append(sl)
-
-    if setup.get("level") is not None and setup["level"] > setup["price"]:
-        sl = setup["level"] + buffer
-        if sl - setup["price"] >= min_distance:
-            candidates.append(sl)
-
-    if not candidates:
-        wider = max(
-            x["high"] for x in m15[-12:]
-        ) + buffer
-        candidates.append(wider)
-
-    # Prefer the tightest structurally valid SL.
-    return min(candidates)
+    if is_trend:
+        risk = abs(reference_price - sl)
+        max_risk = max(av15 * 3.5, signal_range * 3.0)
+        if risk <= 0 or risk > max_risk:
+            return None
+    return sl
 
 
 def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
