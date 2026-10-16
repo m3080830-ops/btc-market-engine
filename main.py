@@ -41,6 +41,7 @@ HISTORY_CUTOFF_TS = int(datetime(2026, 10, 11, tzinfo=timezone.utc).timestamp())
 
 H4_HISTORY = 200
 H1_HISTORY = 300
+D1_HISTORY = 120
 M15_HISTORY = 2000
 M5_HISTORY = 2000
 
@@ -1526,9 +1527,10 @@ def rebuild_history():
         for symbol in SYMBOLS:
             h4 = get_klines(symbol, "Hour4", H4_HISTORY)
             h1 = get_klines(symbol, "Min60", H1_HISTORY)
+            d1 = get_klines(symbol, "Day1", D1_HISTORY)
             m15 = get_klines(symbol, "Min15", M15_HISTORY)
             m5 = get_klines(symbol, "Min5", 4000)
-            found = find_historical_setups(h4, h1, m15)
+            found = find_historical_setups(h4, h1, m15, d1)
             active_until = None
 
             for setup in found:
@@ -1684,6 +1686,7 @@ def live_refresh():
         try:
             h4 = get_klines(symbol, "Hour4", H4_HISTORY)
             h1 = get_klines(symbol, "Min60", H1_HISTORY)
+            d1 = get_klines(symbol, "Day1", D1_HISTORY)
             m15 = get_klines(symbol, "Min15", 500)
             m5 = get_klines(symbol, "Min5", 1000)
 
@@ -1699,7 +1702,7 @@ def live_refresh():
                 ).fetchone()
 
             if not active:
-                setup = find_latest_setup(h4, h1, m15)
+                setup = find_latest_setup(h4, h1, m15, d1)
                 if setup:
                     setup["symbol"] = symbol
                     with db_conn() as conn:
