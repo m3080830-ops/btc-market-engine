@@ -245,31 +245,36 @@ def _h1_reaction(h1_rows, direction):
     i = len(r) - 1
     c = r[i]
     a = av[i]
+    tolerance = a * H1_REACTION_ATR_TOLERANCE
+
+    # Trend entries must retest an EMA zone, not chase an extended impulse.
+    # EMA9/18 are fast pullback zones; EMA50 is a deeper trend retest.
+    ema_candidates = [
+        ("EMA9_18", (e9[i] + e18[i]) / 2.0),
+        ("EMA50", e50[i]),
+    ]
+    touched = [
+        (name, value) for name, value in ema_candidates
+        if c["low"] <= value + tolerance and c["high"] >= value - tolerance
+    ]
+    if not touched:
+        return None
+
+    # Prefer the EMA closest to the candle close among zones actually touched.
+    level_type, level = min(touched, key=lambda item: abs(c["close"] - item[1]))
 
     if direction == "LONG":
-        near_ema = (
-            c["low"] <= max(e9[i], e18[i]) + a * H1_REACTION_ATR_TOLERANCE
-            and c["high"] >= min(e9[i], e18[i]) - a * H1_REACTION_ATR_TOLERANCE
-        )
-        if not near_ema:
-            return None
-        if c["close"] < e18[i]:
-            return None
-        pa = price_action(c, r[:-1], direction)
-        if not pa["ok"]:
+        # Price must reclaim/hold the retested EMA and show bullish PA.
+        if c["close"] <= level:
             return None
     else:
-        near_ema = (
-            c["high"] >= min(e9[i], e18[i]) - a * H1_REACTION_ATR_TOLERANCE
-            and c["low"] <= max(e9[i], e18[i]) + a * H1_REACTION_ATR_TOLERANCE
-        )
-        if not near_ema:
+        # Price must reject/hold below the retested EMA and show bearish PA.
+        if c["close"] >= level:
             return None
-        if c["close"] > e18[i]:
-            return None
-        pa = price_action(c, r[:-1], direction)
-        if not pa["ok"]:
-            return None
+
+    pa = price_action(c, r[:-1], direction)
+    if not pa["ok"]:
+        return None
 
     return {
         "signal_time": c["time"],
@@ -280,7 +285,8 @@ def _h1_reaction(h1_rows, direction):
         "ema18": e18[i],
         "ema50": e50[i],
         "ema100": e100[i],
-        "level_type": "EMA9_18"
+        "level_type": level_type,
+        "level": level,
     }
 
 
@@ -420,7 +426,38 @@ def _find_h1_setup_before(h1_rows, m15_signal_time, direction):
     return None
 
 
-def _trend_signal(h4_rows, h1_rows, m15_rows):
+def _d1_ema50_conflict(d1_rows, direction, price, signal_time):
+    """
+    Protect trend entries around D1 EMA50.
+    Require a completed daily candle to confirm a break through EMA50 before
+    taking a trade on the opposite side while price is still near that level.
+    """
+    if not d1_rows:
+        return False
+
+    daily = [x for x in _closed(_context_at(d1_rows, signal_time))]
+    if len(daily) < 55:
+        return False
+
+    closes = [x["close"] for x in daily]
+    e50 = _ema(closes, 50)
+    av = _atr(daily, 14)
+    i = len(daily) - 1
+    ema50 = e50[i]
+    atr_d1 = av[i]
+    if atr_d1 <= 0 or abs(price - ema50) > atr_d1 * 0.35:
+        return False
+
+    # Near the D1 EMA50, do not short while D1 still closes above it,
+    # and do not long while D1 still closes below it.
+    if direction == "SHORT" and daily[i]["close"] > ema50:
+        return True
+    if direction == "LONG" and daily[i]["close"] < ema50:
+        return True
+    return False
+
+
+def _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows=None):
     h4 = _h4_context(h4_rows)
     if h4["bias"] is None:
         return None
@@ -438,6 +475,9 @@ def _trend_signal(h4_rows, h1_rows, m15_rows):
     if h1_setup.get("level_type") == "EMA9_18":
         anchor_low = min(h1_setup["ema9"], h1_setup["ema18"])
         anchor_high = max(h1_setup["ema9"], h1_setup["ema18"])
+    elif h1_setup.get("level_type") == "EMA50":
+        anchor_low = h1_setup["ema50"]
+        anchor_high = h1_setup["ema50"]
     else:
         level = h1_setup.get("level")
         if level is None:
@@ -454,6 +494,13 @@ def _trend_signal(h4_rows, h1_rows, m15_rows):
         max_bars=4
     )
     if not trigger:
+        return None
+
+    # Do not enter directly into a nearby D1 EMA50 reaction unless the daily
+    # close has confirmed a break through that level in the trade direction.
+    if _d1_ema50_conflict(
+        d1_rows, direction, trigger["price"], trigger["signal_time"]
+    ):
         return None
 
     trigger["model"] = "TREND_H4_H1_M15"
@@ -510,21 +557,21 @@ def _range_signal(h4_rows, h1_rows, m15_rows):
     return trigger
 
 
-def find_latest_setup(h4_rows, h1_rows, m15_rows):
+def find_latest_setup(h4_rows, h1_rows, m15_rows, d1_rows=None):
     # New hierarchy:
     # H4 context -> H1 setup -> M15 trigger -> next M15 open.
     r15 = _closed(m15_rows)
     if len(r15) < 120:
         return None
 
-    trend = _trend_signal(h4_rows, h1_rows, m15_rows)
+    trend = _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows)
     if trend:
         return trend
 
     return _range_signal(h4_rows, h1_rows, m15_rows)
 
 
-def find_historical_setups(h4_rows, h1_rows, m15_rows):
+def find_historical_setups(h4_rows, h1_rows, m15_rows, d1_rows=None):
     r15 = _closed(m15_rows)
     if len(r15) < 120:
         return []
@@ -540,7 +587,8 @@ def find_historical_setups(h4_rows, h1_rows, m15_rows):
         h1_at = _context_at(h1_rows, signal_time)
         m15_prefix = r15[:i + 1]
 
-        signal = _trend_signal(h4_at, h1_at, m15_prefix)
+        d1_at = _context_at(d1_rows, signal_time) if d1_rows else None
+        signal = _trend_signal(h4_at, h1_at, m15_prefix, d1_at)
         if signal is None:
             signal = _range_signal(h4_at, h1_at, m15_prefix)
 
