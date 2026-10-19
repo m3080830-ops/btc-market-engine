@@ -349,16 +349,11 @@ def _m15_trigger(
     max_bars=4
 ):
     """
-    M15 is the entry trigger, not a free-standing signal.
+    M15 is a veto check, not a second setup filter.
 
-    It must:
-      1) happen after the H1 reaction,
-      2) happen close to the H1 reaction zone,
-      3) close in the intended direction,
-      4) contain valid price action.
-
-    This prevents a valid H1 reaction from being followed by an entry
-    several candles later at the top/bottom of the move.
+    It must happen after the H1 reaction and remain close to the H1 zone.
+    Do not demand a bullish/bearish pattern or a candle in trade direction.
+    Reject only when the closed M15 candle shows a clear opposing signal.
     """
     r = _closed(m15_rows)
     candidates = [x for x in r if x["time"] > after_time]
@@ -375,12 +370,9 @@ def _m15_trigger(
         i = r.index(c)
         a = av[i]
         prev = r[:i]
-        pa = price_action(c, prev, direction)
-        if not pa["ok"]:
-            continue
 
-        # The trigger candle itself must interact with the H1 reaction zone.
-        # A PA candle far away from the level is continuation, not our setup.
+        # Keep the existing H1-zone proximity guard. M15 should not trigger
+        # an entry after price has already moved far away from the setup.
         if anchor_low is not None and anchor_high is not None:
             tolerance = max(a * 0.60, _range(c) * 0.25)
             touches_zone = (
@@ -390,11 +382,15 @@ def _m15_trigger(
             if not touches_zone:
                 continue
 
-        if direction == "LONG" and c["close"] <= c["open"]:
-            continue
-        if direction == "SHORT" and c["close"] >= c["open"]:
+        # Veto only a clear signal in the opposite direction. A neutral,
+        # small, or same-direction candle is sufficient; no positive PA
+        # pattern or matching candle colour is required.
+        opposite = "SHORT" if direction == "LONG" else "LONG"
+        opposing_pa = price_action(c, prev, opposite)
+        if opposing_pa["ok"]:
             continue
 
+        pa = price_action(c, prev, direction)
         return {
             "signal_time": c["time"],
             "direction": direction,
