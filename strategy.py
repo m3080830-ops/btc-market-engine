@@ -113,25 +113,35 @@ def _h4_context(h4_rows):
     if short_strong:
         return {"regime": "TREND", "bias": "SHORT", "strength": "STRONG"}
 
-    # Soft bias: do not require a perfect EMA stack, but also do not treat
-    # EMA ordering alone as a trend when price/structure is recovering against it.
+    # Soft directional regime: preserve weak trends even when fast EMAs
+    # temporarily cross during a pullback. EMA structure, slopes, price
+    # position, and recent swing structure are considered together.
     rising_price = r[i]["close"] > r[i - 3]["close"]
     falling_price = r[i]["close"] < r[i - 3]["close"]
     long_structure = _trend_structure(r, "LONG", lookback=8)
     short_structure = _trend_structure(r, "SHORT", lookback=8)
+    slow_bearish = (
+        e50[i] < e100[i]
+        and e100[i] <= e100[i - 3]
+    )
+    slow_bullish = (
+        e50[i] > e100[i]
+        and e100[i] >= e100[i - 3]
+    )
 
     long_bias = (
-        e9[i] > e18[i]
-        and e9[i] >= e9[i - 3]
-        and (r[i]["close"] >= e50[i] or (rising_price and long_structure))
-        and not (falling_price and short_structure and r[i]["close"] < e50[i])
-    )
+        (e9[i] > e18[i] and e9[i] >= e9[i - 3]
+         and (r[i]["close"] >= e50[i] or (rising_price and long_structure)))
+        or (slow_bullish and r[i]["close"] > e50[i]
+            and (rising_price or long_structure))
+    ) and not (falling_price and short_structure and r[i]["close"] < e50[i])
+
     short_bias = (
-        e9[i] < e18[i]
-        and e9[i] <= e9[i - 3]
-        and (r[i]["close"] <= e50[i] or (falling_price and short_structure))
-        and not (rising_price and long_structure and r[i]["close"] > e50[i])
-    )
+        (e9[i] < e18[i] and e9[i] <= e9[i - 3]
+         and (r[i]["close"] <= e50[i] or (falling_price and short_structure)))
+        or (slow_bearish and r[i]["close"] < e50[i]
+            and (falling_price or short_structure))
+    ) and not (rising_price and long_structure and r[i]["close"] > e50[i])
 
     if long_bias and not short_bias:
         return {"regime": "BIAS", "bias": "LONG", "strength": "SOFT"}
@@ -563,7 +573,9 @@ def _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows=None):
 
 def _range_signal(h4_rows, h1_rows, m15_rows):
     h4 = _h4_context(h4_rows)
-    if h4["regime"] == "TREND":
+    # Range entries are reserved for genuinely neutral H4 context.
+    # A soft directional bias belongs to the trend/pullback model, not RANGE.
+    if h4["regime"] != "NEUTRAL" or h4.get("bias") is not None:
         return None
 
     h1 = _closed(h1_rows)
