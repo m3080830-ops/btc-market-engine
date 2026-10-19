@@ -113,10 +113,25 @@ def _h4_context(h4_rows):
     if short_strong:
         return {"regime": "TREND", "bias": "SHORT", "strength": "STRONG"}
 
-    # A softer bias prevents H4 from killing good H1/M15 setups merely
-    # because the four EMAs are not perfectly stacked.
-    long_bias = e9[i] > e18[i] and e18[i] > e100[i] and e9[i] >= e9[i - 3]
-    short_bias = e9[i] < e18[i] and e18[i] < e100[i] and e9[i] <= e9[i - 3]
+    # Soft bias: do not require a perfect EMA stack, but also do not treat
+    # EMA ordering alone as a trend when price/structure is recovering against it.
+    rising_price = r[i]["close"] > r[i - 3]["close"]
+    falling_price = r[i]["close"] < r[i - 3]["close"]
+    long_structure = _trend_structure(r, "LONG", lookback=8)
+    short_structure = _trend_structure(r, "SHORT", lookback=8)
+
+    long_bias = (
+        e9[i] > e18[i]
+        and e9[i] >= e9[i - 3]
+        and (r[i]["close"] >= e50[i] or (rising_price and long_structure))
+        and not (falling_price and short_structure and r[i]["close"] < e50[i])
+    )
+    short_bias = (
+        e9[i] < e18[i]
+        and e9[i] <= e9[i - 3]
+        and (r[i]["close"] <= e50[i] or (falling_price and short_structure))
+        and not (rising_price and long_structure and r[i]["close"] > e50[i])
+    )
 
     if long_bias and not short_bias:
         return {"regime": "BIAS", "bias": "LONG", "strength": "SOFT"}
@@ -414,10 +429,48 @@ def _find_h1_setup_before(h1_rows, m15_signal_time, direction):
     if len(r) < 60:
         return None
 
-    for end in range(len(r), max(len(r) - 4, 60), -1):
+    # Search a small recent window, but never reuse a stale H1 reaction if
+    # later closed candles have clearly moved against it.
+    for end in range(len(r), max(len(r) - 3, 60), -1):
         prefix = r[:end]
         reaction = _h1_reaction(prefix, direction)
-        if reaction:
+        if not reaction:
+            continue
+
+        reaction_idx = next(
+            (j for j, candle in enumerate(r) if candle["time"] == reaction["signal_time"]),
+            None
+        )
+        if reaction_idx is None:
+            continue
+
+        later = r[reaction_idx + 1:]
+        # A reaction is still usable if the following H1 candles have not
+        # materially invalidated it. Avoid strict candle-colour requirements.
+        invalidated = False
+        for candle in later:
+            body = _body(candle)
+            rng = _range(candle)
+            if direction == "SHORT":
+                strong_bullish = (
+                    candle["close"] > candle["open"]
+                    and body / rng >= 0.55
+                    and candle["close"] > reaction["level"] + _atr(r, 14)[reaction_idx] * 0.15
+                )
+                if strong_bullish:
+                    invalidated = True
+                    break
+            else:
+                strong_bearish = (
+                    candle["close"] < candle["open"]
+                    and body / rng >= 0.55
+                    and candle["close"] < reaction["level"] - _atr(r, 14)[reaction_idx] * 0.15
+                )
+                if strong_bearish:
+                    invalidated = True
+                    break
+
+        if not invalidated:
             return reaction
     return None
 
