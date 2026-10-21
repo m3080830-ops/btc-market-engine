@@ -32,8 +32,10 @@ POLL_SECONDS = 30
 
 DB_FILE = os.environ.get("DB_FILE", "/data/market_history.db")
 
-# Start swing-structure trailing from M1 after price reaches +0.5R.
-TRAIL_ACTIVATION_R = 0.5
+# At +0.5R protect -0.5R; M1 swing trailing starts at +0.7R.
+SL_PROTECT_ACTIVATION_R = 0.5
+SL_PROTECT_LOCK_R = -0.5
+TRAIL_ACTIVATION_R = 0.7
 M1_SWING_LEFT = 2
 M1_SWING_RIGHT = 2
 M1_HISTORY = 30000
@@ -1323,7 +1325,7 @@ def simulate_position(
         max_r = max(max_r, hi_r, lo_r)
         min_r = min(min_r, hi_r, lo_r)
 
-        # Test the stop that was already active before this candle.
+        # Test the stop that was active before this candle.
         if direction == "LONG" and candle["low"] <= sl:
             exit_time, exit_price, reason = candle["time"], sl, "SL"
             break
@@ -1331,7 +1333,18 @@ def simulate_position(
             exit_time, exit_price, reason = candle["time"], sl, "SL"
             break
 
-        # Start trailing immediately after +0.5R; no automatic break-even move.
+        # At +0.5R, protect -0.5R; never loosen a tighter stop.
+        risk = abs(entry_price - original_sl)
+        if max_r >= SL_PROTECT_ACTIVATION_R:
+            protected_sl = entry_price - SL_PROTECT_LOCK_R * risk if direction == "LONG" else entry_price + SL_PROTECT_LOCK_R * risk
+            if direction == "LONG" and protected_sl > sl:
+                sl = protected_sl
+                trail_time, trail_price = candle["time"], sl
+            elif direction == "SHORT" and protected_sl < sl:
+                sl = protected_sl
+                trail_time, trail_price = candle["time"], sl
+
+        # M1 swing trailing activates only after +0.7R.
         if max_r >= TRAIL_ACTIVATION_R:
             if direction == "LONG":
                 valid = [
@@ -1600,7 +1613,18 @@ def manage_open_positions(symbol, m1, m15):
                 exit_time, exit_price, reason = candle_time, current_sl, "SL"
                 break
 
-            # Activate trailing at +0.5R using only already-confirmed M1 swings.
+            # At +0.5R, protect -0.5R; never loosen a tighter stop.
+            risk = abs(entry - original_sl)
+            if max_r >= SL_PROTECT_ACTIVATION_R:
+                protected_sl = entry - SL_PROTECT_LOCK_R * risk if direction == "LONG" else entry + SL_PROTECT_LOCK_R * risk
+                if direction == "LONG" and protected_sl > current_sl:
+                    current_sl = protected_sl
+                    update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=current_sl)
+                elif direction == "SHORT" and protected_sl < current_sl:
+                    current_sl = protected_sl
+                    update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=current_sl)
+
+            # M1 swing trailing activates only after +0.7R.
             if max_r >= TRAIL_ACTIVATION_R:
                 if direction == "LONG":
                     valid = [
@@ -2248,7 +2272,7 @@ tbody tr:hover{
 
 .chart-scroll{
     position:relative;
-    overflow:auto;
+    overflow:hidden;
     border:1px solid var(--line);
     border-radius:18px;
     background:#090c10;
@@ -2281,8 +2305,9 @@ tbody tr:hover{
 
 #chart{
     display:block;
-    height:400px;
-    min-width:900px;
+    width:100%;
+    height:430px;
+    min-width:0;
 }
 
 .info{
@@ -3485,10 +3510,9 @@ function renderChart(
     }
 
 
-    const width = Math.max(1000, candles.length * 7.0);
-
-    const height =
-        430;
+    // Responsive width fills the visible chart without horizontal panning.
+    const width = Math.max(320, Math.floor(scroll.clientWidth - 72));
+    const height = 430;
 
 
     const left =
@@ -3964,16 +3988,8 @@ function renderChart(
         "#8b949e",
         "WYJŚCIE"
     );
-    svg.setAttribute(
-        "width",
-        width
-    );
-
-
-    svg.setAttribute(
-        "height",
-        height
-    );
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", String(height));
 
 
     svg.setAttribute(
@@ -4162,15 +4178,9 @@ const chartScroll =
 
 if(chartScroll){
 
-    chartScroll.onscroll =
-        () => {
-
-            localStorage.setItem(
-                CHART_SCROLL_KEY,
-                String(
-                    chartScroll.scrollLeft                )
-            );
-        };
+    chartScroll.onscroll = () => {
+        localStorage.setItem(CHART_SCROLL_KEY, "0");
+    };
 }
 
 
