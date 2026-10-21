@@ -23,8 +23,8 @@ from strategy import (
 # CONFIG
 # ============================================================
 
-SYMBOLS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"]
-SYMBOL_LABELS = {"BTC_USDT": "BTC", "ETH_USDT": "ETH", "SOL_USDT": "SOL"}
+SYMBOLS = ["BTC_USDT", "ETH_USDT"]
+SYMBOL_LABELS = {"BTC_USDT": "BTC", "ETH_USDT": "ETH"}
 
 BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
 
@@ -32,9 +32,11 @@ POLL_SECONDS = 30
 
 DB_FILE = os.environ.get("DB_FILE", "/data/market_history.db")
 
-BREAK_EVEN_ACTIVATION_R = 0.5
-TRAIL_ACTIVATION_R = 1.0
-TRAIL_LOOKBACK_M5 = 3
+# Start swing-structure trailing from M1 after price reaches +0.5R.
+TRAIL_ACTIVATION_R = 0.5
+M1_SWING_LEFT = 2
+M1_SWING_RIGHT = 2
+M1_HISTORY = 30000
 DEFAULT_RISK_USD = 100.0
 # Hide website history dated 10 October 2026 and earlier (UTC).
 HISTORY_CUTOFF_TS = int(datetime(2026, 10, 11, tzinfo=timezone.utc).timestamp())
@@ -192,6 +194,8 @@ def init_db():
             c.execute("DROP TABLE setups_legacy")
 
         c.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
+        # User explicitly removed SOL from the product: purge old SOL history too.
+        c.execute("DELETE FROM setups WHERE symbol='SOL_USDT'")
         c.execute("CREATE INDEX IF NOT EXISTS idx_setups_symbol_time ON setups(symbol, setup_time DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_setups_open ON setups(symbol, entry_time, exit_time)")
         c.commit()
@@ -355,7 +359,7 @@ def get_klines(
 
     total = min(
         int(total),
-        12000
+        30000
     )
 
     result = []
@@ -1258,28 +1262,46 @@ def excursion(
 # POSITION SIMULATION
 # ============================================================
 
+def confirmed_m1_swings(m1_rows):
+    """Return swing points with the candle time at which each swing became confirmable."""
+    rows = closed(m1_rows)
+    lows = []
+    highs = []
+    left = M1_SWING_LEFT
+    right = M1_SWING_RIGHT
+
+    for i in range(left, len(rows) - right):
+        candle = rows[i]
+        neighbours = rows[i-left:i] + rows[i+1:i+right+1]
+        confirmed_at = rows[i + right]["time"]
+
+        if all(candle["low"] < x["low"] for x in neighbours):
+            lows.append({"confirmed_at": confirmed_at, "price": candle["low"]})
+        if all(candle["high"] > x["high"] for x in neighbours):
+            highs.append({"confirmed_at": confirmed_at, "price": candle["high"]})
+
+    return lows, highs
+
+
 def simulate_position(
-    m5_rows,
+    m1_rows,
     m15_rows,
     setup,
     entry,
     initial_sl
 ):
-
+    """Historical simulation using confirmed M1 swing trailing from +0.5R."""
     sl = initial_sl
-
     if sl is None:
         return None
 
-    entry_price = entry["price"]
-
-    if abs(
-        entry_price - sl
-    ) <= 0:
-
+    entry_price = float(entry["price"])
+    original_sl = float(sl)
+    if abs(entry_price - original_sl) <= 0:
         return None
 
-    original_sl = sl
+    direction = setup["direction"]
+    swings_low, swings_high = confirmed_m1_swings(m1_rows)
 
     max_r = 0.0
     min_r = 0.0
@@ -1287,127 +1309,63 @@ def simulate_position(
     trail_time = None
     trail_price = None
     last_candle = None
-
     exit_time = None
     exit_price = None
     reason = None
 
-    closed_m15 = closed(m15_rows)
-    for c in closed(m5_rows):
-
-        if c["time"] < entry["time"]:
+    for candle in closed(m1_rows):
+        if candle["time"] < entry["time"]:
             continue
-        last_candle = c["time"]
+        last_candle = candle["time"]
 
-        hi_r = r_value(
-            setup["direction"],
-            entry_price,
-            original_sl,
-            c["high"]
-        )
+        hi_r = r_value(direction, entry_price, original_sl, candle["high"])
+        lo_r = r_value(direction, entry_price, original_sl, candle["low"])
+        max_r = max(max_r, hi_r, lo_r)
+        min_r = min(min_r, hi_r, lo_r)
 
-        lo_r = r_value(
-            setup["direction"],
-            entry_price,
-            original_sl,
-            c["low"]
-        )
-
-        max_r = max(
-            max_r,
-            hi_r,
-            lo_r
-        )
-
-        min_r = min(
-            min_r,
-            hi_r,
-            lo_r
-        )
-
-        if (
-            setup["direction"] == "LONG"
-            and c["low"] <= sl
-        ):
-
-            exit_time = c["time"]
-            exit_price = sl
-            reason = "SL"
+        # Test the stop that was already active before this candle.
+        if direction == "LONG" and candle["low"] <= sl:
+            exit_time, exit_price, reason = candle["time"], sl, "SL"
+            break
+        if direction == "SHORT" and candle["high"] >= sl:
+            exit_time, exit_price, reason = candle["time"], sl, "SL"
             break
 
-        if (
-            setup["direction"] == "SHORT"
-            and c["high"] >= sl
-        ):
-
-            exit_time = c["time"]
-            exit_price = sl
-            reason = "SL"
-            break
-
-        # Protect the position at break-even once it has reached +0.5R.
-        if max_r >= BREAK_EVEN_ACTIVATION_R:
-            be_stop = entry_price
-            if setup["direction"] == "LONG" and be_stop > sl and be_stop < c["close"]:
-                sl = be_stop
-                trail_time = c["time"]
-                trail_price = be_stop
-            elif setup["direction"] == "SHORT" and be_stop < sl and be_stop > c["close"]:
-                sl = be_stop
-                trail_time = c["time"]
-                trail_price = be_stop
-
-        # After +1R, trail behind the recent closed M5 structure.
+        # Start trailing immediately after +0.5R; no automatic break-even move.
         if max_r >= TRAIL_ACTIVATION_R:
-            recent = [
-                x for x in closed(m5_rows)
-                if entry["time"] <= x["time"] <= c["time"]
-            ][-TRAIL_LOOKBACK_M5:]
+            if direction == "LONG":
+                valid = [
+                    x for x in swings_low
+                    if x["confirmed_at"] < candle["time"]
+                    and x["price"] < candle["close"]
+                ]
+                if valid:
+                    candidate = valid[-1]["price"]
+                    if candidate > sl:
+                        sl = candidate
+                        trail_time = candle["time"]
+                        trail_price = candidate
+            else:
+                valid = [
+                    x for x in swings_high
+                    if x["confirmed_at"] < candle["time"]
+                    and x["price"] > candle["close"]
+                ]
+                if valid:
+                    candidate = valid[-1]["price"]
+                    if candidate < sl:
+                        sl = candidate
+                        trail_time = candle["time"]
+                        trail_price = candidate
 
-            if len(recent) == TRAIL_LOOKBACK_M5:
-                if setup["direction"] == "LONG":
-                    new_stop = min(x["low"] for x in recent)
-                    if new_stop > sl and new_stop < c["close"]:
-                        sl = new_stop
-                        trail_time = c["time"]
-                        trail_price = new_stop
-                else:
-                    new_stop = max(x["high"] for x in recent)
-                    if new_stop < sl and new_stop > c["close"]:
-                        sl = new_stop
-                        trail_time = c["time"]
-                        trail_price = new_stop
-
-        trail_r = r_value(
-            setup["direction"],
-            entry_price,
-            original_sl,
-            c["close"]
-        )
+        trail_r = r_value(direction, entry_price, original_sl, candle["close"])
 
     if exit_time is None:
-
-        closed_m5 = closed(
-            m5_rows
-        )
-
-        if closed_m5:
-
-            trail_r = r_value(
-                setup["direction"],
-                entry_price,
-                original_sl,
-                closed_m5[-1]["close"]
-            )
-
+        rows = closed(m1_rows)
+        if rows:
+            trail_r = r_value(direction, entry_price, original_sl, rows[-1]["close"])
     else:
-
-        trail_r = r_value(
-            setup["direction"],
-            entry_price,
-            original_sl,
-            exit_price
-        )
+        trail_r = r_value(direction, entry_price, original_sl, exit_price)
 
     return {
         "sl": sl,
@@ -1415,14 +1373,8 @@ def simulate_position(
         "exit_price": exit_price,
         "reason": reason,
         "exit_r": (
-            r_value(
-                setup["direction"],
-                entry_price,
-                original_sl,
-                exit_price
-            )
-            if exit_price is not None
-            else None
+            r_value(direction, entry_price, original_sl, exit_price)
+            if exit_price is not None else None
         ),
         "max_r": max_r,
         "min_r": min_r,
@@ -1432,8 +1384,6 @@ def simulate_position(
         "last_candle": last_candle
     }
 
-
-# ============================================================
 # DATABASE SETUP OPERATIONS
 # ============================================================
 
@@ -1529,7 +1479,7 @@ def rebuild_history():
             h1 = get_klines(symbol, "Min60", H1_HISTORY)
             d1 = get_klines(symbol, "Day1", D1_HISTORY)
             m15 = get_klines(symbol, "Min15", M15_HISTORY)
-            m5 = get_klines(symbol, "Min5", 4000)
+            m1 = get_klines(symbol, "Min1", M1_HISTORY)
             found = find_historical_setups(h4, h1, m15, d1)
             active_until = None
 
@@ -1559,7 +1509,12 @@ def rebuild_history():
                     "decision_reason": None
                 }
 
-                sim = simulate_position(m5, m15, setup, entry, sl)
+                # Simulate only when the fetched M1 history covers this entry.
+                sim = (
+                    simulate_position(m1, m15, setup, entry, sl)
+                    if m1 and m1[0]["time"] <= entry["time"]
+                    else None
+                )
                 if sim:
                     fields.update(
                         status="ZAMKNIETA" if sim["exit_time"] else "OTWARTA",
@@ -1591,7 +1546,7 @@ def rebuild_history():
 # LIVE POSITION MANAGEMENT
 # ============================================================
 
-def manage_open_positions(symbol, m5, m15):
+def manage_open_positions(symbol, m1, m15):
     with db_conn() as c:
         open_rows = c.execute(
             """SELECT * FROM setups
@@ -1600,14 +1555,15 @@ def manage_open_positions(symbol, m5, m15):
             (symbol,)
         ).fetchall()
 
+    closed_m1 = closed(m1)
+    swings_low, swings_high = confirmed_m1_swings(m1)
+
     for row in open_rows:
         direction = row["direction"]
         entry = row["entry_price"]
         current_sl = row["position_sl"]
-        if entry is None or current_sl is None:
-            continue
         original_sl = row["setup_sl"]
-        if original_sl is None:
+        if entry is None or current_sl is None or original_sl is None:
             continue
 
         max_r = row["position_max_r"] if row["position_max_r"] is not None else 0.0
@@ -1616,22 +1572,23 @@ def manage_open_positions(symbol, m5, m15):
         exit_time = None
         exit_price = None
         reason = None
-
         last_candle = row["position_last_candle"]
         processed_candle = last_candle
-        closed_m5 = closed(m5)
-        closed_m15 = closed(m15)
 
-        for candle in closed_m5:
+        for candle in closed_m1:
             candle_time = candle["time"]
-            if candle_time < row["entry_time"] or (last_candle is not None and candle_time <= last_candle):
+            if candle_time < row["entry_time"] or (
+                last_candle is not None and candle_time <= last_candle
+            ):
                 continue
+
             hi_r = r_value(direction, entry, original_sl, candle["high"])
             lo_r = r_value(direction, entry, original_sl, candle["low"])
             max_r = max(max_r, hi_r, lo_r)
             min_r = min(min_r, lo_r, hi_r)
             processed_candle = candle_time
 
+            # Evaluate the previously active stop before changing it.
             if direction == "LONG" and candle["low"] <= current_sl:
                 exit_time, exit_price, reason = candle_time, current_sl, "SL"
                 break
@@ -1639,45 +1596,57 @@ def manage_open_positions(symbol, m5, m15):
                 exit_time, exit_price, reason = candle_time, current_sl, "SL"
                 break
 
-            # Move SL to entry after +0.5R; never loosen an existing stop.
-            if max_r >= BREAK_EVEN_ACTIVATION_R:
-                be_stop = entry
-                if direction == "LONG" and be_stop > current_sl and be_stop < candle["close"]:
-                    current_sl = be_stop
-                    update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=be_stop)
-                elif direction == "SHORT" and be_stop < current_sl and be_stop > candle["close"]:
-                    current_sl = be_stop
-                    update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=be_stop)
-
-            # Once +1R is reached, trail behind the latest three closed M5 candles.
+            # Activate trailing at +0.5R using only already-confirmed M1 swings.
             if max_r >= TRAIL_ACTIVATION_R:
-                recent = [x for x in closed_m5 if row["entry_time"] <= x["time"] <= candle_time][-TRAIL_LOOKBACK_M5:]
-                if len(recent) == TRAIL_LOOKBACK_M5:
-                    if direction == "LONG":
-                        new_stop = min(x["low"] for x in recent)
-                        if new_stop > current_sl and new_stop < candle["close"]:
-                            current_sl = new_stop
-                            update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=new_stop)
-                    else:
-                        new_stop = max(x["high"] for x in recent)
-                        if new_stop < current_sl and new_stop > candle["close"]:
-                            current_sl = new_stop
-                            update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=new_stop)
+                if direction == "LONG":
+                    valid = [
+                        x for x in swings_low
+                        if x["confirmed_at"] < candle_time
+                        and x["price"] < candle["close"]
+                    ]
+                    if valid:
+                        candidate = valid[-1]["price"]
+                        if candidate > current_sl:
+                            current_sl = candidate
+                            update_setup(
+                                row["setup_time"], symbol=symbol,
+                                trail_time=candle_time, trail_price=candidate
+                            )
+                else:
+                    valid = [
+                        x for x in swings_high
+                        if x["confirmed_at"] < candle_time
+                        and x["price"] > candle["close"]
+                    ]
+                    if valid:
+                        candidate = valid[-1]["price"]
+                        if candidate < current_sl:
+                            current_sl = candidate
+                            update_setup(
+                                row["setup_time"], symbol=symbol,
+                                trail_time=candle_time, trail_price=candidate
+                            )
+
             trail_r = r_value(direction, entry, original_sl, candle["close"])
 
         fields = {
-            "position_max_r": max_r, "position_min_r": min_r,
-            "trail_r": trail_r, "position_sl": current_sl,
+            "position_max_r": max_r,
+            "position_min_r": min_r,
+            "trail_r": trail_r,
+            "position_sl": current_sl,
             "position_last_candle": processed_candle
         }
+
         if exit_time is not None:
             fields.update(
-                exit_time=exit_time, exit_price=exit_price, exit_reason=reason,
+                exit_time=exit_time,
+                exit_price=exit_price,
+                exit_reason=reason,
                 exit_r=r_value(direction, entry, original_sl, exit_price),
                 trail_r=r_value(direction, entry, original_sl, exit_price)
             )
-        update_setup(row["setup_time"], symbol=symbol, **fields)
 
+        update_setup(row["setup_time"], symbol=symbol, **fields)
 
 def live_refresh():
     errors = []
@@ -1688,9 +1657,9 @@ def live_refresh():
             h1 = get_klines(symbol, "Min60", H1_HISTORY)
             d1 = get_klines(symbol, "Day1", D1_HISTORY)
             m15 = get_klines(symbol, "Min15", 500)
-            m5 = get_klines(symbol, "Min5", 1000)
+            m1 = get_klines(symbol, "Min1", 2000)
 
-            if not h4 or not h1 or not m15 or not m5:
+            if not h4 or not h1 or not m15 or not m1:
                 continue
 
             with db_conn() as conn:
@@ -1728,7 +1697,7 @@ def live_refresh():
                                     decision_reason=None
                                 )
 
-            manage_open_positions(symbol, m5, m15)
+            manage_open_positions(symbol, m1, m15)
 
         except Exception as e:
             errors.append(f"{symbol}: {repr(e)}")
@@ -1825,10 +1794,9 @@ def chart_payload(
     start_time = min(events)
     end_time = row["exit_time"] or now_ts()
 
-    total = min(
-        max(total, 11 + int(max(0, end_time - start_time) / step)),
-        240 if tf == "M5" else 120
-    )
+    # Fixed event window: all candles from setup/entry through exit plus margins.
+    duration_candles = max(0, int((end_time - start_time) / step))
+    total = min(max(16, duration_candles + 11), 1200 if tf == "M5" else 600)
 
     candles = chart_candles(
         symbol,
@@ -4434,28 +4402,8 @@ async function refreshDashboard(){
         );
 
 
-        if(
-            savedTab === "chart"
-        ){
-
-            const select =
-                document.getElementById(
-                    "setupSelect"
-                );
-
-
-            if(
-                select
-                && select.value
-            ){
-
-                await fetchChart(
-                    select.value,
-                    savedTf,
-                    false
-                );
-            }
-        }
+        // Keep the selected chart snapshot fixed during dashboard auto-refresh.
+        // It reloads only when the user changes setup or timeframe.
 
 
     }catch(error){
