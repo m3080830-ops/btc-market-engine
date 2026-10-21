@@ -1336,7 +1336,7 @@ def simulate_position(
         # At +0.5R, protect -0.5R; never loosen a tighter stop.
         risk = abs(entry_price - original_sl)
         if max_r >= SL_PROTECT_ACTIVATION_R:
-            protected_sl = entry_price - SL_PROTECT_LOCK_R * risk if direction == "LONG" else entry_price + SL_PROTECT_LOCK_R * risk
+            protected_sl = entry_price + SL_PROTECT_LOCK_R * risk if direction == "LONG" else entry_price - SL_PROTECT_LOCK_R * risk
             if direction == "LONG" and protected_sl > sl:
                 sl = protected_sl
                 trail_time, trail_price = candle["time"], sl
@@ -1616,7 +1616,7 @@ def manage_open_positions(symbol, m1, m15):
             # At +0.5R, protect -0.5R; never loosen a tighter stop.
             risk = abs(entry - original_sl)
             if max_r >= SL_PROTECT_ACTIVATION_R:
-                protected_sl = entry - SL_PROTECT_LOCK_R * risk if direction == "LONG" else entry + SL_PROTECT_LOCK_R * risk
+                protected_sl = entry + SL_PROTECT_LOCK_R * risk if direction == "LONG" else entry - SL_PROTECT_LOCK_R * risk
                 if direction == "LONG" and protected_sl > current_sl:
                     current_sl = protected_sl
                     update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=current_sl)
