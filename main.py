@@ -1515,6 +1515,10 @@ def rebuild_history():
                     if m1 and m1[0]["time"] <= entry["time"]
                     else None
                 )
+                # Do not leave an apparently open historical trade when the
+                # fetched M1 window does not cover its entry.
+                if sim is None:
+                    continue
                 if sim:
                     fields.update(
                         status="ZAMKNIETA" if sim["exit_time"] else "OTWARTA",
