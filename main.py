@@ -2276,9 +2276,10 @@ tbody tr:hover{
     border:1px solid var(--line);
     border-radius:18px;
     background:#090c10;
-    max-height:58vh;
+    height:430px;
     min-height:340px;
     padding-left:70px;
+    box-sizing:border-box;
     -webkit-overflow-scrolling:touch;
 }
 
@@ -2308,6 +2309,7 @@ tbody tr:hover{
     width:100%;
     height:430px;
     min-width:0;
+    overflow:hidden;
 }
 
 .info{
@@ -3510,9 +3512,17 @@ function renderChart(
     }
 
 
-    // Responsive width fills the visible chart without horizontal panning.
-    const width = Math.max(320, Math.floor(scroll.clientWidth - 72));
+    // Measure the actual SVG drawing area, not the outer box including
+    // the 70px price-axis gutter. This prevents the viewBox from being wider
+    // than the rendered SVG on mobile and pushes candles off-screen.
     const height = 430;
+    const width = Math.max(
+        240,
+        Math.floor(
+            svg.getBoundingClientRect().width
+            || scroll.clientWidth - 72
+        )
+    );
 
 
     const left =
@@ -3777,11 +3787,16 @@ function renderChart(
             );
 
 
+            const candleWidth = Math.max(
+                2,
+                Math.min(8, innerWidth / Math.max(1, candles.length) * 0.62)
+            );
+
             output.push(
                 "<rect "
                 + "x='"
                 + (
-                    xx - 2.5
+                    xx - candleWidth / 2
                 )
                 + "' "
                 + "y='"
@@ -3790,7 +3805,9 @@ function renderChart(
                     closeY
                 )
                 + "' "
-                + "width='6' "
+                + "width='"
+                + candleWidth
+                + "' "
                 + "height='"
                 + Math.max(
                     1,
@@ -3988,7 +4005,7 @@ function renderChart(
         "#8b949e",
         "WYJŚCIE"
     );
-    svg.setAttribute("width", "100%");
+    svg.setAttribute("width", String(width));
     svg.setAttribute("height", String(height));
 
 
