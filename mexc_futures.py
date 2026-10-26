@@ -16,7 +16,7 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
 
-BASE_URL = "https://api.mexc.com"
+BASE_URL = "https://contract.mexc.com"
 SUPPORTED_SYMBOLS = frozenset({"BTC_USDT", "ETH_USDT"})
 ASSUMED_TAKER_FEE = Decimal("0.0002")  # temporary assumption from user's app screenshot
 ASSUMED_MAKER_FEE = Decimal("0")
