@@ -2688,10 +2688,12 @@ tbody tr:hover{
     }
 
     .chart-scroll{
-        min-height:300px;
-        max-height:52vh;
+        height:430px;
+        min-height:430px;
+        max-height:none;
         border-radius:18px;
         padding-left:60px;
+        overflow:hidden;
     }
 
     .chart-yaxis{
@@ -2703,8 +2705,11 @@ tbody tr:hover{
     }
 
     #chart{
-        height:330px;
-        min-width:820px;
+        display:block;
+        width:100%;
+        height:430px;
+        min-width:0;
+        overflow:hidden;
     }
 
     .info{
