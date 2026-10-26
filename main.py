@@ -4755,7 +4755,34 @@ def engine_loop():
 # MAIN
 # ============================================================
 
+def check_mexc_connection_on_startup():
+    """Optional read-only MEXC Futures connectivity check; never places orders."""
+    if os.getenv("MEXC_CONNECTION_CHECK_ON_STARTUP", "true").strip().lower() != "true":
+        return
+    if not os.getenv("MEXC_ACCESS_KEY") or not os.getenv("MEXC_SECRET_KEY"):
+        print("MEXC_CONNECTION_CHECK status=SKIPPED reason=API_keys_not_configured", flush=True)
+        return
+    try:
+        from mexc_futures import MexcFuturesReadOnlyClient
+        rates = MexcFuturesReadOnlyClient().get_fee_rates("BTC_USDT")
+        print(
+            "MEXC_CONNECTION_CHECK status=OK symbol=BTC_USDT "
+            f"maker_fee={rates['realMakerFee']} taker_fee={rates['realTakerFee']} "
+            "trading_enabled=false orders_placed=false",
+            flush=True,
+        )
+    except Exception as exc:
+        # Do not log request headers, keys, signatures, or exception payloads.
+        print(
+            f"MEXC_CONNECTION_CHECK status=FAILED error={type(exc).__name__} "
+            "trading_enabled=false orders_placed=false",
+            flush=True,
+        )
+
+
 if __name__ == "__main__":
+
+    check_mexc_connection_on_startup()
 
     init_db()
 
