@@ -95,7 +95,6 @@ class MexcFuturesReadOnlyClient:
             "ApiKey": self.access_key,
             "Request-Time": timestamp,
             "Signature": signature,
-            "Recv-Window": "10000",
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
