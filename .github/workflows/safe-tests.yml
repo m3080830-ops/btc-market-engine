@@ -1,0 +1,42 @@
+name: Safe code checks
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "main.py"
+      - "strategy.py"
+      - ".github/workflows/safe-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  syntax-and-import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check Python syntax
+        run: python -m compileall -q main.py strategy.py
+
+      - name: Smoke-test imports (no network, no orders)
+        run: |
+          python - <<'PY'
+          import main
+          import strategy
+          assert callable(strategy.find_latest_setup)
+          assert callable(strategy.find_historical_setups)
+          assert callable(strategy.choose_structural_sl)
+          assert callable(strategy.planned_trade)
+          assert callable(strategy.build_entry)
+          print("PASS: main.py and strategy.py import successfully")
+          print("PASS: expected strategy entry points are available")
+          PY
