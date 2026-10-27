@@ -26,7 +26,7 @@ from strategy import (
 SYMBOLS = ["BTC_USDT", "ETH_USDT"]
 SYMBOL_LABELS = {"BTC_USDT": "BTC", "ETH_USDT": "ETH"}
 
-BASE_URL = "https://contract.mexc.com/api/v1/contract/kline"
+BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
 
 POLL_SECONDS = 30
 
@@ -4779,7 +4779,7 @@ def check_mexc_connection_on_startup():
             hashlib.sha256,
         ).hexdigest()
         url = (
-            "https://contract.mexc.com/api/v1/private/account/tiered_fee_rate/v2"
+            "https://api.mexc.com/api/v1/private/account/tiered_fee_rate/v2"
             "?symbol=BTC_USDT"
         )
         request = urllib.request.Request(
