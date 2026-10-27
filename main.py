@@ -4822,21 +4822,26 @@ def check_mexc_connection_on_startup():
 
 if __name__ == "__main__":
 
+    print(
+        f"BTC_MARKET_ENGINE_START domain=api.mexc.com port={PORT} db_file={DB_FILE}",
+        flush=True,
+    )
+
     check_mexc_connection_on_startup()
 
-    init_db()
-
-
-    threading.Thread(
-        target=engine_loop,
-        daemon=True
-    ).start()
-
-
-    HTTPServer(
-        (
-            "0.0.0.0",
-            PORT
-        ),
-        Handler
-    ).serve_forever()
+    try:
+        init_db()
+        print("BTC_MARKET_ENGINE_START database=OK", flush=True)
+        threading.Thread(target=engine_loop, daemon=True).start()
+        print("BTC_MARKET_ENGINE_START engine_thread=STARTED", flush=True)
+        server = HTTPServer(("0.0.0.0", PORT), Handler)
+        print(f"BTC_MARKET_ENGINE_START http_server=LISTENING port={PORT}", flush=True)
+        server.serve_forever()
+    except Exception as exc:
+        import traceback
+        print(
+            f"BTC_MARKET_ENGINE_START status=FATAL error={type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        traceback.print_exc()
+        raise
