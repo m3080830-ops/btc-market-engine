@@ -1,0 +1,8 @@
+version: 1
+type: web
+build:
+  framework: dockerfile
+  dockerfile: Dockerfile
+run:
+  command: "python -u main.py"
+  port: 3000
