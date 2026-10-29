@@ -4777,7 +4777,7 @@ def engine_loop():
 
     init_db()
 
-    if os.getenv("MEXC_LIVE_TRADING_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on"):
+    if os.getenv("MEXC_LIVE_TRADING_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on"):
         if MexcFuturesLive is None:
             print(
                 "MEXC_LIVE status=DISABLED reason=module_import_failed "

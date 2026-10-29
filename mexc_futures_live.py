@@ -32,7 +32,7 @@ class MexcFuturesLive:
         self.access_key = os.getenv("MEXC_ACCESS_KEY", "").strip()
         self.secret_key = os.getenv("MEXC_SECRET_KEY", "").strip()
         self.enabled = (
-            os.getenv("MEXC_LIVE_TRADING_ENABLED", "true").strip().lower()
+            os.getenv("MEXC_LIVE_TRADING_ENABLED", "false").strip().lower()
             in ("1", "true", "yes", "on")
             and bool(self.access_key)
             and bool(self.secret_key)
