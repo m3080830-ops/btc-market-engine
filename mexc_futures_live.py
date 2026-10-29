@@ -155,7 +155,7 @@ class MexcFuturesLive:
         raise MexcLiveError("USDT balance not found in MEXC Futures assets")
 
     def _contract(self):
-        data = self._request("GET", "/api/v1/contract/detail/country", {"symbol": SYMBOL})
+        data = self._request("GET", "/api/v1/contract/detail", {"symbol": SYMBOL})
         if isinstance(data, list):
             data = next((x for x in data if x.get("symbol") == SYMBOL), None)
         if not isinstance(data, dict) or data.get("symbol") != SYMBOL:
@@ -165,11 +165,16 @@ class MexcFuturesLive:
         return data
 
     def _position_mode(self):
+        # MEXC returns data as the scalar 1 (hedge) or 2 (one-way), not an object.
         data = self._request("GET", "/api/v1/private/position/position_mode")
         if isinstance(data, dict):
-            mode = data.get("positionMode")
-            if mode in (1, 2, "1", "2"):
-                return int(mode)
+            data = data.get("positionMode")
+        try:
+            mode = int(data)
+        except (TypeError, ValueError):
+            mode = 0
+        if mode in (1, 2):
+            return mode
         raise MexcLiveError("Unable to confirm MEXC Futures position mode; entry blocked")
 
     def _positions(self):
@@ -310,10 +315,8 @@ class MexcFuturesLive:
                 "type": 5,
                 "openType": 1,
                 "positionMode": mode,
-                "positionType": direction.lower(),
-                "sideType": "buy" if direction == "LONG" else "sell",
                 "externalOid": external_oid,
-                "stopLossPrice": self._format_price(sl, meta),
+                "stopLossPrice": self._format_price(sl, meta, direction),
                 "lossTrend": 1,
             }
             try:
@@ -344,12 +347,18 @@ class MexcFuturesLive:
             return False
 
     @staticmethod
-    def _format_price(price, meta):
+    def _format_price(price, meta, direction=None):
         tick = float(meta.get("priceUnit", 0) or 0)
         if tick > 0:
-            # Keep the order stop on a valid tick while never moving it away
-            # from the market into a weaker level.
-            return round(round(float(price) / tick) * tick, int(meta.get("priceScale", 1) or 1))
+            # Round toward a tighter stop, never toward a looser stop.
+            units = float(price) / tick
+            if direction == "LONG":
+                units = math.ceil(units - 1e-10)
+            elif direction == "SHORT":
+                units = math.floor(units + 1e-10)
+            else:
+                units = round(units)
+            return round(units * tick, int(meta.get("priceScale", 1) or 1))
         return float(price)
 
     def sync_positions(self):
@@ -387,7 +396,7 @@ class MexcFuturesLive:
                     stops = self._stop_orders()
                     for stop in stops:
                         pid = stop.get("positionId", stop.get("position_id"))
-                        oid = stop.get("orderId", stop.get("id", stop.get("stopOrderId")))
+                        oid = stop.get("id", stop.get("stopOrderId", stop.get("orderId")))
                         stop_price = stop.get("stopLossPrice", stop.get("triggerPrice"))
                         if str(pid) == str(position.get("positionId")) and oid is not None and stop_price not in (None, "", 0, "0"):
                             existing_stop = stop
@@ -397,7 +406,7 @@ class MexcFuturesLive:
                     # is unavailable; failures are recorded and retried next refresh.
                     existing_stop = None
                 if existing_stop is not None:
-                    stop_order_id = str(existing_stop.get("orderId", existing_stop.get("id", existing_stop.get("stopOrderId"))))
+                    stop_order_id = str(existing_stop.get("id", existing_stop.get("stopOrderId", existing_stop.get("orderId"))))
                     self._store(setup_time, status="OPEN", position_id=str(position["positionId"]),
                                 stop_order_id=stop_order_id,
                                 entry_price=float(position.get("holdAvgPrice", trade["entry_price"])),
@@ -413,10 +422,14 @@ class MexcFuturesLive:
                         "vol": float(position.get("holdVol", trade["vol"])),
                         "lossTrend": 1,
                         "profitTrend": 1,
-                        "stopLossPrice": self._format_price(float(trade["current_sl"]), meta),
+                        "stopLossPrice": self._format_price(float(trade["current_sl"]), meta, trade["direction"]),
+                        "takeProfitPrice": 0,
                         "priceProtect": 0,
-                        "positionType": trade["direction"].lower(),
-                        "side": close_side,
+                        "volType": 2,
+                        "takeProfitType": 0,
+                        "takeProfitOrderPrice": 0,
+                        "stopLossType": 0,
+                        "stopLossOrderPrice": 0,
                     })
                     oid = data.get("orderId", data.get("id")) if isinstance(data, dict) else data
                     if oid is None:
@@ -451,7 +464,7 @@ class MexcFuturesLive:
             return False
         try:
             meta = self._contract()
-            candidate = self._format_price(candidate, meta)
+            candidate = self._format_price(candidate, meta, direction)
             # Never send an SL past the current market where it may instantly
             # close a position due to rounding.
             positions = self._positions()
@@ -459,12 +472,9 @@ class MexcFuturesLive:
             if position is None:
                 self._store(setup_time, status="CLOSED")
                 return False
-            market = float(position.get("holdAvgPrice", row["entry_price"]))
-            if direction == "LONG" and candidate >= market:
-                raise MexcLiveError("Calculated LONG stop is not below the position entry")
-            if direction == "SHORT" and candidate <= market:
-                raise MexcLiveError("Calculated SHORT stop is not above the position entry")
-            order_id = row["stop_order_id"]
+            # A trailing stop may legitimately cross the entry price after profit.
+            # The initial entry order ID is the MEXC order TP/SL modification key.
+            order_id = row["order_id"]
             if not order_id:
                 self.sync_positions()
                 with self._conn() as conn:
@@ -474,7 +484,8 @@ class MexcFuturesLive:
                 if not order_id:
                     raise MexcLiveError("No active MEXC SL order to modify")
             self._request("POST", "/api/v1/private/stoporder/change_price", {
-                "orderId": str(order_id),
+                "orderId": int(order_id),
+                "lossTrend": 1,
                 "stopLossPrice": candidate,
             })
             self._store(setup_time, current_sl=candidate, last_error=None)
