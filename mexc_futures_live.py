@@ -312,6 +312,8 @@ class MexcFuturesLive:
                 "vol": vol,
                 "leverage": leverage,
                 "side": 1 if direction == "LONG" else 3,
+                "sideType": "buy" if direction == "LONG" else "sell",
+                "positionType": "long" if direction == "LONG" else "short",
                 "type": 5,
                 "openType": 1,
                 "positionMode": mode,
