@@ -6,6 +6,8 @@ on:
     paths:
       - "main.py"
       - "strategy.py"
+      - "mexc_futures_live.py"
+      - "Dockerfile"
       - ".github/workflows/safe-tests.yml"
 
 permissions:
@@ -25,18 +27,21 @@ jobs:
           python-version: "3.12"
 
       - name: Check Python syntax
-        run: python -m compileall -q main.py strategy.py
+        run: python -m compileall -q main.py strategy.py mexc_futures_live.py
 
       - name: Smoke-test imports (no network, no orders)
         run: |
           python - <<'PY'
           import main
           import strategy
+          import mexc_futures_live
           assert callable(strategy.find_latest_setup)
           assert callable(strategy.find_historical_setups)
           assert callable(strategy.choose_structural_sl)
           assert callable(strategy.planned_trade)
           assert callable(strategy.build_entry)
           print("PASS: main.py and strategy.py import successfully")
+          assert callable(mexc_futures_live.MexcFuturesLive)
           print("PASS: expected strategy entry points are available")
+          print("PASS: live adapter imports without network calls")
           PY

@@ -186,7 +186,7 @@ class MexcFuturesLive:
         ]
 
     def _stop_orders(self):
-        data = self._request("GET", "/api/v1/private/stoporder/list/orders", {"symbol": SYMBOL})
+        data = self._request("GET", "/api/v1/private/stoporder/list/orders", {"symbol": SYMBOL, "page_num": 1, "page_size": 100, "is_finished": 0})
         return self._rows(data)
 
     def _store(self, setup_time, **fields):
@@ -398,7 +398,9 @@ class MexcFuturesLive:
                         pid = stop.get("positionId", stop.get("position_id"))
                         oid = stop.get("id", stop.get("stopOrderId", stop.get("orderId")))
                         stop_price = stop.get("stopLossPrice", stop.get("triggerPrice"))
-                        if str(pid) == str(position.get("positionId")) and oid is not None and stop_price not in (None, "", 0, "0"):
+                        if (str(pid) == str(position.get("positionId")) and oid is not None
+                                and int(stop.get("state", 1) or 1) == 1
+                                and stop_price not in (None, "", 0, "0")):
                             existing_stop = stop
                             break
                 except Exception:
@@ -474,20 +476,34 @@ class MexcFuturesLive:
                 return False
             # A trailing stop may legitimately cross the entry price after profit.
             # The initial entry order ID is the MEXC order TP/SL modification key.
-            order_id = row["order_id"]
-            if not order_id:
+            stop_id = row["stop_order_id"]
+            if not stop_id:
                 self.sync_positions()
                 with self._conn() as conn:
                     latest = conn.execute("SELECT stop_order_id,current_sl FROM mexc_live_trades WHERE setup_time=?",
                                           (int(setup_time),)).fetchone()
-                order_id = latest["stop_order_id"] if latest else None
-                if not order_id:
+                stop_id = latest["stop_order_id"] if latest else None
+                if not stop_id:
                     raise MexcLiveError("No active MEXC SL order to modify")
-            self._request("POST", "/api/v1/private/stoporder/change_price", {
-                "orderId": int(order_id),
-                "lossTrend": 1,
-                "stopLossPrice": candidate,
-            })
+            # MEXC distinguishes TP/SL attached to an order from position-based
+            # trigger orders. Select the documented endpoint from the live order.
+            stop = next((x for x in self._stop_orders()
+                         if str(x.get("id", x.get("stopOrderId"))) == str(stop_id)
+                         and int(x.get("state", 1) or 1) == 1), None)
+            if stop is None:
+                raise MexcLiveError("Active MEXC stop order not found during modification")
+            parent_order_id = int(stop.get("orderId", 0) or 0)
+            if parent_order_id > 0:
+                self._request("POST", "/api/v1/private/stoporder/change_price", {
+                    "orderId": parent_order_id,
+                    "lossTrend": 1,
+                    "stopLossPrice": candidate,
+                })
+            else:
+                self._request("POST", "/api/v1/private/stoporder/change_plan_price", {
+                    "stopPlanOrderId": int(stop_id),
+                    "stopLossPrice": candidate,
+                })
             self._store(setup_time, current_sl=candidate, last_error=None)
             self._log("SL_UPDATED", setup_time=int(setup_time), sl=candidate)
             return True
