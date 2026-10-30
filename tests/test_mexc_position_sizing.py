@@ -1,6 +1,6 @@
 import unittest
 
-from mexc_futures_live import MexcLiveError, calculate_position_sizing
+from mexc_futures_live import (\n    MexcLiveError, calculate_position_sizing, build_market_open_payload,\n)
 
 
 class PositionSizingTests(unittest.TestCase):
@@ -77,6 +77,43 @@ class PositionSizingTests(unittest.TestCase):
     def test_invalid_stop_is_rejected(self):
         with self.assertRaises(MexcLiveError):
             self.make_sizing(0.10, stop_price=100000.0)
+
+
+class MarketOrderPayloadTests(unittest.TestCase):
+    def test_long_payload_uses_mexc_futures_fields(self):
+        payload = build_market_open_payload(
+            direction="LONG", volume=10, leverage=20, position_mode=1,
+            external_oid="BTCM123", stop_loss_price=65000.0,
+        )
+        self.assertEqual(payload["symbol"], "BTC_USDT")
+        self.assertEqual(payload["side"], 1)
+        self.assertEqual(payload["sideType"], "buy")
+        self.assertEqual(payload["positionType"], "long")
+        self.assertEqual(payload["type"], 5)
+        self.assertEqual(payload["openType"], 1)
+        self.assertEqual(payload["positionMode"], 1)
+        self.assertEqual(payload["stopLossPrice"], 65000.0)
+
+    def test_short_payload_uses_sell_side(self):
+        payload = build_market_open_payload(
+            direction="SHORT", volume=10, leverage=20, position_mode=1,
+            external_oid="BTCM124", stop_loss_price=70000.0,
+        )
+        self.assertEqual(payload["side"], 3)
+        self.assertEqual(payload["sideType"], "sell")
+        self.assertEqual(payload["positionType"], "short")
+
+    def test_invalid_direction_and_one_way_mode_are_rejected(self):
+        with self.assertRaises(MexcLiveError):
+            build_market_open_payload(
+                direction="SOL", volume=10, leverage=20, position_mode=1,
+                external_oid="BTCM125", stop_loss_price=70000.0,
+            )
+        with self.assertRaises(MexcLiveError):
+            build_market_open_payload(
+                direction="LONG", volume=10, leverage=20, position_mode=2,
+                external_oid="BTCM126", stop_loss_price=65000.0,
+            )
 
 
 if __name__ == "__main__":
