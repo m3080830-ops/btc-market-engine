@@ -128,10 +128,7 @@ def calculate_position_sizing(
         raise MexcLiveError("MEXC leverage limits are inconsistent")
 
     notional = volume * contract_size * entry_price
-    entry_fee = notional * taker_fee_rate
-    remaining_margin_budget = margin_budget - entry_fee
-    if remaining_margin_budget <= 0:
-        raise MexcLiveError("Opening fee consumes the configured margin budget")
+    entry_fee = 0.0
 
     # Choose the lowest leverage that satisfies both the exchange's IMR tier
     # and the configured 80% maximum initial-margin commitment.
@@ -139,7 +136,7 @@ def calculate_position_sizing(
     initial_margin = None
     for leverage in range(minimum_allowed_leverage, max_allowed_leverage + 1):
         estimate = notional * max(1.0 / leverage, tier_imr)
-        if estimate + entry_fee <= margin_budget + 1e-9:
+        if estimate <= margin_budget + 1e-9:
             chosen_leverage = leverage
             initial_margin = estimate
             break
@@ -155,7 +152,7 @@ def calculate_position_sizing(
     if total_risk > risk_budget + 1e-9:
         raise MexcLiveError("Calculated position exceeds the configured 1R budget")
 
-    total_initial_commitment = initial_margin + entry_fee
+    total_initial_commitment = initial_margin
     return {
         "volume": volume,
         "notional_usdt": notional,
@@ -571,8 +568,6 @@ class MexcFuturesLive:
                 "vol": sizing["volume"],
                 "leverage": sizing["leverage"],
                 "side": 1 if direction == "LONG" else 3,
-                "sideType": "buy" if direction == "LONG" else "sell",
-                "positionType": "long" if direction == "LONG" else "short",
                 "type": 5,
                 "openType": 1,
                 "positionMode": mode,
