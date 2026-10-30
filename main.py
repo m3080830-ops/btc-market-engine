@@ -18,6 +18,16 @@ from strategy import (
     MIN_RR as STRATEGY_MIN_RR,
 )
 
+try:
+    from mexc_futures_live import MexcFuturesLive
+except Exception as _mexc_live_import_exc:
+    MexcFuturesLive = None
+    MEXC_LIVE_IMPORT_ERROR = type(_mexc_live_import_exc).__name__
+else:
+    MEXC_LIVE_IMPORT_ERROR = None
+
+LIVE_EXECUTOR = None
+
 
 # ============================================================
 # CONFIG
@@ -1724,8 +1734,45 @@ def live_refresh():
                                     pa_trigger=",".join(setup.get("pa", [])),
                                     decision_reason=None
                                 )
+                                # Live execution is isolated to BTC_USDT; the
+                                # strategy and website simulation remain unchanged.
+                                if symbol == "BTC_USDT" and LIVE_EXECUTOR is not None:
+                                    try:
+                                        LIVE_EXECUTOR.maybe_open(
+                                            setup, entry, sl, plan["rr"],
+                                            float(m15[-1]["close"]), now_ts()
+                                        )
+                                    except Exception as live_exc:
+                                        print(
+                                            "MEXC_LIVE ENTRY_HOOK_ERROR "
+                                            f"error={type(live_exc).__name__}",
+                                            flush=True,
+                                        )
 
             manage_open_positions(symbol, m1, m15)
+            if symbol == "BTC_USDT" and LIVE_EXECUTOR is not None:
+                # Reconcile actual Futures positions, then mirror only tighter SL
+                # values already computed by the unchanged M1 engine logic.
+                LIVE_EXECUTOR.sync_positions()
+                with db_conn() as conn:
+                    live_rows = conn.execute(
+                        """SELECT setup_time, direction, position_sl FROM setups
+                           WHERE symbol='BTC_USDT' AND entry_time IS NOT NULL
+                           AND exit_time IS NULL AND position_sl IS NOT NULL"""
+                    ).fetchall()
+                for live_row in live_rows:
+                    try:
+                        LIVE_EXECUTOR.update_stop(
+                            int(live_row["setup_time"]), live_row["direction"],
+                            float(live_row["position_sl"])
+                        )
+                    except Exception as live_exc:
+                        print(
+                            "MEXC_LIVE STOP_HOOK_ERROR "
+                            f"setup_time={live_row['setup_time']} "
+                            f"error={type(live_exc).__name__}",
+                            flush=True,
+                        )
 
         except Exception as e:
             errors.append(f"{symbol}: {repr(e)}")
@@ -4726,8 +4773,36 @@ class Handler(
 # ============================================================
 
 def engine_loop():
+    global LIVE_EXECUTOR
 
     init_db()
+
+    if os.getenv("MEXC_LIVE_TRADING_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on"):
+        if MexcFuturesLive is None:
+            print(
+                "MEXC_LIVE status=DISABLED reason=module_import_failed "
+                f"error={MEXC_LIVE_IMPORT_ERROR or 'unknown'}",
+                flush=True,
+            )
+        else:
+            try:
+                LIVE_EXECUTOR = MexcFuturesLive(DB_FILE)
+                print(
+                    "MEXC_LIVE adapter=INITIALIZED "
+                    f"enabled={str(LIVE_EXECUTOR.enabled).lower()} "
+                    "symbol=BTC_USDT risk_fraction=0.10",
+                    flush=True,
+                )
+            except Exception as live_exc:
+                LIVE_EXECUTOR = None
+                print(
+                    "MEXC_LIVE status=DISABLED "
+                    f"reason=adapter_init_failed error={type(live_exc).__name__}",
+                    flush=True,
+                )
+    else:
+        LIVE_EXECUTOR = None
+        print("MEXC_LIVE status=DISABLED reason=env_flag_false", flush=True)
 
     rebuild_history()
 
