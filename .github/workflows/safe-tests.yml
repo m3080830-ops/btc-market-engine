@@ -52,3 +52,6 @@ jobs:
           print("PASS: expected strategy entry points are available")
           print("PASS: live adapter imports without network calls")
           PY
+
+      - name: Test Futures sizing (offline, no orders)
+        run: python -m unittest discover -s tests -v

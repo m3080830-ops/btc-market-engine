@@ -18,12 +18,161 @@ from datetime import datetime, timezone
 BASE_URL = "https://api.mexc.com"
 SYMBOL = "BTC_USDT"
 RISK_FRACTION = float(os.getenv("MEXC_RISK_FRACTION", "0.10"))
-DEFAULT_LEVERAGE = int(os.getenv("MEXC_FUTURES_LEVERAGE", "20"))
-MARGIN_USE_CAP = float(os.getenv("MEXC_MAX_MARGIN_FRACTION", "0.70"))
+MARGIN_USE_CAP = float(os.getenv("MEXC_MAX_MARGIN_FRACTION", "0.80"))
+SLIPPAGE_BUFFER_BPS = float(os.getenv("MEXC_SLIPPAGE_BUFFER_BPS", "5"))
 
 
 class MexcLiveError(RuntimeError):
     pass
+
+
+def calculate_position_sizing(
+    *,
+    entry_price,
+    stop_price,
+    available_balance,
+    contract_size,
+    vol_unit,
+    min_vol,
+    contract_max_vol,
+    taker_fee_rate,
+    slippage_buffer_bps,
+    margin_use_fraction,
+    risk_fraction,
+    min_leverage,
+    contract_max_leverage,
+    account_max_leverage,
+    risk_limit_rows,
+    position_type,
+    open_type=1,
+):
+    """Pure sizing calculation; no network calls and no exchange orders."""
+    numeric_values = (
+        entry_price, stop_price, available_balance, contract_size, vol_unit,
+        min_vol, taker_fee_rate, slippage_buffer_bps, margin_use_fraction,
+        risk_fraction, min_leverage, contract_max_leverage, account_max_leverage,
+    )
+    try:
+        values = [float(value) for value in numeric_values]
+    except (TypeError, ValueError):
+        raise MexcLiveError("Invalid numeric input to position sizing") from None
+    if not all(math.isfinite(value) for value in values):
+        raise MexcLiveError("Non-finite position sizing input")
+    if (
+        entry_price <= 0 or stop_price <= 0 or entry_price == stop_price
+        or available_balance <= 0 or contract_size <= 0 or vol_unit <= 0
+        or min_vol <= 0 or taker_fee_rate < 0 or taker_fee_rate >= 0.1
+        or slippage_buffer_bps < 0 or margin_use_fraction <= 0
+        or margin_use_fraction >= 1 or risk_fraction <= 0 or risk_fraction >= 1
+        or min_leverage < 1
+    ):
+        raise MexcLiveError("Position sizing input is outside safe bounds")
+
+    matching_tiers = []
+    for row in risk_limit_rows or []:
+        try:
+            if (
+                int(row.get("positionType", 0)) == int(position_type)
+                and int(row.get("openType", open_type) or open_type) == int(open_type)
+            ):
+                tier_max_vol = float(row.get("maxVol", 0) or 0)
+                tier_max_leverage = int(row.get("maxLeverage", 0) or 0)
+                tier_imr = float(row.get("imr", 0) or 0)
+                if tier_max_vol > 0 and tier_max_leverage > 0 and 0 <= tier_imr < 1:
+                    matching_tiers.append((tier_max_vol, tier_max_leverage, tier_imr, row))
+        except (TypeError, ValueError):
+            continue
+    matching_tiers.sort(key=lambda item: item[0])
+    if not matching_tiers:
+        raise MexcLiveError("MEXC did not return a valid risk-limit tier for this side")
+
+    gap = abs(entry_price - stop_price)
+    risk_budget = available_balance * risk_fraction
+    margin_budget = available_balance * margin_use_fraction
+    slip_rate = slippage_buffer_bps / 10000.0
+
+    # Conservative estimated loss per contract:
+    # price movement to SL + taker fees on entry/exit + slippage on both sides.
+    per_contract_risk = contract_size * (
+        gap
+        + entry_price * taker_fee_rate
+        + stop_price * taker_fee_rate
+        + (entry_price + stop_price) * slip_rate
+    )
+    if per_contract_risk <= 0 or not math.isfinite(per_contract_risk):
+        raise MexcLiveError("Invalid per-contract risk estimate")
+
+    raw_volume = risk_budget / per_contract_risk
+    volume = math.floor((raw_volume + 1e-12) / vol_unit) * vol_unit
+    maximum_allowed_volume = min(
+        float(contract_max_vol) if contract_max_vol and float(contract_max_vol) > 0 else float("inf"),
+        max(item[0] for item in matching_tiers),
+    )
+    volume = min(
+        volume,
+        math.floor((maximum_allowed_volume + 1e-12) / vol_unit) * vol_unit,
+    )
+    if volume < min_vol:
+        raise MexcLiveError("Minimum order volume would exceed the 1R risk budget")
+
+    selected = next((item for item in matching_tiers if volume <= item[0]), None)
+    if selected is None:
+        raise MexcLiveError("Calculated volume exceeds all MEXC risk-limit tiers")
+    tier_max_vol, tier_max_leverage, tier_imr, tier = selected
+
+    max_allowed_leverage = min(
+        int(contract_max_leverage),
+        int(account_max_leverage),
+        int(tier_max_leverage),
+    )
+    minimum_allowed_leverage = int(min_leverage)
+    if max_allowed_leverage < minimum_allowed_leverage:
+        raise MexcLiveError("MEXC leverage limits are inconsistent")
+
+    notional = volume * contract_size * entry_price
+    entry_fee = notional * taker_fee_rate
+    remaining_margin_budget = margin_budget - entry_fee
+    if remaining_margin_budget <= 0:
+        raise MexcLiveError("Opening fee consumes the configured margin budget")
+
+    # Choose the lowest leverage that satisfies both the exchange's IMR tier
+    # and the configured 80% maximum initial-margin commitment.
+    chosen_leverage = None
+    initial_margin = None
+    for leverage in range(minimum_allowed_leverage, max_allowed_leverage + 1):
+        estimate = notional * max(1.0 / leverage, tier_imr)
+        if estimate + entry_fee <= margin_budget + 1e-9:
+            chosen_leverage = leverage
+            initial_margin = estimate
+            break
+    if chosen_leverage is None:
+        raise MexcLiveError("No permitted leverage can fit this position while preserving the reserve")
+
+    price_loss = volume * contract_size * gap
+    round_trip_fees = volume * contract_size * (entry_price + stop_price) * taker_fee_rate
+    slippage_buffer = volume * contract_size * (entry_price + stop_price) * slip_rate
+    total_risk = price_loss + round_trip_fees + slippage_buffer
+    if total_risk > risk_budget + 1e-9:
+        raise MexcLiveError("Calculated position exceeds the configured 1R budget")
+
+    total_initial_commitment = initial_margin + entry_fee
+    return {
+        "volume": volume,
+        "notional_usdt": notional,
+        "leverage": chosen_leverage,
+        "risk_budget_usdt": risk_budget,
+        "estimated_total_risk_usdt": total_risk,
+        "estimated_price_loss_usdt": price_loss,
+        "estimated_round_trip_fees_usdt": round_trip_fees,
+        "estimated_slippage_buffer_usdt": slippage_buffer,
+        "estimated_entry_fee_usdt": entry_fee,
+        "estimated_initial_margin_usdt": initial_margin,
+        "margin_budget_usdt": margin_budget,
+        "reserve_after_entry_usdt": available_balance - total_initial_commitment,
+        "risk_tier_max_vol": tier_max_vol,
+        "risk_tier_max_leverage": tier_max_leverage,
+        "max_allowed_leverage": max_allowed_leverage,
+    }
 
 
 class MexcFuturesLive:
@@ -68,9 +217,20 @@ class MexcFuturesLive:
                     last_m1_candle INTEGER,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
-                    last_error TEXT
+                    last_error TEXT,
+                    missing_position_checks INTEGER NOT NULL DEFAULT 0
                 )
             """)
+            columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(mexc_live_trades)"
+                ).fetchall()
+            }
+            if "missing_position_checks" not in columns:
+                conn.execute(
+                    "ALTER TABLE mexc_live_trades ADD COLUMN "
+                    "missing_position_checks INTEGER NOT NULL DEFAULT 0"
+                )
             conn.commit()
 
     @staticmethod
@@ -143,16 +303,91 @@ class MexcFuturesLive:
         return self._rows(self._request("GET", "/api/v1/private/account/assets"))
 
     def _usdt_available(self):
+        # Use only currently available Futures balance, never equity or cash balance.
         for asset in self._assets():
-            if str(asset.get("currency", asset.get("coin", ""))).upper() == "USDT":
-                for key in ("availableBalance", "available", "cashBalance", "equity"):
-                    try:
-                        value = float(asset.get(key))
-                        if math.isfinite(value) and value >= 0:
-                            return value
-                    except (TypeError, ValueError):
-                        continue
-        raise MexcLiveError("USDT balance not found in MEXC Futures assets")
+            if str(asset.get("currency", "")).upper() == "USDT":
+                try:
+                    value = float(asset["availableBalance"])
+                except (KeyError, TypeError, ValueError):
+                    break
+                if math.isfinite(value) and value >= 0:
+                    return value
+                break
+        raise MexcLiveError("Available USDT Futures balance is missing or invalid")
+
+    def _fee_info(self):
+        data = self._request(
+            "GET", "/api/v1/private/account/tiered_fee_rate/v2",
+            {"symbol": SYMBOL}
+        )
+        if not isinstance(data, dict):
+            raise MexcLiveError("MEXC account-specific fee details are unavailable")
+        try:
+            fee = float(data["realTakerFee"])
+            max_leverage = int(data["maxLeverage"])
+        except (KeyError, TypeError, ValueError):
+            raise MexcLiveError("MEXC fee or account leverage data is incomplete") from None
+        if not math.isfinite(fee) or fee < 0 or fee >= 0.1 or max_leverage < 1:
+            raise MexcLiveError("MEXC fee or account leverage data is invalid")
+        return data
+
+    def _risk_limits(self):
+        data = self._request(
+            "GET", "/api/v1/private/account/risk_limit", {"symbol": SYMBOL}
+        )
+        if isinstance(data, dict):
+            rows = data.get(SYMBOL)
+            if isinstance(rows, list):
+                return rows
+            if isinstance(rows, dict):
+                return [rows]
+        if isinstance(data, list):
+            return data
+        raise MexcLiveError("MEXC BTC_USDT risk limits are unavailable")
+
+    def _leverage_info(self, position_type):
+        data = self._request(
+            "GET", "/api/v1/private/position/leverage", {"symbol": SYMBOL}
+        )
+        for row in self._rows(data):
+            try:
+                if int(row.get("positionType", 0)) == int(position_type) and int(row.get("openType", 1)) == 1:
+                    max_view = int(row["maxLeverageView"])
+                    if max_view >= 1:
+                        return {"maxLeverageView": max_view, "leverage": int(row["leverage"])}
+            except (KeyError, TypeError, ValueError):
+                continue
+        raise MexcLiveError("MEXC leverage limits for the selected side are unavailable")
+
+    def _market_price(self, direction):
+        data = self._request("GET", "/api/v1/contract/ticker", {"symbol": SYMBOL})
+        if isinstance(data, list):
+            data = next((row for row in data if row.get("symbol") == SYMBOL), None)
+        if not isinstance(data, dict) or data.get("symbol") != SYMBOL:
+            raise MexcLiveError("MEXC live BTC_USDT ticker is unavailable")
+        key = "ask1" if direction == "LONG" else "bid1"
+        try:
+            price = float(data[key])
+        except (KeyError, TypeError, ValueError):
+            raise MexcLiveError("MEXC live BTC_USDT bid/ask price is unavailable") from None
+        if not math.isfinite(price) or price <= 0:
+            raise MexcLiveError("MEXC live BTC_USDT bid/ask price is invalid")
+        return price
+
+    def _set_leverage(self, position_type, leverage):
+        self._request(
+            "POST", "/api/v1/private/position/change_leverage",
+            {
+                "symbol": SYMBOL,
+                "openType": 1,
+                "positionType": int(position_type),
+                "leverage": int(leverage),
+            }
+        )
+        verified = self._leverage_info(position_type)
+        if verified["leverage"] != int(leverage):
+            raise MexcLiveError("MEXC did not confirm the requested leverage")
+        return verified
 
     def _contract(self):
         data = self._request("GET", "/api/v1/contract/detail", {"symbol": SYMBOL})
@@ -212,32 +447,23 @@ class MexcFuturesLive:
         return [dict(row) for row in rows]
 
     def maybe_open(self, setup, entry, initial_sl, planned_rr, current_price, now_ts):
-        """Open only a fresh M15 entry; never replay an old/historical signal."""
+        """Open a fresh BTC_USDT setup using dynamic risk-sized leverage."""
         if not self.enabled or not setup or setup.get("symbol", SYMBOL) != SYMBOL:
             return False
         if entry is None or initial_sl is None or planned_rr is None or float(planned_rr) < 1.0:
             return False
+
+        setup_time = int(setup.get("signal_time", 0) or 0)
         try:
             entry_time = int(entry["time"])
-            setup_time = int(setup["signal_time"])
             now = int(now_ts)
-            current_bucket = (now // 900) * 900
-            if entry_time != current_bucket or entry_time > now:
+            if entry_time != (now // 900) * 900 or entry_time > now:
                 return False
+
             direction = str(setup["direction"]).upper()
-            price = float(current_price)
-            sl = float(initial_sl)
-            if not math.isfinite(price) or not math.isfinite(sl) or price <= 0:
-                return False
-            if direction == "LONG" and not sl < price:
-                self._log("ENTRY_SKIPPED", reason="long_stop_not_below_market", setup_time=setup_time)
-                return False
-            if direction == "SHORT" and not sl > price:
-                self._log("ENTRY_SKIPPED", reason="short_stop_not_above_market", setup_time=setup_time)
-                return False
-            gap = abs(price - sl)
-            if gap <= 0:
-                return False
+            if direction not in ("LONG", "SHORT"):
+                raise MexcLiveError("Unsupported BTC setup direction")
+            position_type = 1 if direction == "LONG" else 2
 
             with self._conn() as conn:
                 existing = conn.execute(
@@ -254,66 +480,97 @@ class MexcFuturesLive:
                 if busy:
                     return False
 
-            # Before entry, reconcile stale OPEN state and refuse to collide with
-            # any manual/external BTC position or unrecognized open BTC position.
-            positions = self._positions()
-            if positions:
+            if self._positions():
                 self._log("ENTRY_SKIPPED", reason="BTC_USDT_position_already_exists")
                 return False
 
+            mode = self._position_mode()
+            if mode != 1:
+                raise MexcLiveError("BTC Futures account is not in the verified Hedge Mode")
+
             available = self._usdt_available()
-            risk_usdt = available * RISK_FRACTION
-            if available <= 0 or risk_usdt <= 0:
+            if available <= 0:
                 raise MexcLiveError("No available USDT in Futures account")
 
-            meta = self._contract()
-            contract_size = float(meta["contractSize"])
-            vol_unit = float(meta.get("volUnit", 1) or 1)
-            min_vol = float(meta.get("minVol", vol_unit) or vol_unit)
-            if contract_size <= 0 or vol_unit <= 0:
-                raise MexcLiveError("Invalid BTC_USDT contract size/volume step")
-
-            leverage = DEFAULT_LEVERAGE
-            max_leverage = int(meta.get("maxLeverage", leverage) or leverage)
-            min_leverage = int(meta.get("minLeverage", 1) or 1)
-            leverage = max(min_leverage, min(leverage, max_leverage))
-            risk_per_contract = gap * contract_size
-            raw_vol = risk_usdt / risk_per_contract
-            risk_vol = math.floor(raw_vol / vol_unit) * vol_unit
-            margin_cap = available * MARGIN_USE_CAP
-            margin_vol = math.floor((margin_cap * leverage / (price * contract_size)) / vol_unit) * vol_unit
-            vol = min(risk_vol, margin_vol, float(meta.get("maxVol", risk_vol) or risk_vol))
-            if vol < min_vol:
-                self._log("ENTRY_SKIPPED", reason="minimum_contract_exceeds_risk_or_margin",
-                          risk_usdt=round(risk_usdt, 4), available=round(available, 4))
+            # Use the current executable side of the order book, not the previous
+            # M15 candle close, for entry price and stop distance.
+            price = self._market_price(direction)
+            sl = float(initial_sl)
+            if not math.isfinite(sl) or sl <= 0:
+                raise MexcLiveError("Initial stop price is invalid")
+            if direction == "LONG" and sl >= price:
+                self._log("ENTRY_SKIPPED", reason="long_stop_not_below_live_ask", setup_time=setup_time)
                 return False
-            actual_risk = vol * contract_size * gap
-            if actual_risk > risk_usdt * 1.000001:
-                raise MexcLiveError("Calculated order risk exceeds 10% Futures balance")
+            if direction == "SHORT" and sl <= price:
+                self._log("ENTRY_SKIPPED", reason="short_stop_not_above_live_bid", setup_time=setup_time)
+                return False
 
-            mode = self._position_mode()
+            meta = self._contract()
+            fees = self._fee_info()
+            leverage_info = self._leverage_info(position_type)
+            risk_limits = self._risk_limits()
+            matching_limits = [
+                row for row in risk_limits
+                if int(row.get("positionType", 0)) == position_type
+                and int(row.get("openType", 1)) == 1
+            ]
+            if not matching_limits:
+                raise MexcLiveError("No BTC_USDT risk tier for the selected direction")
+
+            contract_max_vol = float(meta.get("maxVol", 0) or 0)
+            if contract_max_vol <= 0:
+                contract_max_vol = max(float(row.get("maxVol", 0) or 0) for row in matching_limits)
+
+            sizing = calculate_position_sizing(
+                entry_price=price,
+                stop_price=sl,
+                available_balance=available,
+                contract_size=float(meta["contractSize"]),
+                vol_unit=float(meta.get("volUnit", 1) or 1),
+                min_vol=float(meta.get("minVol", 1) or 1),
+                contract_max_vol=contract_max_vol,
+                taker_fee_rate=float(fees["realTakerFee"]),
+                slippage_buffer_bps=SLIPPAGE_BUFFER_BPS,
+                margin_use_fraction=MARGIN_USE_CAP,
+                risk_fraction=RISK_FRACTION,
+                min_leverage=int(fees.get("minLeverage", meta.get("minLeverage", 1)) or 1),
+                contract_max_leverage=int(meta.get("maxLeverage", 0) or 0),
+                account_max_leverage=min(
+                    int(fees["maxLeverage"]),
+                    int(leverage_info["maxLeverageView"]),
+                ),
+                risk_limit_rows=matching_limits,
+                position_type=position_type,
+                open_type=1,
+            )
+
+            # MEXC change_leverage is documented for a symbol/side before entry.
+            self._set_leverage(position_type, sizing["leverage"])
+
             external_oid = f"BTCM{setup_time}"
-            now = int(time.time())
+            created_at = int(time.time())
             with self._conn() as conn:
                 conn.execute(
                     """INSERT INTO mexc_live_trades
                        (setup_time,symbol,direction,status,external_oid,vol,contract_size,
                         entry_price,initial_sl,current_sl,risk_usdt,created_at,updated_at)
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (setup_time, SYMBOL, direction, "OPENING", external_oid, vol,
-                     contract_size, price, sl, sl, actual_risk, now, now)
+                    (
+                        setup_time, SYMBOL, direction, "OPENING", external_oid,
+                        sizing["volume"], float(meta["contractSize"]), price, sl, sl,
+                        sizing["estimated_total_risk_usdt"], created_at, created_at,
+                    )
                 )
                 conn.commit()
 
-            # Include the initial protective SL in the entry request. A second
-            # position-level stop is verified/created after the exchange confirms fill.
+            # Official MEXC Place Order fields: side is numeric; sideType and
+            # string positionType are not part of the documented schema.
             payload = {
                 "symbol": SYMBOL,
-                "vol": vol,
-                "leverage": leverage,
+                "price": 0,
+                "vol": sizing["volume"],
+                "leverage": sizing["leverage"],
                 "side": 1 if direction == "LONG" else 3,
-                "sideType": "buy" if direction == "LONG" else "sell",
-                "positionType": "long" if direction == "LONG" else "short",
                 "type": 5,
                 "openType": 1,
                 "positionMode": mode,
@@ -324,28 +581,44 @@ class MexcFuturesLive:
             try:
                 data = self._request("POST", "/api/v1/private/order/create", payload)
             except MexcLiveError as exc:
-                # A rejected request is recorded; transport failures are UNKNOWN
-                # because the exchange may have accepted the order before timeout.
-                rejected = "rejected" in str(exc).lower() or "code=" in str(exc).lower()
-                self._store(setup_time, status="REJECTED" if rejected else "UNKNOWN", last_error=str(exc)[:300])
+                # A lost response is UNKNOWN; do not blindly resubmit a possible fill.
+                rejected = "code=" in str(exc).lower()
+                self._store(
+                    setup_time,
+                    status="REJECTED" if rejected else "UNKNOWN",
+                    last_error=str(exc)[:300],
+                )
                 self._log("ENTRY_FAILED", setup_time=setup_time, error=type(exc).__name__)
                 return False
 
-            order_id = None
-            if isinstance(data, dict):
-                order_id = data.get("orderId", data.get("id"))
-            elif data is not None:
-                order_id = str(data)
-            self._store(setup_time, order_id=str(order_id) if order_id is not None else None,
-                        status="OPENING", last_error=None)
-            self._log("ENTRY_ORDER_ACCEPTED", setup_time=setup_time, direction=direction,
-                      vol=vol, risk_usdt=round(actual_risk, 4), leverage=leverage)
-            # Position may become visible on the next refresh; the current SL
-            # is already in the entry payload and ensure_protection retries later.
+            order_id = data.get("orderId") if isinstance(data, dict) else data
+            self._store(
+                setup_time,
+                order_id=str(order_id) if order_id is not None else None,
+                status="OPENING",
+                last_error=None,
+            )
+            self._log(
+                "ENTRY_ORDER_ACCEPTED",
+                setup_time=setup_time,
+                direction=direction,
+                vol=sizing["volume"],
+                risk_usdt=round(sizing["estimated_total_risk_usdt"], 6),
+                risk_budget_usdt=round(sizing["risk_budget_usdt"], 6),
+                notional_usdt=round(sizing["notional_usdt"], 4),
+                leverage=sizing["leverage"],
+                margin_est_usdt=round(sizing["estimated_initial_margin_usdt"], 4),
+                reserve_est_usdt=round(sizing["reserve_after_entry_usdt"], 4),
+            )
             self.sync_positions()
             return True
         except Exception as exc:
-            self._log("ENTRY_ERROR", setup_time=int(setup.get("signal_time", 0)), error=type(exc).__name__)
+            self._log(
+                "ENTRY_ERROR",
+                setup_time=setup_time,
+                error=type(exc).__name__,
+                detail=str(exc)[:180],
+            )
             return False
 
     @staticmethod
@@ -374,8 +647,16 @@ class MexcFuturesLive:
                 setup_time = int(trade["setup_time"])
                 position = by_id.get(str(trade.get("position_id"))) if trade.get("position_id") else None
                 if position is None and trade["status"] == "OPEN":
-                    # The protective exchange stop or manual close may have exited it.
-                    self._store(setup_time, status="CLOSED", last_error=None)
+                    # A single empty API snapshot may be transient. Require three
+                    # consecutive successful position reads before declaring exit.
+                    misses = int(trade.get("missing_position_checks", 0) or 0) + 1
+                    if misses >= 3:
+                        self._store(
+                            setup_time, status="CLOSED",
+                            missing_position_checks=misses, last_error=None
+                        )
+                    else:
+                        self._store(setup_time, missing_position_checks=misses)
                     continue
                 if position is None and trade["status"] in ("OPENING", "PROTECTING", "UNKNOWN"):
                     # Adopt a matching position only if its direction is consistent.
@@ -390,6 +671,7 @@ class MexcFuturesLive:
                         )
                 if position is None:
                     continue
+                self._store(setup_time, missing_position_checks=0)
                 # A stop-loss order by position is mandatory. If the entry did
                 # not create an SL, put one on immediately or try again next poll.
                 stop_order_id = trade.get("stop_order_id")

@@ -1,0 +1,87 @@
+import unittest
+
+from mexc_futures_live import MexcLiveError, calculate_position_sizing
+
+
+class PositionSizingTests(unittest.TestCase):
+    def make_sizing(self, stop_pct, **overrides):
+        entry = 100_000.0
+        stop = entry * (1.0 - stop_pct / 100.0)
+        args = {
+            "entry_price": entry,
+            "stop_price": stop,
+            "available_balance": 10.0,
+            "contract_size": 0.0001,
+            "vol_unit": 1,
+            "min_vol": 1,
+            "contract_max_vol": 50000,
+            "taker_fee_rate": 0.0005,
+            "slippage_buffer_bps": 5,
+            "margin_use_fraction": 0.80,
+            "risk_fraction": 0.10,
+            "min_leverage": 1,
+            "contract_max_leverage": 500,
+            "account_max_leverage": 500,
+            "risk_limit_rows": [{
+                "positionType": 1, "openType": 1, "maxVol": 50000,
+                "maxLeverage": 500, "imr": 0.002
+            }],
+            "position_type": 1,
+            "open_type": 1,
+        }
+        args.update(overrides)
+        return calculate_position_sizing(**args)
+
+    def test_closer_stop_requires_higher_leverage(self):
+        tight = self.make_sizing(0.10)
+        wide = self.make_sizing(1.00)
+        self.assertGreater(tight["leverage"], wide["leverage"])
+        self.assertGreater(tight["notional_usdt"], wide["notional_usdt"])
+
+    def test_risk_includes_fees_and_slippage_and_stays_at_or_below_one_r(self):
+        result = self.make_sizing(0.10)
+        self.assertLessEqual(result["estimated_total_risk_usdt"], 1.0)
+        self.assertGreater(result["estimated_round_trip_fees_usdt"], 0)
+        self.assertGreater(result["estimated_slippage_buffer_usdt"], 0)
+        self.assertAlmostEqual(
+            result["estimated_total_risk_usdt"],
+            result["estimated_price_loss_usdt"]
+            + result["estimated_round_trip_fees_usdt"]
+            + result["estimated_slippage_buffer_usdt"],
+            places=8,
+        )
+
+    def test_margin_and_entry_fee_keep_at_least_twenty_percent_free(self):
+        result = self.make_sizing(0.10)
+        committed = (
+            result["estimated_initial_margin_usdt"]
+            + result["estimated_entry_fee_usdt"]
+        )
+        self.assertLessEqual(committed, 8.0)
+        self.assertGreaterEqual(result["reserve_after_entry_usdt"], 2.0)
+
+    def test_risk_tier_volume_limit_is_enforced(self):
+        with self.assertRaises(MexcLiveError):
+            self.make_sizing(
+                0.10,
+                risk_limit_rows=[{
+                    "positionType": 1, "openType": 1, "maxVol": 10,
+                    "maxLeverage": 500, "imr": 0.002
+                }],
+            )
+
+    def test_account_max_leverage_is_enforced(self):
+        with self.assertRaises(MexcLiveError):
+            self.make_sizing(0.10, account_max_leverage=10)
+
+    def test_minimum_order_volume_cannot_exceed_one_r(self):
+        with self.assertRaises(MexcLiveError):
+            self.make_sizing(0.10, min_vol=1000)
+
+    def test_invalid_stop_is_rejected(self):
+        with self.assertRaises(MexcLiveError):
+            self.make_sizing(0.10, stop_price=100000.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
