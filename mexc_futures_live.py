@@ -172,6 +172,30 @@ def calculate_position_sizing(
     }
 
 
+def build_market_open_payload(*, direction, volume, leverage, position_mode, external_oid, stop_loss_price):
+    """Build the MEXC Futures order payload using the 2026-10-23 API schema."""
+    direction = str(direction).upper()
+    if direction not in ("LONG", "SHORT"):
+        raise MexcLiveError("Unsupported BTC setup direction")
+    if int(position_mode) != 1:
+        raise MexcLiveError("Only verified Hedge Mode is supported")
+    return {
+        "symbol": SYMBOL,
+        "price": 0,
+        "vol": volume,
+        "leverage": leverage,
+        "side": 1 if direction == "LONG" else 3,
+        "sideType": "buy" if direction == "LONG" else "sell",
+        "positionType": "long" if direction == "LONG" else "short",
+        "type": 5,
+        "openType": 1,
+        "positionMode": int(position_mode),
+        "externalOid": external_oid,
+        "stopLossPrice": stop_loss_price,
+        "lossTrend": 1,
+    }
+
+
 class MexcFuturesLive:
     def __init__(self, db_file):
         self.db_file = db_file
@@ -443,6 +467,43 @@ class MexcFuturesLive:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def preflight(self):
+        """Read-only validation before LIVE is allowed to receive setup signals."""
+        if not self.enabled:
+            raise MexcLiveError("LIVE flag or API credentials are not enabled")
+        mode = self._position_mode()
+        if mode != 1:
+            raise MexcLiveError("BTC Futures account must use Hedge Mode (positionMode=1)")
+        available = self._usdt_available()
+        if available <= 0:
+            raise MexcLiveError("No available USDT in Futures account")
+        meta = self._contract()
+        if float(meta.get("contractSize", 0) or 0) <= 0:
+            raise MexcLiveError("BTC_USDT contract size is missing")
+        if float(meta.get("volUnit", 0) or 0) <= 0 or float(meta.get("minVol", 0) or 0) <= 0:
+            raise MexcLiveError("BTC_USDT minimum volume rules are missing")
+        fees = self._fee_info()
+        risk_rows = self._risk_limits()
+        for position_type in (1, 2):
+            leverage = self._leverage_info(position_type)
+            tiers = [
+                row for row in risk_rows
+                if int(row.get("positionType", 0)) == position_type
+                and int(row.get("openType", 1)) == 1
+                and float(row.get("maxVol", 0) or 0) > 0
+                and int(row.get("maxLeverage", 0) or 0) > 0
+            ]
+            if not tiers or int(leverage.get("maxLeverageView", 0)) < 1:
+                raise MexcLiveError("BTC_USDT leverage/risk limits are incomplete")
+        if self._positions():
+            raise MexcLiveError("An existing BTC_USDT Futures position is open; LIVE remains blocked")
+        return {
+            "available_usdt": available,
+            "position_mode": mode,
+            "max_leverage": int(fees["maxLeverage"]),
+            "contract_size": float(meta["contractSize"]),
+        }
+
     def maybe_open(self, setup, entry, initial_sl, planned_rr, current_price, now_ts):
         """Open a fresh BTC_USDT setup using dynamic risk-sized leverage."""
         if not self.enabled or not setup or setup.get("symbol", SYMBOL) != SYMBOL:
@@ -560,21 +621,15 @@ class MexcFuturesLive:
                 )
                 conn.commit()
 
-            # Official MEXC Place Order fields: side is numeric; sideType and
-            # string positionType are not part of the documented schema.
-            payload = {
-                "symbol": SYMBOL,
-                "price": 0,
-                "vol": sizing["volume"],
-                "leverage": sizing["leverage"],
-                "side": 1 if direction == "LONG" else 3,
-                "type": 5,
-                "openType": 1,
-                "positionMode": mode,
-                "externalOid": external_oid,
-                "stopLossPrice": self._format_price(sl, meta, direction),
-                "lossTrend": 1,
-            }
+            # MEXC added sideType and string positionType to order/create on 2026-10-23.
+            payload = build_market_open_payload(
+                direction=direction,
+                volume=sizing["volume"],
+                leverage=sizing["leverage"],
+                position_mode=mode,
+                external_oid=external_oid,
+                stop_loss_price=self._format_price(sl, meta, direction),
+            )
             try:
                 data = self._request("POST", "/api/v1/private/order/create", payload)
             except MexcLiveError as exc:
@@ -785,6 +840,25 @@ class MexcFuturesLive:
                     "stopPlanOrderId": int(stop_id),
                     "stopLossPrice": candidate,
                 })
+            # Read the stop list back; do not mark the local SL updated until MEXC confirms it.
+            confirmed = False
+            for _ in range(3):
+                for current_stop in self._stop_orders():
+                    current_id = current_stop.get("id", current_stop.get("stopOrderId"))
+                    if str(current_id) != str(stop_id) or int(current_stop.get("state", 1) or 1) != 1:
+                        continue
+                    remote_price = current_stop.get("stopLossPrice", current_stop.get("triggerPrice"))
+                    try:
+                        if remote_price not in (None, "", 0, "0") and abs(float(remote_price) - candidate) <= max(float(meta.get("priceUnit", 0) or 0) / 2, 1e-8):
+                            confirmed = True
+                            break
+                    except (TypeError, ValueError):
+                        pass
+                if confirmed:
+                    break
+                time.sleep(0.2)
+            if not confirmed:
+                raise MexcLiveError("MEXC did not confirm the updated stop-loss price")
             self._store(setup_time, current_sl=candidate, last_error=None)
             self._log("SL_UPDATED", setup_time=int(setup_time), sl=candidate)
             return True
