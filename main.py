@@ -4787,10 +4787,15 @@ def engine_loop():
         else:
             try:
                 LIVE_EXECUTOR = MexcFuturesLive(DB_FILE)
+                if not LIVE_EXECUTOR.enabled:
+                    raise RuntimeError("LIVE flag or MEXC API credentials are not enabled")
+                preflight = LIVE_EXECUTOR.preflight()
                 print(
-                    "MEXC_LIVE adapter=INITIALIZED "
-                    f"enabled={str(LIVE_EXECUTOR.enabled).lower()} "
-                    "symbol=BTC_USDT risk_fraction=0.10",
+                    "MEXC_LIVE status=READY "
+                    "symbol=BTC_USDT account=FUTURES mode=HEDGE "
+                    f"available_usdt={preflight['available_usdt']:.4f} "
+                    f"max_leverage={preflight['max_leverage']} risk_fraction=0.10 "
+                    "orders_placed=false",
                     flush=True,
                 )
             except Exception as live_exc:
