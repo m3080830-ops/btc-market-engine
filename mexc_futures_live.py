@@ -91,14 +91,9 @@ def calculate_position_sizing(
     margin_budget = available_balance * margin_use_fraction
     slip_rate = slippage_buffer_bps / 10000.0
 
-    # Conservative estimated loss per contract:
-    # price movement to SL + taker fees on entry/exit + slippage on both sides.
-    per_contract_risk = contract_size * (
-        gap
-        + entry_price * taker_fee_rate
-        + stop_price * taker_fee_rate
-        + (entry_price + stop_price) * slip_rate
-    )
+    # Match paper sizing exactly: 1R is entry-to-initial-SL price movement.
+    # Exchange fees and slippage are deliberately excluded from position sizing.
+    per_contract_risk = contract_size * gap
     if per_contract_risk <= 0 or not math.isfinite(per_contract_risk):
         raise MexcLiveError("Invalid per-contract risk estimate")
 
@@ -152,9 +147,11 @@ def calculate_position_sizing(
         raise MexcLiveError("No permitted leverage can fit this position while preserving the reserve")
 
     price_loss = volume * contract_size * gap
-    round_trip_fees = volume * contract_size * (entry_price + stop_price) * taker_fee_rate
-    slippage_buffer = volume * contract_size * (entry_price + stop_price) * slip_rate
-    total_risk = price_loss + round_trip_fees + slippage_buffer
+    # Keep the displayed/sized 1R identical to paper mode; fees are exchange costs,
+    # not part of the strategy's R calculation.
+    round_trip_fees = 0.0
+    slippage_buffer = 0.0
+    total_risk = price_loss
     if total_risk > risk_budget + 1e-9:
         raise MexcLiveError("Calculated position exceeds the configured 1R budget")
 
@@ -574,6 +571,8 @@ class MexcFuturesLive:
                 "vol": sizing["volume"],
                 "leverage": sizing["leverage"],
                 "side": 1 if direction == "LONG" else 3,
+                "sideType": "buy" if direction == "LONG" else "sell",
+                "positionType": "long" if direction == "LONG" else "short",
                 "type": 5,
                 "openType": 1,
                 "positionMode": mode,
