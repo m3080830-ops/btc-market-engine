@@ -38,20 +38,15 @@ class PositionSizingTests(unittest.TestCase):
         self.assertGreater(tight["leverage"], wide["leverage"])
         self.assertGreater(tight["notional_usdt"], wide["notional_usdt"])
 
-    def test_risk_includes_fees_and_slippage_and_stays_at_or_below_one_r(self):
+    def test_risk_matches_paper_price_only_calculation(self):
         result = self.make_sizing(0.10)
         self.assertLessEqual(result["estimated_total_risk_usdt"], 1.0)
-        self.assertGreater(result["estimated_round_trip_fees_usdt"], 0)
-        self.assertGreater(result["estimated_slippage_buffer_usdt"], 0)
-        self.assertAlmostEqual(
-            result["estimated_total_risk_usdt"],
-            result["estimated_price_loss_usdt"]
-            + result["estimated_round_trip_fees_usdt"]
-            + result["estimated_slippage_buffer_usdt"],
-            places=8,
-        )
+        self.assertAlmostEqual(result["estimated_total_risk_usdt"], result["estimated_price_loss_usdt"], places=8)
+        self.assertEqual(result["estimated_round_trip_fees_usdt"], 0.0)
+        self.assertEqual(result["estimated_slippage_buffer_usdt"], 0.0)
+        self.assertEqual(result["estimated_entry_fee_usdt"], 0.0)
 
-    def test_margin_and_entry_fee_keep_at_least_twenty_percent_free(self):
+    def test_margin_budget_keeps_at_least_twenty_percent_free_without_fee_adjustment(self):
         result = self.make_sizing(0.10)
         committed = (
             result["estimated_initial_margin_usdt"]
