@@ -1,6 +1,8 @@
 import unittest
 
-from mexc_futures_live import (\n    MexcLiveError, calculate_position_sizing, build_market_open_payload,\n)
+from mexc_futures_live import (
+    MexcLiveError, calculate_position_sizing, build_market_open_payload,
+)
 
 
 class PositionSizingTests(unittest.TestCase):
