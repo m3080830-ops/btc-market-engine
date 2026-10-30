@@ -8,6 +8,7 @@ on:
       - "strategy.py"
       - "mexc_futures_live.py"
       - "Dockerfile"
+      - "tests/**"
       - ".github/workflows/safe-tests.yml"
   push:
     paths:
