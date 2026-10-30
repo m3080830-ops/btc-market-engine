@@ -108,12 +108,15 @@ def calculate_position_sizing(
         float(contract_max_vol) if contract_max_vol and float(contract_max_vol) > 0 else float("inf"),
         max(item[0] for item in matching_tiers),
     )
-    volume = min(
-        volume,
-        math.floor((maximum_allowed_volume + 1e-12) / vol_unit) * vol_unit,
+    maximum_allowed_volume = (
+        math.floor((maximum_allowed_volume + 1e-12) / vol_unit) * vol_unit
     )
     if volume < min_vol:
         raise MexcLiveError("Minimum order volume would exceed the 1R risk budget")
+    if volume > maximum_allowed_volume:
+        raise MexcLiveError(
+            "MEXC contract/risk tier volume cap cannot support the full 1R position"
+        )
 
     selected = next((item for item in matching_tiers if volume <= item[0]), None)
     if selected is None:

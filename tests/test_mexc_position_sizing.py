@@ -64,6 +64,7 @@ class PositionSizingTests(unittest.TestCase):
         with self.assertRaises(MexcLiveError):
             self.make_sizing(
                 0.10,
+                contract_max_vol=50000,
                 risk_limit_rows=[{
                     "positionType": 1, "openType": 1, "maxVol": 10,
                     "maxLeverage": 500, "imr": 0.002
