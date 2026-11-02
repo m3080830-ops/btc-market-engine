@@ -354,7 +354,7 @@ class MexcFuturesLive:
     def _invalid_json_detail(self, method, path, status, content_type, raw):
         """Build a short diagnostic without exposing credentials or signed data."""
         excerpt = (raw or b"")[:512].decode("utf-8", errors="replace")
-        excerpt = " ".join(
+        excerpt = "".join(
             char if char.isprintable() else " " for char in excerpt
         )
         excerpt = " ".join(excerpt.split())
