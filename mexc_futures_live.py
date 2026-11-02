@@ -22,6 +22,7 @@ SYMBOL = "BTC_USDT"
 RISK_FRACTION = float(os.getenv("MEXC_RISK_FRACTION", "0.10"))
 MARGIN_USE_CAP = float(os.getenv("MEXC_MAX_MARGIN_FRACTION", "0.80"))
 SLIPPAGE_BUFFER_BPS = float(os.getenv("MEXC_SLIPPAGE_BUFFER_BPS", "5"))
+MAX_API_RESPONSE_BYTES = 1_048_576
 
 
 class MexcLiveError(RuntimeError):
@@ -307,9 +308,17 @@ class MexcFuturesLive:
                                      headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=8) as response:
-                raw = response.read(8192)
                 status = response.getcode()
                 content_type = response.headers.get("Content-Type", "unknown")
+                # Read the complete JSON document, not a fixed 8 KB prefix. Keep
+                # a hard cap so a faulty endpoint cannot allocate unbounded memory.
+                raw = response.read(MAX_API_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_API_RESPONSE_BYTES:
+                    raise MexcLiveError(
+                        f"MEXC {method} {path}: response exceeds safety limit "
+                        f"max_bytes={MAX_API_RESPONSE_BYTES} http_status={status} "
+                        f"content_type={str(content_type)[:100]}"
+                    )
                 try:
                     payload = json.loads(raw.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
@@ -319,10 +328,18 @@ class MexcFuturesLive:
         except urllib.error.HTTPError as exc:
             # A 4xx response is a definite rejection; a 5xx may have an ambiguous outcome.
             try:
-                raw = exc.read(4096)
+                raw = exc.read(MAX_API_RESPONSE_BYTES + 1)
             except Exception:
                 raw = b""
             content_type = exc.headers.get("Content-Type", "unknown") if exc.headers else "unknown"
+            rejected = 400 <= int(exc.code) < 500
+            if len(raw) > MAX_API_RESPONSE_BYTES:
+                raise MexcLiveError(
+                    f"MEXC HTTP {exc.code} {method} {path}: error response exceeds "
+                    f"safety limit max_bytes={MAX_API_RESPONSE_BYTES} "
+                    f"content_type={str(content_type)[:100]}",
+                    rejected=rejected, code=exc.code,
+                ) from None
             try:
                 error_payload = json.loads(raw.decode("utf-8")) if raw else {}
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -331,7 +348,6 @@ class MexcFuturesLive:
                     rejected=400 <= int(exc.code) < 500, code=exc.code,
                 ) from None
             detail = self._safe_error_detail(error_payload)
-            rejected = 400 <= int(exc.code) < 500
             raise MexcLiveError(
                 f"MEXC HTTP {exc.code} {method} {path}: {detail}",
                 rejected=rejected, code=exc.code,
