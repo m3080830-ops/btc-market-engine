@@ -398,7 +398,7 @@ class MexcFuturesLive:
         if reason is None:
             reason = exc
         reason_type = type(reason).__name__
-        reason_text = " ".join(str(reason).replace("\\r", " ").replace("\\n", " ").split())
+        reason_text = " ".join(str(reason).replace("\r", " ").replace("\n", " ").split())
         for secret in (self.access_key, self.secret_key):
             if secret:
                 reason_text = reason_text.replace(secret, "[redacted]")
@@ -419,7 +419,7 @@ class MexcFuturesLive:
             return "code=invalid-response message=empty-or-unreadable-response"
         code = payload.get("code", payload.get("errorCode", "unknown"))
         message = payload.get("message", payload.get("msg", ""))
-        message = " ".join(str(message).replace("\\r", " ").replace("\\n", " ").split())
+        message = " ".join(str(message).replace("\r", " ").replace("\n", " ").split())
         for secret in (self.access_key, self.secret_key):
             if secret:
                 message = message.replace(secret, "[redacted]")
