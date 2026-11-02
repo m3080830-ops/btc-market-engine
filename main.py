@@ -1745,7 +1745,8 @@ def live_refresh():
                                     except Exception as live_exc:
                                         print(
                                             "MEXC_LIVE ENTRY_HOOK_ERROR "
-                                            f"error={type(live_exc).__name__}",
+                                            f"error={type(live_exc).__name__} "
+                                            f"detail={str(live_exc)[:180]}",
                                             flush=True,
                                         )
 
@@ -1770,7 +1771,8 @@ def live_refresh():
                         print(
                             "MEXC_LIVE STOP_HOOK_ERROR "
                             f"setup_time={live_row['setup_time']} "
-                            f"error={type(live_exc).__name__}",
+                            f"error={type(live_exc).__name__} "
+                                            f"detail={str(live_exc)[:180]}",
                             flush=True,
                         )
 
