@@ -9,7 +9,9 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from decimal import Decimal, ROUND_DOWN
@@ -101,9 +103,35 @@ class MexcFuturesReadOnlyClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            # Include the low-level network cause, never request headers/signatures.
+            reason = getattr(exc, "reason", None)
+            if reason is None:
+                reason = exc
+            reason_type = type(reason).__name__
+            reason_text = " ".join(str(reason).replace("\r", " ").replace("\n", " ").split())
+            for secret in (self.access_key, self.secret_key):
+                if secret:
+                    reason_text = reason_text.replace(secret, "[redacted]")
+            reason_text = re.sub(
+                r'(?i)(api[_-]?key|secret(?:[_-]?key)?|signature|sign|token|authorization)'
+                r'(["\']?\s*[:=]\s*["\']?)[^,\s"\'&}]+',
+                r'\1\2[redacted]',
+                reason_text,
+            )
+            errno = getattr(reason, "errno", getattr(exc, "errno", None))
+            errno_part = f" errno={errno}" if isinstance(errno, int) else ""
+            reason_text = reason_text[:160] or "no-details"
+            raise MexcAPIError(
+                f"MEXC private GET {path} transport failure "
+                f"({type(exc).__name__} reason_type={reason_type}{errno_part} "
+                f"reason={reason_text})"
+            ) from None
         except Exception as exc:
             # Do not include request headers, signature or secret in errors/logs.
-            raise MexcAPIError(f"MEXC private GET failed ({type(exc).__name__})") from None
+            raise MexcAPIError(
+                f"MEXC private GET {path} failed ({type(exc).__name__})"
+            ) from None
         if not isinstance(payload, dict) or payload.get("success") is not True:
             code = payload.get("code") if isinstance(payload, dict) else "invalid-response"
             raise MexcAPIError(f"MEXC rejected read-only request (code={code})")
