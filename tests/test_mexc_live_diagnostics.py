@@ -2,6 +2,8 @@ import unittest
 from unittest.mock import patch
 
 from mexc_futures_live import MexcFuturesLive, MexcLiveError
+from mexc_futures import MexcFuturesReadOnlyClient, MexcAPIError
+import urllib.error
 
 
 class _FakeHeaders(dict):
@@ -66,6 +68,37 @@ class InvalidJsonDiagnosticsTests(unittest.TestCase):
             self._call_with_body(body, content_type="application/json")
         self.assertIn("response exceeds safety limit", str(caught.exception))
         self.assertNotIn(self.client.secret_key, str(caught.exception))
+
+    def test_live_transport_error_includes_safe_underlying_reason(self):
+        reason = f"temporary network failure {self.client.secret_key}"
+        with patch(
+            "mexc_futures_live.urllib.request.urlopen",
+            side_effect=urllib.error.URLError(reason),
+        ):
+            with self.assertRaises(MexcLiveError) as caught:
+                self.client._request("GET", "/api/v1/private/position/position_mode")
+        message = str(caught.exception)
+        self.assertIn("/api/v1/private/position/position_mode", message)
+        self.assertIn("reason_type=str", message)
+        self.assertIn("temporary network failure", message)
+        self.assertNotIn(self.client.secret_key, message)
+
+    def test_read_only_connection_check_reports_safe_transport_reason(self):
+        client = MexcFuturesReadOnlyClient(
+            access_key="test-access-secret",
+            secret_key="test-private-secret",
+        )
+        with patch(
+            "mexc_futures.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("timed out"),
+        ):
+            with self.assertRaises(MexcAPIError) as caught:
+                client.get_private("/api/v1/private/account/tiered_fee_rate/v2", {"symbol": "BTC_USDT"})
+        message = str(caught.exception)
+        self.assertIn("/api/v1/private/account/tiered_fee_rate/v2", message)
+        self.assertIn("reason_type=str", message)
+        self.assertIn("timed out", message)
+        self.assertNotIn("test-private-secret", message)
 
     def test_empty_response_is_reported_without_crashing(self):
         with self.assertRaises(MexcLiveError) as caught:
