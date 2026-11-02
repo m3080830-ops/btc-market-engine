@@ -404,8 +404,8 @@ class MexcFuturesLive:
                 reason_text = reason_text.replace(secret, "[redacted]")
         reason_text = re.sub(
             r'(?i)(api[_-]?key|secret(?:[_-]?key)?|signature|sign|token|authorization)'
-            r'(["\']?\\s*[:=]\\s*["\']?)[^,\\s"\'&}]+',
-            r'\\1\\2[redacted]',
+            r'(["\']?\s*[:=]\s*["\']?)[^,\s"\'&}]+',
+            r'\1\2[redacted]',
             reason_text,
         )
         errno = getattr(reason, "errno", getattr(exc, "errno", None))
