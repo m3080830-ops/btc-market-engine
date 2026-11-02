@@ -11,6 +11,7 @@ import math
 import os
 import sqlite3
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -23,7 +24,12 @@ SLIPPAGE_BUFFER_BPS = float(os.getenv("MEXC_SLIPPAGE_BUFFER_BPS", "5"))
 
 
 class MexcLiveError(RuntimeError):
-    pass
+    """Safe-to-log execution error with retry classification."""
+
+    def __init__(self, message, *, rejected=False, code=None):
+        super().__init__(message)
+        self.rejected = bool(rejected)
+        self.code = code
 
 
 def calculate_position_sizing(
@@ -172,6 +178,30 @@ def calculate_position_sizing(
     }
 
 
+def build_market_open_payload(*, direction, volume, leverage, position_mode, external_oid, stop_loss_price):
+    """Build the MEXC Futures order payload using the 2026-10-23 API schema."""
+    direction = str(direction).upper()
+    if direction not in ("LONG", "SHORT"):
+        raise MexcLiveError("Unsupported BTC setup direction")
+    if int(position_mode) != 1:
+        raise MexcLiveError("Only verified Hedge Mode is supported")
+    return {
+        "symbol": SYMBOL,
+        "price": 0,
+        "vol": volume,
+        "leverage": leverage,
+        "side": 1 if direction == "LONG" else 3,
+        "sideType": "buy" if direction == "LONG" else "sell",
+        "positionType": "long" if direction == "LONG" else "short",
+        "type": 5,
+        "openType": 1,
+        "positionMode": int(position_mode),
+        "externalOid": external_oid,
+        "stopLossPrice": stop_loss_price,
+        "lossTrend": 1,
+    }
+
+
 class MexcFuturesLive:
     def __init__(self, db_file):
         self.db_file = db_file
@@ -183,6 +213,7 @@ class MexcFuturesLive:
             and bool(self.access_key)
             and bool(self.secret_key)
         )
+        self._last_entry_attempt = {}
         self._init_db()
 
     def _conn(self):
@@ -275,15 +306,51 @@ class MexcFuturesLive:
                                      headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=8) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except Exception as exc:
-            # Never reveal request headers, secrets, signatures, or response bodies.
-            raise MexcLiveError(f"MEXC {method} {path} transport failure: {type(exc).__name__}") from None
+                raw = response.read(8192)
+                payload = json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # A 4xx response is a definite rejection; a 5xx may have an ambiguous outcome.
+            try:
+                raw = exc.read(4096)
+                error_payload = json.loads(raw.decode("utf-8")) if raw else {}
+            except Exception:
+                error_payload = {}
+            detail = self._safe_error_detail(error_payload)
+            rejected = 400 <= int(exc.code) < 500
+            raise MexcLiveError(
+                f"MEXC HTTP {exc.code} {method} {path}: {detail}",
+                rejected=rejected, code=exc.code,
+            ) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            # A timeout/network failure after order submission has an ambiguous outcome.
+            raise MexcLiveError(
+                f"MEXC {method} {path} transport failure: {type(exc).__name__}"
+            ) from None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise MexcLiveError(
+                f"MEXC {method} {path}: invalid JSON response"
+            ) from None
+
         if not isinstance(payload, dict) or payload.get("success") is not True:
-            code = payload.get("code", "invalid-response") if isinstance(payload, dict) else "invalid-response"
-            msg = payload.get("message", payload.get("msg", "")) if isinstance(payload, dict) else ""
-            raise MexcLiveError(f"MEXC rejected {path}: code={code} {str(msg)[:160]}")
+            detail = self._safe_error_detail(payload)
+            raise MexcLiveError(
+                f"MEXC rejected {path}: {detail}",
+                rejected=isinstance(payload, dict),
+                code=(payload.get("code") if isinstance(payload, dict) else None),
+            )
         return payload.get("data")
+
+    def _safe_error_detail(self, payload):
+        """Expose only API code/message; never log credentials, signatures, or headers."""
+        if not isinstance(payload, dict):
+            return "code=invalid-response message=empty-or-unreadable-response"
+        code = payload.get("code", payload.get("errorCode", "unknown"))
+        message = payload.get("message", payload.get("msg", ""))
+        message = " ".join(str(message).replace("\\r", " ").replace("\\n", " ").split())
+        for secret in (self.access_key, self.secret_key):
+            if secret:
+                message = message.replace(secret, "[redacted]")
+        return f"code={str(code)[:40]} message={message[:160] or 'not-provided'}"
 
     @staticmethod
     def _rows(data):
@@ -443,19 +510,89 @@ class MexcFuturesLive:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def preflight(self):
+        """Read-only Futures checks; no order is created or modified."""
+        if not self.enabled:
+            raise MexcLiveError("LIVE flag or MEXC API credentials are not enabled")
+
+        mode = self._position_mode()
+        if mode != 1:
+            raise MexcLiveError(
+                "BTC Futures account must use Hedge Mode (positionMode=1); "
+                "One-Way Mode is deliberately not enabled in this execution adapter"
+            )
+
+        available = self._usdt_available()
+        if available <= 0:
+            raise MexcLiveError("No available USDT in the Futures account")
+
+        meta = self._contract()
+        try:
+            contract_size = float(meta["contractSize"])
+            vol_unit = float(meta["volUnit"])
+            min_vol = float(meta["minVol"])
+        except (KeyError, TypeError, ValueError):
+            raise MexcLiveError("BTC_USDT contract sizing metadata is incomplete") from None
+        if contract_size <= 0 or vol_unit <= 0 or min_vol <= 0:
+            raise MexcLiveError("BTC_USDT contract sizing metadata is invalid")
+
+        fees = self._fee_info()
+        risk_rows = self._risk_limits()
+        side_limits = {}
+        for position_type, label in ((1, "LONG"), (2, "SHORT")):
+            leverage = self._leverage_info(position_type)
+            tiers = [
+                row for row in risk_rows
+                if int(row.get("positionType", 0)) == position_type
+                and int(row.get("openType", 1)) == 1
+                and float(row.get("maxVol", 0) or 0) > 0
+                and int(row.get("maxLeverage", 0) or 0) > 0
+            ]
+            if not tiers or int(leverage.get("maxLeverageView", 0)) < 1:
+                raise MexcLiveError(f"BTC_USDT {label} leverage/risk limits are incomplete")
+            side_limits[label] = {
+                "max_leverage": int(leverage["maxLeverageView"]),
+                "risk_tiers": len(tiers),
+            }
+
+        # An existing position must not disable reconciliation/protection.
+        # maybe_open() separately blocks a second BTC position.
+        existing_positions = self._positions()
+        return {
+            "available_usdt": available,
+            "position_mode": mode,
+            "max_leverage": int(fees["maxLeverage"]),
+            "contract_size": contract_size,
+            "vol_unit": vol_unit,
+            "min_vol": min_vol,
+            "existing_position_count": len(existing_positions),
+            "side_limits": side_limits,
+        }
+
     def maybe_open(self, setup, entry, initial_sl, planned_rr, current_price, now_ts):
-        """Open a fresh BTC_USDT setup using dynamic risk-sized leverage."""
+        """Open one fresh BTC_USDT Futures setup; never replays a stale PAPER entry."""
         if not self.enabled or not setup or setup.get("symbol", SYMBOL) != SYMBOL:
             return False
-        if entry is None or initial_sl is None or planned_rr is None or float(planned_rr) < 1.0:
+        if entry is None or initial_sl is None or planned_rr is None:
+            return False
+        try:
+            planned_rr = float(planned_rr)
+        except (TypeError, ValueError):
+            return False
+        if planned_rr < 1.0:
             return False
 
         setup_time = int(setup.get("signal_time", 0) or 0)
         try:
             entry_time = int(entry["time"])
             now = int(now_ts)
+            # Only execute during the M15 candle selected by the strategy.
             if entry_time != (now // 900) * 900 or entry_time > now:
                 return False
+            last_attempt = int(self._last_entry_attempt.get(setup_time, 0) or 0)
+            if now - last_attempt < 60:
+                return False
+            self._last_entry_attempt[setup_time] = now
 
             direction = str(setup["direction"]).upper()
             if direction not in ("LONG", "SHORT"):
@@ -468,6 +605,10 @@ class MexcFuturesLive:
                     (setup_time,)
                 ).fetchone()
                 if existing:
+                    self._log(
+                        "ENTRY_SKIPPED", setup_time=setup_time,
+                        reason=f"setup_already_{existing['status'].lower()}"
+                    )
                     return False
                 busy = conn.execute(
                     """SELECT 1 FROM mexc_live_trades
@@ -475,10 +616,17 @@ class MexcFuturesLive:
                        LIMIT 1"""
                 ).fetchone()
                 if busy:
+                    self._log(
+                        "ENTRY_SKIPPED", setup_time=setup_time,
+                        reason="another_live_trade_is_active"
+                    )
                     return False
 
             if self._positions():
-                self._log("ENTRY_SKIPPED", reason="BTC_USDT_position_already_exists")
+                self._log(
+                    "ENTRY_SKIPPED", setup_time=setup_time,
+                    reason="BTC_USDT_position_already_exists"
+                )
                 return False
 
             mode = self._position_mode()
@@ -560,32 +708,29 @@ class MexcFuturesLive:
                 )
                 conn.commit()
 
-            # Official MEXC Place Order fields: side is numeric; sideType and
-            # string positionType are not part of the documented schema.
-            payload = {
-                "symbol": SYMBOL,
-                "price": 0,
-                "vol": sizing["volume"],
-                "leverage": sizing["leverage"],
-                "side": 1 if direction == "LONG" else 3,
-                "type": 5,
-                "openType": 1,
-                "positionMode": mode,
-                "externalOid": external_oid,
-                "stopLossPrice": self._format_price(sl, meta, direction),
-                "lossTrend": 1,
-            }
+            # MEXC added sideType and string positionType to order/create on 2026-10-23.
+            payload = build_market_open_payload(
+                direction=direction,
+                volume=sizing["volume"],
+                leverage=sizing["leverage"],
+                position_mode=mode,
+                external_oid=external_oid,
+                stop_loss_price=self._format_price(sl, meta, direction),
+            )
             try:
                 data = self._request("POST", "/api/v1/private/order/create", payload)
             except MexcLiveError as exc:
-                # A lost response is UNKNOWN; do not blindly resubmit a possible fill.
-                rejected = "code=" in str(exc).lower()
+                # A lost response is UNKNOWN; never blindly resubmit a possible fill.
                 self._store(
                     setup_time,
-                    status="REJECTED" if rejected else "UNKNOWN",
+                    status="REJECTED" if exc.rejected else "UNKNOWN",
                     last_error=str(exc)[:300],
                 )
-                self._log("ENTRY_FAILED", setup_time=setup_time, error=type(exc).__name__)
+                self._log(
+                    "ENTRY_FAILED", setup_time=setup_time,
+                    error=type(exc).__name__, detail=str(exc)[:220],
+                    outcome="REJECTED" if exc.rejected else "UNKNOWN",
+                )
                 return False
 
             order_id = data.get("orderId") if isinstance(data, dict) else data
@@ -723,10 +868,19 @@ class MexcFuturesLive:
                                 last_error=None)
                     self._log("INITIAL_SL_CONFIRMED", setup_time=setup_time, sl=trade["current_sl"])
                 except Exception as exc:
-                    self._store(setup_time, status="PROTECTING", last_error=f"SL protection: {type(exc).__name__}")
-                    self._log("SL_PROTECTION_RETRY", setup_time=setup_time, error=type(exc).__name__)
+                    self._store(
+                        setup_time, status="PROTECTING",
+                        last_error=f"SL protection: {type(exc).__name__}: {str(exc)[:180]}"
+                    )
+                    self._log(
+                        "SL_PROTECTION_RETRY", setup_time=setup_time,
+                        error=type(exc).__name__, detail=str(exc)[:180]
+                    )
         except Exception as exc:
-            self._log("POSITION_SYNC_ERROR", error=type(exc).__name__)
+            self._log(
+                "POSITION_SYNC_ERROR", error=type(exc).__name__,
+                detail=str(exc)[:180]
+            )
 
     def update_stop(self, setup_time, direction, new_sl):
         """Apply the engine's already-calculated tighter SL to MEXC Futures."""
@@ -785,12 +939,37 @@ class MexcFuturesLive:
                     "stopPlanOrderId": int(stop_id),
                     "stopLossPrice": candidate,
                 })
+            # Read the stop list back; do not mark the local SL updated until MEXC confirms it.
+            confirmed = False
+            for _ in range(3):
+                for current_stop in self._stop_orders():
+                    current_id = current_stop.get("id", current_stop.get("stopOrderId"))
+                    if str(current_id) != str(stop_id) or int(current_stop.get("state", 1) or 1) != 1:
+                        continue
+                    remote_price = current_stop.get("stopLossPrice", current_stop.get("triggerPrice"))
+                    try:
+                        if remote_price not in (None, "", 0, "0") and abs(float(remote_price) - candidate) <= max(float(meta.get("priceUnit", 0) or 0) / 2, 1e-8):
+                            confirmed = True
+                            break
+                    except (TypeError, ValueError):
+                        pass
+                if confirmed:
+                    break
+                time.sleep(0.2)
+            if not confirmed:
+                raise MexcLiveError("MEXC did not confirm the updated stop-loss price")
             self._store(setup_time, current_sl=candidate, last_error=None)
             self._log("SL_UPDATED", setup_time=int(setup_time), sl=candidate)
             return True
         except Exception as exc:
-            self._store(setup_time, last_error=f"SL update: {type(exc).__name__}")
-            self._log("SL_UPDATE_FAILED", setup_time=int(setup_time), error=type(exc).__name__)
+            self._store(
+                setup_time,
+                last_error=f"SL update: {type(exc).__name__}: {str(exc)[:180]}"
+            )
+            self._log(
+                "SL_UPDATE_FAILED", setup_time=int(setup_time),
+                error=type(exc).__name__, detail=str(exc)[:180]
+            )
             raise
 
     def update_metrics(self, setup_time, **fields):
