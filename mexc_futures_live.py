@@ -9,6 +9,7 @@ import hmac
 import json
 import math
 import os
+import re
 import sqlite3
 import time
 import urllib.error
@@ -307,14 +308,28 @@ class MexcFuturesLive:
         try:
             with urllib.request.urlopen(req, timeout=8) as response:
                 raw = response.read(8192)
-                payload = json.loads(raw.decode("utf-8"))
+                status = response.getcode()
+                content_type = response.headers.get("Content-Type", "unknown")
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    raise MexcLiveError(
+                        self._invalid_json_detail(method, path, status, content_type, raw)
+                    ) from None
         except urllib.error.HTTPError as exc:
             # A 4xx response is a definite rejection; a 5xx may have an ambiguous outcome.
             try:
                 raw = exc.read(4096)
-                error_payload = json.loads(raw.decode("utf-8")) if raw else {}
             except Exception:
-                error_payload = {}
+                raw = b""
+            content_type = exc.headers.get("Content-Type", "unknown") if exc.headers else "unknown"
+            try:
+                error_payload = json.loads(raw.decode("utf-8")) if raw else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise MexcLiveError(
+                    self._invalid_json_detail(method, path, exc.code, content_type, raw),
+                    rejected=400 <= int(exc.code) < 500, code=exc.code,
+                ) from None
             detail = self._safe_error_detail(error_payload)
             rejected = 400 <= int(exc.code) < 500
             raise MexcLiveError(
@@ -326,10 +341,6 @@ class MexcFuturesLive:
             raise MexcLiveError(
                 f"MEXC {method} {path} transport failure: {type(exc).__name__}"
             ) from None
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            raise MexcLiveError(
-                f"MEXC {method} {path}: invalid JSON response"
-            ) from None
 
         if not isinstance(payload, dict) or payload.get("success") is not True:
             detail = self._safe_error_detail(payload)
@@ -339,6 +350,30 @@ class MexcFuturesLive:
                 code=(payload.get("code") if isinstance(payload, dict) else None),
             )
         return payload.get("data")
+
+    def _invalid_json_detail(self, method, path, status, content_type, raw):
+        """Build a short diagnostic without exposing credentials or signed data."""
+        excerpt = (raw or b"")[:512].decode("utf-8", errors="replace")
+        excerpt = "".join(
+            char if char.isprintable() else " " for char in excerpt
+        )
+        excerpt = " ".join(excerpt.split())
+        for secret in (self.access_key, self.secret_key):
+            if secret:
+                excerpt = excerpt.replace(secret, "[redacted]")
+        excerpt = re.sub(
+            r'(?i)(api[_-]?key|secret(?:[_-]?key)?|signature|sign|token|authorization)'
+            r'(["\']?\s*[:=]\s*["\']?)[^,\s"\'&}]+',
+            r'\1\2[redacted]',
+            excerpt,
+        )
+        excerpt = re.sub(r"(?i)bearer\s+[^\s<]+", "Bearer [redacted]", excerpt)
+        excerpt = excerpt[:240] or "<empty response>"
+        return (
+            f"MEXC {method} {path}: invalid JSON response "
+            f"http_status={status} content_type={str(content_type)[:100]} "
+            f"body_excerpt={excerpt}"
+        )
 
     def _safe_error_detail(self, payload):
         """Expose only API code/message; never log credentials, signatures, or headers."""
