@@ -723,10 +723,14 @@ class MexcFuturesLive:
                                 last_error=None)
                     self._log("INITIAL_SL_CONFIRMED", setup_time=setup_time, sl=trade["current_sl"])
                 except Exception as exc:
-                    self._store(setup_time, status="PROTECTING", last_error=f"SL protection: {type(exc).__name__}")
-                    self._log("SL_PROTECTION_RETRY", setup_time=setup_time, error=type(exc).__name__)
+                    self._store(setup_time, status="PROTECTING", last_error=f"SL protection: {type(exc).__name__}: {str(exc)[:180]}")
+                    self._log("SL_PROTECTION_RETRY", setup_time=setup_time,
+                              error=type(exc).__name__, detail=str(exc)[:180])
         except Exception as exc:
-            self._log("POSITION_SYNC_ERROR", error=type(exc).__name__)
+            # Preserve the safe exchange error code/message so rejected API
+            # requests can be diagnosed without exposing credentials or headers.
+            self._log("POSITION_SYNC_ERROR", error=type(exc).__name__,
+                      detail=str(exc)[:180])
 
     def update_stop(self, setup_time, direction, new_sl):
         """Apply the engine's already-calculated tighter SL to MEXC Futures."""
