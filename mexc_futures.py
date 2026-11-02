@@ -114,13 +114,12 @@ class MexcFuturesReadOnlyClient:
                 if secret:
                     reason_text = reason_text.replace(secret, "[redacted]")
             reason_text = re.sub(
-            r'(?i)(api[_-]?key|secret(?:[_-]?key)?|signature|sign|token|authorization)'
-            r'(["\']?\s*[:=]\s*["\']?)[^,\s"\'&}]+',
-            r'\1\2[redacted]',
-            reason_text,
-        )
-        errno = getattr(reason, "errno", getattr(exc, "errno", None))
-            errno_part = f" errno={errno}" if isinstance(errno, int) else ""
+                r'(?i)(api[_-]?key|secret(?:[_-]?key)?|signature|sign|token|authorization)'
+                r'(["\']?\s*[:=]\s*["\']?)[^,\s"\'&}]+',
+                r'\1\2[redacted]',
+                reason_text,
+            )
+            errno = getattr(reason, "errno", getattr(exc, "errno", None))
             reason_text = reason_text[:160] or "no-details"
             raise MexcAPIError(
                 f"MEXC private GET {path} transport failure "
