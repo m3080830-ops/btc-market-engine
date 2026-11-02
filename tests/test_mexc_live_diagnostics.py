@@ -4,6 +4,7 @@ from unittest.mock import patch
 from mexc_futures_live import MexcFuturesLive, MexcLiveError
 from mexc_futures import MexcFuturesReadOnlyClient, MexcAPIError
 import urllib.error
+import socket
 
 
 class _FakeHeaders(dict):
@@ -99,6 +100,18 @@ class InvalidJsonDiagnosticsTests(unittest.TestCase):
         self.assertIn("reason_type=str", message)
         self.assertIn("timed out", message)
         self.assertNotIn("test-private-secret", message)
+
+    def test_dns_failure_exposes_errno_without_secrets(self):
+        with patch(
+            "mexc_futures_live.urllib.request.urlopen",
+            side_effect=urllib.error.URLError(socket.gaierror(-2, "Name or service not known")),
+        ):
+            with self.assertRaises(MexcLiveError) as caught:
+                self.client._request("GET", "/api/v1/private/position/position_mode")
+        message = str(caught.exception)
+        self.assertIn("reason_type=gaierror", message)
+        self.assertIn("errno=-2", message)
+        self.assertNotIn(self.client.secret_key, message)
 
     def test_empty_response_is_reported_without_crashing(self):
         with self.assertRaises(MexcLiveError) as caught:
