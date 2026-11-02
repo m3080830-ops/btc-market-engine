@@ -51,6 +51,22 @@ class InvalidJsonDiagnosticsTests(unittest.TestCase):
         self.assertNotIn(self.client.access_key, message)
         self.assertNotIn(self.client.secret_key, message)
 
+    def test_valid_json_larger_than_eight_kilobytes_is_fully_parsed(self):
+        # Simulate the account/assets endpoint returning a large Futures asset list.
+        assets = [{"currency": f"COIN{i}", "availableBalance": "1"} for i in range(500)]
+        body = __import__("json").dumps({"success": True, "code": 0, "data": assets}).encode()
+        self.assertGreater(len(body), 8192)
+        result = self._call_with_body(body, content_type="application/json")
+        self.assertEqual(len(result), 500)
+        self.assertEqual(result[-1]["currency"], "COIN499")
+
+    def test_response_over_one_megabyte_is_rejected_safely(self):
+        body = b'{"success":true,"code":0,"data":"' + (b"x" * (1_048_576 + 10)) + b'"}'
+        with self.assertRaises(MexcLiveError) as caught:
+            self._call_with_body(body, content_type="application/json")
+        self.assertIn("response exceeds safety limit", str(caught.exception))
+        self.assertNotIn(self.client.secret_key, str(caught.exception))
+
     def test_empty_response_is_reported_without_crashing(self):
         with self.assertRaises(MexcLiveError) as caught:
             self._call_with_body(b"", content_type="application/json")
