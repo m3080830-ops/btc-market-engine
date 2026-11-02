@@ -363,11 +363,11 @@ class MexcFuturesLive:
                 excerpt = excerpt.replace(secret, "[redacted]")
         excerpt = re.sub(
             r'(?i)(api[_-]?key|secret(?:[_-]?key)?|signature|sign|token|authorization)'
-            r'(["\\']?\\s*[:=]\\s*["\\']?)[^,\\s"\\'&}]+',
-            r'\\1\\2[redacted]',
+            r'(["\']?\s*[:=]\s*["\']?)[^,\s"\'&}]+',
+            r'\1\2[redacted]',
             excerpt,
         )
-        excerpt = re.sub(r"(?i)bearer\\s+[^\\s<]+", "Bearer [redacted]", excerpt)
+        excerpt = re.sub(r"(?i)bearer\s+[^\s<]+", "Bearer [redacted]", excerpt)
         excerpt = excerpt[:240] or "<empty response>"
         return (
             f"MEXC {method} {path}: invalid JSON response "
