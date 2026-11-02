@@ -120,6 +120,7 @@ class MexcFuturesReadOnlyClient:
                 reason_text,
             )
             errno = getattr(reason, "errno", getattr(exc, "errno", None))
+            errno_part = f" errno={errno}" if isinstance(errno, int) else ""
             reason_text = reason_text[:160] or "no-details"
             raise MexcAPIError(
                 f"MEXC private GET {path} transport failure "
