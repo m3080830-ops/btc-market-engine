@@ -354,8 +354,9 @@ class MexcFuturesLive:
             ) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             # A timeout/network failure after order submission has an ambiguous outcome.
+            detail = self._safe_transport_detail(exc)
             raise MexcLiveError(
-                f"MEXC {method} {path} transport failure: {type(exc).__name__}"
+                f"MEXC {method} {path} transport failure: {detail}"
             ) from None
 
         if not isinstance(payload, dict) or payload.get("success") is not True:
@@ -390,6 +391,27 @@ class MexcFuturesLive:
             f"http_status={status} content_type={str(content_type)[:100]} "
             f"body_excerpt={excerpt}"
         )
+
+    def _safe_transport_detail(self, exc):
+        """Return the underlying network cause without exposing request credentials."""
+        reason = getattr(exc, "reason", None)
+        if reason is None:
+            reason = exc
+        reason_type = type(reason).__name__
+        reason_text = " ".join(str(reason).replace("\\r", " ").replace("\\n", " ").split())
+        for secret in (self.access_key, self.secret_key):
+            if secret:
+                reason_text = reason_text.replace(secret, "[redacted]")
+        reason_text = re.sub(
+            r'(?i)(api[_-]?key|secret(?:[_-]?key)?|signature|sign|token|authorization)'
+            r'(["\']?\\s*[:=]\\s*["\']?)[^,\\s"\'&}]+',
+            r'\\1\\2[redacted]',
+            reason_text,
+        )
+        errno = getattr(reason, "errno", getattr(exc, "errno", None))
+        errno_part = f" errno={errno}" if isinstance(errno, int) else ""
+        reason_text = reason_text[:160] or "no-details"
+        return f"{type(exc).__name__} reason_type={reason_type}{errno_part} reason={reason_text}"
 
     def _safe_error_detail(self, payload):
         """Expose only API code/message; never log credentials, signatures, or headers."""
