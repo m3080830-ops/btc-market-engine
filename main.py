@@ -4,6 +4,7 @@ import json
 import html
 import sqlite3
 import threading
+import urllib.error
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
@@ -256,24 +257,44 @@ def state_set(key, value):
 # MEXC
 # ============================================================
 
-def api_get(url):
+# MEXC GET requests are read-only and may be retried once after a transient
+# DNS/TCP/TLS timeout. Never apply this helper to order/stop POST requests.
+HTTP_GET_TIMEOUT_SECONDS = 15
+HTTP_GET_MAX_ATTEMPTS = 2
+HTTP_GET_RETRY_DELAY_SECONDS = 0.75
 
+
+def http_get_json_with_retry(request, *, endpoint, timeout=HTTP_GET_TIMEOUT_SECONDS):
+    for attempt in range(1, HTTP_GET_MAX_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            # An HTTP response is definitive; do not retry API rejections.
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            if attempt >= HTTP_GET_MAX_ATTEMPTS:
+                raise
+            reason = getattr(exc, "reason", None)
+            reason_type = type(reason).__name__ if reason is not None else type(exc).__name__
+            print(
+                f"MEXC_HTTP_GET_RETRY endpoint={endpoint} "
+                f"attempt={attempt + 1}/{HTTP_GET_MAX_ATTEMPTS} "
+                f"reason_type={reason_type}",
+                flush=True,
+            )
+            time.sleep(HTTP_GET_RETRY_DELAY_SECONDS)
+
+
+def api_get(url):
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent":
-                "btc-market-engine/1.0"
-        }
+        headers={"User-Agent": "btc-market-engine/1.0"}
     )
-
-    with urllib.request.urlopen(
-        req,
-        timeout=15
-    ) as r:
-
-        return json.loads(
-            r.read().decode()
-        )
+    endpoint = urllib.parse.urlsplit(url).path
+    return http_get_json_with_retry(
+        req, endpoint=endpoint, timeout=HTTP_GET_TIMEOUT_SECONDS
+    )
 
 
 def parse_klines(payload):
@@ -4908,8 +4929,11 @@ def check_mexc_connection_on_startup():
                 "Accept": "application/json",
             },
         )
-        with urllib.request.urlopen(request, timeout=8) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        payload = http_get_json_with_retry(
+            request,
+            endpoint="/api/v1/private/account/tiered_fee_rate/v2",
+            timeout=HTTP_GET_TIMEOUT_SECONDS,
+        )
         if not isinstance(payload, dict) or payload.get("success") is not True:
             code = payload.get("code") if isinstance(payload, dict) else "invalid-response"
             print(
