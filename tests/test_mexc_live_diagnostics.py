@@ -101,6 +101,29 @@ class InvalidJsonDiagnosticsTests(unittest.TestCase):
         self.assertIn("timed out", message)
         self.assertNotIn("test-private-secret", message)
 
+    def test_get_retries_once_after_tls_timeout(self):
+        response = _FakeResponse(
+            b'{"success":true,"code":0,"data":[]}',
+            content_type="application/json",
+        )
+        with patch(
+            "mexc_futures_live.urllib.request.urlopen",
+            side_effect=[urllib.error.URLError(TimeoutError("TLS handshake timed out")), response],
+        ) as mocked, patch("mexc_futures_live.time.sleep"):
+            result = self.client._request("GET", "/api/v1/private/position/open_positions")
+        self.assertEqual(result, [])
+        self.assertEqual(mocked.call_count, 2)
+
+    def test_post_is_never_retried_after_transport_timeout(self):
+        with patch(
+            "mexc_futures_live.urllib.request.urlopen",
+            side_effect=urllib.error.URLError(TimeoutError("TLS handshake timed out")),
+        ) as mocked, patch("mexc_futures_live.time.sleep") as sleep:
+            with self.assertRaises(MexcLiveError):
+                self.client._request("POST", "/api/v1/private/order/create", {"symbol": "BTC_USDT"})
+        self.assertEqual(mocked.call_count, 1)
+        sleep.assert_not_called()
+
     def test_dns_failure_exposes_errno_without_secrets(self):
         with patch(
             "mexc_futures_live.urllib.request.urlopen",
