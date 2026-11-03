@@ -307,7 +307,25 @@ class MexcFuturesLive:
         req = urllib.request.Request(url, data=body.encode("utf-8") if body else None,
                                      headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=8) as response:
+            # Only idempotent reads are retried. Never retry order/stop POSTs:
+            # a lost response could mean the exchange already accepted the order.
+            response = None
+            for attempt in range(1, (2 if method == "GET" else 1) + 1):
+                try:
+                    response = urllib.request.urlopen(req, timeout=12)
+                    break
+                except (urllib.error.URLError, TimeoutError, OSError) as transport_exc:
+                    if method != "GET" or attempt >= 2:
+                        raise
+                    reason = getattr(transport_exc, "reason", None)
+                    reason_type = type(reason).__name__ if reason is not None else type(transport_exc).__name__
+                    print(
+                        f"MEXC_HTTP_GET_RETRY endpoint={path} attempt=2/2 "
+                        f"reason_type={reason_type}",
+                        flush=True,
+                    )
+                    time.sleep(0.75)
+            with response as response:
                 status = response.getcode()
                 content_type = response.headers.get("Content-Type", "unknown")
                 # Read the complete JSON document, not a fixed 8 KB prefix. Keep
