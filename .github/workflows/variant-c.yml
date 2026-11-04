@@ -1,0 +1,28 @@
+name: BTC Variant C safety tests
+
+on:
+  push:
+    branches:
+      - "feature/variant-c-trend-filter"
+    paths:
+      - "strategy.py"
+      - "tests/test_variant_c.py"
+      - ".github/workflows/variant-c.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  strategy-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile strategy
+        run: python -m py_compile strategy.py
+      - name: Run Variant C unit tests
+        run: python -m unittest tests/test_variant_c.py -v
