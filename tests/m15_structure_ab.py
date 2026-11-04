@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from strategy import find_historical_setups
+from strategy import find_historical_setups, choose_structural_sl, build_entry
 
 BASE = "https://contract.mexc.com/api/v1/contract/kline/BTC_USDT"
 INTERVALS = {"m15": ("Min15", 500), "h1": ("Min60", 500),
@@ -106,7 +106,7 @@ def main():
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "candles": {k: {"count": len(v), "from_utc": datetime.fromtimestamp(v[0]["time"], timezone.utc).isoformat(),
                         "to_utc": datetime.fromtimestamp(v[-1]["time"], timezone.utc).isoformat()} for k, v in candles.items()},
-        "test_scope": "signal-level A/B only; identical existing strategy; M15 structure filter applied after baseline signals",
+        "test_scope": "signal filter plus forward M15 initial-SL excursion audit; no trailing management replay",
         "baseline": {"signals": len(baseline), "long": sum(x["direction"] == "LONG" for x in baseline),
                      "short": sum(x["direction"] == "SHORT" for x in baseline)},
         "filtered": {"signals": len(filtered), "long": sum(x["direction"] == "LONG" for x in filtered),
