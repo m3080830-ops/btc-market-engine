@@ -163,9 +163,13 @@ def main():
                     "short": sum(x["direction"] == "SHORT" for x in blocked),
                     "setups": [{"time": datetime.fromtimestamp(x["signal_time"], timezone.utc).isoformat(),
                                 "direction": x["direction"], "model": x.get("model")} for x in blocked]},
-        "limitations": ["This is a signal filter audit, not a PnL backtest.",
-                        "No historical trade-management replay, SL/trailing simulation, funding or fees.",
-                        "MEXC returns up to 500 most recent candles per timeframe in this run."]
+        "forward_outcomes": {"excluded": stats(excluded_results), "retained": stats(retained_results)},
+        "excluded_setup_results": excluded_results,
+        "retained_setup_results": retained_results,
+        "limitations": ["Next M15 open and structural initial SL only; M5 confirmation not replayed.",
+                        "No -0.5R protection, M1 trailing at +0.7R, fees or funding.",
+                        "If one M15 candle touches both SL and +1R, SL is counted first.",
+                        "Observation windows differ because recent setups have fewer future candles."]
     }
     os.makedirs("ab-results", exist_ok=True)
     with open("ab-results/m15-structure-ab.json", "w", encoding="utf-8") as f:
