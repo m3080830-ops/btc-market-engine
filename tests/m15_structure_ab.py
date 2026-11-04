@@ -100,6 +100,54 @@ def main():
     # Strategy functions themselves discard the currently forming candle.
     baseline = find_historical_setups(candles["h4"], candles["h1"], m15, candles["d1"])
     filtered, blocked = apply_m15_structure_filter(baseline, m15)
+    def evaluate_setup(setup):
+        entry = build_entry(setup, m15)
+        if not entry:
+            return {"status": "NO_NEXT_M15_ENTRY", "direction": setup["direction"]}
+        sl = choose_structural_sl(candles["h1"], m15, setup)
+        if sl is None:
+            return {"status": "NO_INITIAL_SL", "direction": setup["direction"]}
+        ep, risk, direction = float(entry["price"]), abs(float(entry["price"]) - float(sl)), setup["direction"]
+        if risk <= 0:
+            return {"status": "INVALID_RISK", "direction": direction}
+        mfe, mae, event, event_time = 0.0, 0.0, "OPEN_AT_DATA_END", None
+        for bar in [x for x in m15 if x["time"] >= entry["time"]]:
+            if direction == "LONG":
+                mfe = max(mfe, (bar["high"] - ep) / risk)
+                mae = min(mae, (bar["low"] - ep) / risk)
+                stop, target = bar["low"] <= sl, bar["high"] >= ep + risk
+            else:
+                mfe = max(mfe, (ep - bar["low"]) / risk)
+                mae = min(mae, (ep - bar["high"]) / risk)
+                stop, target = bar["high"] >= sl, bar["low"] <= ep - risk
+            if stop:
+                event = "SL"
+                event_time = datetime.fromtimestamp(bar["time"], timezone.utc).isoformat()
+                break
+            if target:
+                event = "+1R"
+                event_time = datetime.fromtimestamp(bar["time"], timezone.utc).isoformat()
+                break
+        return {"status": "EVALUATED", "time": datetime.fromtimestamp(setup["signal_time"], timezone.utc).isoformat(),
+                "entry_time": datetime.fromtimestamp(entry["time"], timezone.utc).isoformat(),
+                "direction": direction, "model": setup.get("model"), "entry": round(ep, 3),
+                "initial_sl": round(float(sl), 3), "risk_points": round(risk, 3),
+                "mfe_r": round(mfe, 3), "mae_r": round(mae, 3),
+                "first_event": event, "event_time": event_time}
+
+    evaluated = [(x, evaluate_setup(x)) for x in baseline]
+    excluded_results = [result for setup, result in evaluated if setup in blocked]
+    retained_results = [result for setup, result in evaluated if setup in filtered]
+
+    def stats(results):
+        valid = [x for x in results if x["status"] == "EVALUATED"]
+        return {"signals": len(results), "evaluated": len(valid),
+                "initial_sl_first": sum(x["first_event"] == "SL" for x in valid),
+                "reached_1r_before_sl": sum(x["first_event"] == "+1R" for x in valid),
+                "still_open_at_data_end": sum(x["first_event"] == "OPEN_AT_DATA_END" for x in valid),
+                "mean_mfe_r": round(sum(x["mfe_r"] for x in valid) / len(valid), 3) if valid else None,
+                "mean_mae_r": round(sum(x["mae_r"] for x in valid) / len(valid), 3) if valid else None}
+
     report = {
         "symbol": "BTC_USDT",
         "source": "MEXC public futures K-line API",
