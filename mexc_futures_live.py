@@ -25,6 +25,68 @@ SLIPPAGE_BUFFER_BPS = float(os.getenv("MEXC_SLIPPAGE_BUFFER_BPS", "5"))
 MAX_API_RESPONSE_BYTES = 1_048_576
 
 
+def probe_mexc_https(host="api.mexc.com", port=443, timeout=4):
+    """Read-only DNS/TCP/TLS probe; never sends API credentials or HTTP requests."""
+    import socket
+    import ssl
+    from time import perf_counter
+
+    started = perf_counter()
+    try:
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        elapsed = int((perf_counter() - started) * 1000)
+        errno = getattr(exc, "errno", None)
+        suffix = f" errno={errno}" if isinstance(errno, int) else ""
+        return f"dns=FAIL error={type(exc).__name__}{suffix} dns_ms={elapsed}"
+
+    dns_ms = int((perf_counter() - started) * 1000)
+    unique, seen = [], set()
+    for family, socktype, proto, _canonname, sockaddr in addresses:
+        key = (family, sockaddr)
+        if key not in seen:
+            seen.add(key)
+            unique.append((family, socktype, proto, sockaddr))
+    if not unique:
+        return f"dns=FAIL error=NoAddresses dns_ms={dns_ms}"
+
+    tcp_errors = []
+    for family, socktype, proto, sockaddr in unique[:3]:
+        raw = None
+        try:
+            raw = socket.socket(family, socktype, proto)
+            raw.settimeout(timeout)
+            tcp_started = perf_counter()
+            raw.connect(sockaddr)
+            tcp_ms = int((perf_counter() - tcp_started) * 1000)
+        except OSError as exc:
+            errno = getattr(exc, "errno", None)
+            tcp_errors.append(
+                f"{type(exc).__name__}" + (f":{errno}" if isinstance(errno, int) else "")
+            )
+            if raw is not None:
+                raw.close()
+            continue
+
+        try:
+            context = ssl.create_default_context()
+            tls_started = perf_counter()
+            with context.wrap_socket(raw, server_hostname=host) as secure:
+                tls_ms = int((perf_counter() - tls_started) * 1000)
+                version = secure.version() or "unknown"
+            return (
+                f"dns=OK dns_ms={dns_ms} addresses={len(unique)} "
+                f"tcp=OK tcp_ms={tcp_ms} tls=OK tls_ms={tls_ms} tls_version={version}"
+            )
+        except (ssl.SSLError, OSError) as exc:
+            errno = getattr(exc, "errno", None)
+            suffix = f" errno={errno}" if isinstance(errno, int) else ""
+            return (
+                f"dns=OK dns_ms={dns_ms} addresses={len(unique)} "
+                f"tcp=OK tcp_ms={tcp_ms} tls=FAIL "
+                f"error={type(exc).__name__}{suffix}"
+            )
+    return f"dns=OK dns_ms={dns_ms} tcp=FAIL errors={','.join(tcp_errors[:3]) or 'unknown'}"
 class MexcLiveError(RuntimeError):
     """Safe-to-log execution error with retry classification."""
 
@@ -371,10 +433,13 @@ class MexcFuturesLive:
                 rejected=rejected, code=exc.code,
             ) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            # A timeout/network failure after order submission has an ambiguous outcome.
             detail = self._safe_transport_detail(exc)
+            diagnostic = (
+                " " + probe_mexc_https("api.mexc.com")
+                if method == "GET" else ""
+            )
             raise MexcLiveError(
-                f"MEXC {method} {path} transport failure: {detail}"
+                f"MEXC {method} {path} transport failure: {detail}{diagnostic}"
             ) from None
 
         if not isinstance(payload, dict) or payload.get("success") is not True:
