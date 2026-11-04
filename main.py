@@ -298,6 +298,16 @@ def probe_mexc_https(host="api.mexc.com", port=443, timeout=4):
             tcp_started = perf_counter()
             raw.connect(sockaddr)
             tcp_ms = int((perf_counter() - tcp_started) * 1000)
+        except OSError as exc:
+            errno = getattr(exc, "errno", None)
+            tcp_errors.append(
+                f"{type(exc).__name__}" + (f":{errno}" if isinstance(errno, int) else "")
+            )
+            if raw is not None:
+                raw.close()
+            continue
+
+        try:
             context = ssl.create_default_context()
             tls_started = perf_counter()
             with context.wrap_socket(raw, server_hostname=host) as secure:
@@ -307,25 +317,15 @@ def probe_mexc_https(host="api.mexc.com", port=443, timeout=4):
                 f"dns=OK dns_ms={dns_ms} addresses={len(unique)} "
                 f"tcp=OK tcp_ms={tcp_ms} tls=OK tls_ms={tls_ms} tls_version={version}"
             )
-        except ssl.SSLError as exc:
-            elapsed = int((perf_counter() - started) * 1000)
+        except (ssl.SSLError, OSError) as exc:
             errno = getattr(exc, "errno", None)
             suffix = f" errno={errno}" if isinstance(errno, int) else ""
-            return f"dns=OK dns_ms={dns_ms} tcp=OK tls=FAIL error={type(exc).__name__}{suffix} total_ms={elapsed}"
-        except OSError as exc:
-            errno = getattr(exc, "errno", None)
-            tcp_errors.append(
-                f"{type(exc).__name__}" + (f":{errno}" if isinstance(errno, int) else "")
+            return (
+                f"dns=OK dns_ms={dns_ms} addresses={len(unique)} "
+                f"tcp=OK tcp_ms={tcp_ms} tls=FAIL "
+                f"error={type(exc).__name__}{suffix}"
             )
-        finally:
-            if raw is not None:
-                try:
-                    raw.close()
-                except OSError:
-                    pass
     return f"dns=OK dns_ms={dns_ms} tcp=FAIL errors={','.join(tcp_errors[:3]) or 'unknown'}"
-
-
 def http_get_json_with_retry(request, *, endpoint, timeout=HTTP_GET_TIMEOUT_SECONDS):
     for attempt in range(1, HTTP_GET_MAX_ATTEMPTS + 1):
         try:
