@@ -618,6 +618,53 @@ def _range_signal(h4_rows, h1_rows, m15_rows):
     return trigger
 
 
+
+def _confirmed_structure_swings(rows, side):
+    """Return confirmed two-left/two-right pivot indices and prices."""
+    pivots = []
+    for i in range(2, len(rows) - 2):
+        value = rows[i][side]
+        neighbours = [rows[j][side] for j in (i - 2, i - 1, i + 1, i + 2)]
+        if (value < min(neighbours) if side == "low" else value > max(neighbours)):
+            pivots.append((i, value))
+    return pivots
+
+
+def _m15_trend_structure_opposes(rows, direction):
+    """
+    Variant C: apply the M15 structure veto to TREND setups only.
+    The supplied rows must contain closed candles only and end at the
+    setup's signal candle. No future candles are consulted.
+    """
+    if len(rows) < 30:
+        return False
+
+    highs = _confirmed_structure_swings(rows, "high")
+    lows = _confirmed_structure_swings(rows, "low")
+    if len(highs) < 2 or len(lows) < 2:
+        return False
+
+    if direction == "SHORT":
+        if highs[-1][1] <= highs[-2][1] or lows[-1][1] <= lows[-2][1]:
+            return False
+        prior_lows = [pivot for pivot in lows if pivot[0] < highs[-1][0]]
+        return bool(prior_lows) and rows[-1]["close"] >= prior_lows[-1][1]
+
+    if direction == "LONG":
+        if highs[-1][1] >= highs[-2][1] or lows[-1][1] >= lows[-2][1]:
+            return False
+        prior_highs = [pivot for pivot in highs if pivot[0] < lows[-1][0]]
+        return bool(prior_highs) and rows[-1]["close"] <= prior_highs[-1][1]
+
+    return False
+
+
+def _variant_c_allows(signal, closed_m15_rows):
+    """Keep all RANGE setups; veto only TREND setups against intact M15 structure."""
+    if not signal or not str(signal.get("model", "")).upper().startswith("TREND"):
+        return True
+    return not _m15_trend_structure_opposes(closed_m15_rows, signal["direction"])
+
 def find_latest_setup(h4_rows, h1_rows, m15_rows, d1_rows=None):
     # New hierarchy:
     # H4 context -> H1 setup -> M15 trigger -> next M15 open.
@@ -627,7 +674,8 @@ def find_latest_setup(h4_rows, h1_rows, m15_rows, d1_rows=None):
 
     trend = _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows)
     if trend:
-        return trend
+        # Variant C: block counter-structure TREND entries, never RANGE entries.
+        return trend if _variant_c_allows(trend, r15) else None
 
     return _range_signal(h4_rows, h1_rows, m15_rows)
 
@@ -650,7 +698,11 @@ def find_historical_setups(h4_rows, h1_rows, m15_rows, d1_rows=None):
 
         d1_at = _context_at(d1_rows, signal_time) if d1_rows else None
         signal = _trend_signal(h4_at, h1_at, m15_prefix, d1_at)
-        if signal is None:
+        if signal is not None:
+            # m15_prefix contains only candles closed by signal_time.
+            if not _variant_c_allows(signal, m15_prefix):
+                continue
+        else:
             signal = _range_signal(h4_at, h1_at, m15_prefix)
 
         if signal is None:
