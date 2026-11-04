@@ -98,7 +98,16 @@ def main():
     if len(m15) < 150:
         raise RuntimeError(f"Not enough M15 candles returned: {len(m15)}")
     # Strategy functions themselves discard the currently forming candle.
-    baseline = find_historical_setups(candles["h4"], candles["h1"], m15, candles["d1"])
+    raw_baseline = find_historical_setups(candles["h4"], candles["h1"], m15, candles["d1"])
+    # One unique setup per signal timestamp/direction/model; historical strategy
+    # can surface repeated instances of the same trigger in the same candle.
+    baseline = []
+    seen = set()
+    for setup in raw_baseline:
+        key = (setup["signal_time"], setup["direction"], setup.get("model"))
+        if key not in seen:
+            seen.add(key)
+            baseline.append(setup)
     filtered, blocked = apply_m15_structure_filter(baseline, m15)
     def evaluate_setup(setup):
         entry = build_entry(setup, m15)
