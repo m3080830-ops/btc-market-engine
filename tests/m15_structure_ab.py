@@ -9,7 +9,10 @@ import os
 import time
 import urllib.parse
 import urllib.request
+import sys
 from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from strategy import find_historical_setups
 
