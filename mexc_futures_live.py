@@ -19,8 +19,9 @@ from datetime import datetime, timezone
 
 BASE_URL = "https://api.mexc.com"
 SYMBOL = "BTC_USDT"
-RISK_FRACTION = float(os.getenv("MEXC_RISK_FRACTION", "0.20"))
+RISK_FRACTION = float(os.getenv("MEXC_RISK_FRACTION", "0.10"))
 MARGIN_USE_CAP = float(os.getenv("MEXC_MAX_MARGIN_FRACTION", "0.98"))
+MAX_LEVERAGE = 500
 SLIPPAGE_BUFFER_BPS = float(os.getenv("MEXC_SLIPPAGE_BUFFER_BPS", "5"))
 MAX_API_RESPONSE_BYTES = 1_048_576
 
@@ -116,7 +117,16 @@ def calculate_position_sizing(
     position_type,
     open_type=1,
 ):
-    """Pure sizing calculation; no network calls and no exchange orders."""
+    """Size BTC Futures so the strategy SL risks at most risk_fraction of balance.
+
+    The position is bounded independently by:
+      1) the 1R price-loss budget,
+      2) available initial margin at the highest permitted leverage (hard cap 500x),
+      3) contract and MEXC risk-tier volume limits.
+
+    If the target 1R size does not fit the available margin, volume is reduced;
+    leverage is never invented above the exchange/account/tier limits.
+    """
     numeric_values = (
         entry_price, stop_price, available_balance, contract_size, vol_unit,
         min_vol, taker_fee_rate, slippage_buffer_bps, margin_use_fraction,
@@ -159,92 +169,92 @@ def calculate_position_sizing(
     gap = abs(entry_price - stop_price)
     risk_budget = available_balance * risk_fraction
     margin_budget = available_balance * margin_use_fraction
-    slip_rate = slippage_buffer_bps / 10000.0
-
-    # Match paper sizing exactly: 1R is entry-to-initial-SL price movement.
-    # Exchange fees and slippage are deliberately excluded from position sizing.
     per_contract_risk = contract_size * gap
-    if per_contract_risk <= 0 or not math.isfinite(per_contract_risk):
-        raise MexcLiveError("Invalid per-contract risk estimate")
+    per_contract_notional = contract_size * entry_price
+    if (
+        per_contract_risk <= 0 or not math.isfinite(per_contract_risk)
+        or per_contract_notional <= 0 or not math.isfinite(per_contract_notional)
+    ):
+        raise MexcLiveError("Invalid per-contract risk or notional estimate")
 
-    raw_volume = risk_budget / per_contract_risk
-    volume = math.floor((raw_volume + 1e-12) / vol_unit) * vol_unit
-    maximum_allowed_volume = min(
-        float(contract_max_vol) if contract_max_vol and float(contract_max_vol) > 0 else float("inf"),
-        max(item[0] for item in matching_tiers),
+    # Risk sizing is the upper bound: loss at the strategy's initial SL must
+    # never exceed the configured fraction of available Futures balance.
+    risk_volume = risk_budget / per_contract_risk
+    volume_unit = float(vol_unit)
+
+    def floor_volume(value):
+        return math.floor((value + 1e-12) / volume_unit) * volume_unit
+
+    contract_cap = (
+        float(contract_max_vol)
+        if contract_max_vol and float(contract_max_vol) > 0
+        else float("inf")
     )
-    maximum_allowed_volume = (
-        math.floor((maximum_allowed_volume + 1e-12) / vol_unit) * vol_unit
-    )
-    if volume < min_vol:
-        raise MexcLiveError("Minimum order volume would exceed the 1R risk budget")
-    if volume > maximum_allowed_volume:
+
+    # Risk tiers are cumulative max-volume bands. Evaluate each band only for
+    # volumes that actually belong to that band, using its own IMR/leverage.
+    candidates = []
+    previous_tier_max = 0.0
+    for tier_max_vol, tier_max_leverage, tier_imr, tier in matching_tiers:
+        max_allowed_leverage = min(
+            MAX_LEVERAGE,
+            int(contract_max_leverage),
+            int(account_max_leverage),
+            int(tier_max_leverage),
+        )
+        minimum_allowed_leverage = int(min_leverage)
+        if max_allowed_leverage < minimum_allowed_leverage:
+            previous_tier_max = tier_max_vol
+            continue
+
+        # Use the maximum leverage MEXC permits for this exact size band.
+        # If the tier imposes a higher IMR, that higher margin requirement wins.
+        margin_rate = max(1.0 / max_allowed_leverage, tier_imr)
+        margin_volume = margin_budget / (per_contract_notional * margin_rate)
+        tier_volume_limit = min(
+            risk_volume, contract_cap, tier_max_vol, margin_volume
+        )
+        candidate_volume = floor_volume(tier_volume_limit)
+
+        # Exclude volumes that would actually be assigned to a lower tier.
+        lower_band_min = floor_volume(previous_tier_max) + volume_unit
+        band_min = max(float(min_vol), lower_band_min)
+        if candidate_volume + 1e-9 >= band_min:
+            notional = candidate_volume * per_contract_notional
+            initial_margin = notional * margin_rate
+            price_loss = candidate_volume * per_contract_risk
+            if (
+                initial_margin <= margin_budget + 1e-9
+                and price_loss <= risk_budget + 1e-9
+            ):
+                candidates.append({
+                    "volume": candidate_volume,
+                    "notional_usdt": notional,
+                    "leverage": max_allowed_leverage,
+                    "risk_budget_usdt": risk_budget,
+                    "estimated_total_risk_usdt": price_loss,
+                    "estimated_price_loss_usdt": price_loss,
+                    "estimated_round_trip_fees_usdt": 0.0,
+                    "estimated_slippage_buffer_usdt": 0.0,
+                    "estimated_entry_fee_usdt": 0.0,
+                    "estimated_initial_margin_usdt": initial_margin,
+                    "margin_budget_usdt": margin_budget,
+                    "reserve_after_entry_usdt": available_balance - initial_margin,
+                    "risk_tier_max_vol": tier_max_vol,
+                    "risk_tier_max_leverage": tier_max_leverage,
+                    "max_allowed_leverage": max_allowed_leverage,
+                })
+        previous_tier_max = tier_max_vol
+
+    if not candidates:
         raise MexcLiveError(
-            "MEXC contract/risk tier volume cap cannot support the full 1R position"
+            "No BTC_USDT contract size fits both the 10% stop-risk budget "
+            "and available margin at the permitted leverage (maximum 500x)"
         )
 
-    selected = next((item for item in matching_tiers if volume <= item[0]), None)
-    if selected is None:
-        raise MexcLiveError("Calculated volume exceeds all MEXC risk-limit tiers")
-    tier_max_vol, tier_max_leverage, tier_imr, tier = selected
-
-    max_allowed_leverage = min(
-        int(contract_max_leverage),
-        int(account_max_leverage),
-        int(tier_max_leverage),
-    )
-    minimum_allowed_leverage = int(min_leverage)
-    if max_allowed_leverage < minimum_allowed_leverage:
-        raise MexcLiveError("MEXC leverage limits are inconsistent")
-
-    notional = volume * contract_size * entry_price
-    entry_fee = 0.0
-
-    # Prefer the highest exchange-permitted leverage. If a lower leverage is
-    # required by MEXC, its larger initial margin is accounted for against the
-    # available balance (up to the configured 98% cap), not by changing 1R.
-    chosen_leverage = None
-    initial_margin = None
-    for leverage in range(max_allowed_leverage, minimum_allowed_leverage - 1, -1):
-        estimate = notional * max(1.0 / leverage, tier_imr)
-        if estimate <= margin_budget + 1e-9:
-            chosen_leverage = leverage
-            initial_margin = estimate
-            break
-    if chosen_leverage is None:
-        raise MexcLiveError(
-            "Required initial margin exceeds 98% of available Futures balance "
-            "even at the highest permitted leverage"
-        )
-
-    price_loss = volume * contract_size * gap
-    # Keep the displayed/sized 1R identical to paper mode; fees are exchange costs,
-    # not part of the strategy's R calculation.
-    round_trip_fees = 0.0
-    slippage_buffer = 0.0
-    total_risk = price_loss
-    if total_risk > risk_budget + 1e-9:
-        raise MexcLiveError("Calculated position exceeds the configured 1R budget")
-
-    total_initial_commitment = initial_margin
-    return {
-        "volume": volume,
-        "notional_usdt": notional,
-        "leverage": chosen_leverage,
-        "risk_budget_usdt": risk_budget,
-        "estimated_total_risk_usdt": total_risk,
-        "estimated_price_loss_usdt": price_loss,
-        "estimated_round_trip_fees_usdt": round_trip_fees,
-        "estimated_slippage_buffer_usdt": slippage_buffer,
-        "estimated_entry_fee_usdt": entry_fee,
-        "estimated_initial_margin_usdt": initial_margin,
-        "margin_budget_usdt": margin_budget,
-        "reserve_after_entry_usdt": available_balance - total_initial_commitment,
-        "risk_tier_max_vol": tier_max_vol,
-        "risk_tier_max_leverage": tier_max_leverage,
-        "max_allowed_leverage": max_allowed_leverage,
-    }
-
+    # Choose the largest valid size; volume was already capped by 1R, margin,
+    # the contract maximum and the applicable MEXC risk tier.
+    return max(candidates, key=lambda item: item["volume"])
 
 def build_market_open_payload(*, direction, volume, leverage, position_mode, external_oid, stop_loss_price):
     """Build the MEXC Futures order payload using the 2026-10-23 API schema."""
