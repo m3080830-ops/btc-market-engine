@@ -70,9 +70,29 @@ class PositionSizingTests(unittest.TestCase):
                 }],
             )
 
-    def test_account_max_leverage_is_enforced(self):
-        with self.assertRaises(MexcLiveError):
-            self.make_sizing(0.10, account_max_leverage=10)
+    def test_lower_account_leverage_reduces_volume_instead_of_rejecting(self):
+        result = self.make_sizing(0.10, account_max_leverage=10)
+        self.assertEqual(result["leverage"], 10)
+        self.assertLessEqual(result["estimated_initial_margin_usdt"], 8.0)
+        self.assertLessEqual(result["estimated_total_risk_usdt"], 1.0)
+        self.assertLess(result["volume"], self.make_sizing(0.10)["volume"])
+
+    def test_hard_leverage_cap_is_500(self):
+        result = self.make_sizing(
+            0.10,
+            contract_max_leverage=1000,
+            account_max_leverage=1000,
+            risk_limit_rows=[{
+                "positionType": 1, "openType": 1, "maxVol": 50000,
+                "maxLeverage": 1000, "imr": 0.0
+            }],
+        )
+        self.assertLessEqual(result["leverage"], 500)
+
+    def test_margin_shortfall_reduces_volume_without_breaking_risk_limit(self):
+        result = self.make_sizing(0.10, margin_use_fraction=0.05)
+        self.assertLessEqual(result["estimated_initial_margin_usdt"], 0.5)
+        self.assertLessEqual(result["estimated_total_risk_usdt"], 1.0)
 
     def test_minimum_order_volume_cannot_exceed_one_r(self):
         with self.assertRaises(MexcLiveError):
