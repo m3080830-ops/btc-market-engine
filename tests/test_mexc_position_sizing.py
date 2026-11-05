@@ -36,11 +36,14 @@ class PositionSizingTests(unittest.TestCase):
         args.update(overrides)
         return calculate_position_sizing(**args)
 
-    def test_closer_stop_requires_higher_leverage(self):
+    def test_closer_stop_sizes_larger_notional_at_same_risk_budget(self):
         tight = self.make_sizing(0.10)
         wide = self.make_sizing(1.00)
-        self.assertGreater(tight["leverage"], wide["leverage"])
+        self.assertEqual(tight["leverage"], 500)
+        self.assertEqual(wide["leverage"], 500)
         self.assertGreater(tight["notional_usdt"], wide["notional_usdt"])
+        self.assertLessEqual(tight["estimated_total_risk_usdt"], 1.0)
+        self.assertLessEqual(wide["estimated_total_risk_usdt"], 1.0)
 
     def test_risk_matches_paper_price_only_calculation(self):
         result = self.make_sizing(0.10)
