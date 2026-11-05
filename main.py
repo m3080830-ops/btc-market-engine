@@ -1838,12 +1838,12 @@ def live_refresh():
                             (symbol, setup["signal_time"])
                         ).fetchone()
 
-                    if not duplicate:
-                        entry = build_entry(setup, m15)
-                        if entry:
-                            sl = choose_structural_sl(h1, m15, setup)
-                            plan = planned_trade(h1, m15, setup, entry["price"], sl)
-                            if sl is not None and plan is not None and plan["rr"] >= MIN_SETUP_RR:
+                    entry = build_entry(setup, m15)
+                    if entry:
+                        sl = choose_structural_sl(h1, m15, setup)
+                        plan = planned_trade(h1, m15, setup, entry["price"], sl)
+                        if sl is not None and plan is not None and plan["rr"] >= MIN_SETUP_RR:
+                            if not duplicate:
                                 upsert_setup(setup)
                                 update_setup(
                                     setup["signal_time"], symbol=symbol,
@@ -1854,21 +1854,24 @@ def live_refresh():
                                     pa_trigger=",".join(setup.get("pa", [])),
                                     decision_reason=None
                                 )
-                                # Live execution is isolated to BTC_USDT; the
-                                # strategy and website simulation remain unchanged.
-                                if symbol == "BTC_USDT" and LIVE_EXECUTOR is not None:
-                                    try:
-                                        LIVE_EXECUTOR.maybe_open(
-                                            setup, entry, sl, plan["rr"],
-                                            float(m15[-1]["close"]), now_ts()
-                                        )
-                                    except Exception as live_exc:
-                                        print(
-                                            "MEXC_LIVE ENTRY_HOOK_ERROR "
-                                            f"error={type(live_exc).__name__} "
-                                            f"detail={str(live_exc)[:180]}",
-                                            flush=True,
-                                        )
+                            # A startup history rebuild can already have stored
+                            # this exact signal as a PAPER row. Do not let that
+                            # duplicate suppress its one eligible live attempt.
+                            # maybe_open independently enforces the current M15
+                            # entry candle and its own idempotency in the LIVE DB.
+                            if symbol == "BTC_USDT" and LIVE_EXECUTOR is not None:
+                                try:
+                                    LIVE_EXECUTOR.maybe_open(
+                                        setup, entry, sl, plan["rr"],
+                                        float(m15[-1]["close"]), now_ts()
+                                    )
+                                except Exception as live_exc:
+                                    print(
+                                        "MEXC_LIVE ENTRY_HOOK_ERROR "
+                                        f"error={type(live_exc).__name__} "
+                                        f"detail={str(live_exc)[:180]}",
+                                        flush=True,
+                                    )
 
             manage_open_positions(symbol, m1, m15)
             if symbol == "BTC_USDT" and LIVE_EXECUTOR is not None:
