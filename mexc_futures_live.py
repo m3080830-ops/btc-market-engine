@@ -19,8 +19,8 @@ from datetime import datetime, timezone
 
 BASE_URL = "https://api.mexc.com"
 SYMBOL = "BTC_USDT"
-RISK_FRACTION = float(os.getenv("MEXC_RISK_FRACTION", "0.10"))
-MARGIN_USE_CAP = float(os.getenv("MEXC_MAX_MARGIN_FRACTION", "0.80"))
+RISK_FRACTION = float(os.getenv("MEXC_RISK_FRACTION", "0.20"))
+MARGIN_USE_CAP = float(os.getenv("MEXC_MAX_MARGIN_FRACTION", "0.98"))
 SLIPPAGE_BUFFER_BPS = float(os.getenv("MEXC_SLIPPAGE_BUFFER_BPS", "5"))
 MAX_API_RESPONSE_BYTES = 1_048_576
 
@@ -200,18 +200,22 @@ def calculate_position_sizing(
     notional = volume * contract_size * entry_price
     entry_fee = 0.0
 
-    # Choose the lowest leverage that satisfies both the exchange's IMR tier
-    # and the configured 80% maximum initial-margin commitment.
+    # Prefer the highest exchange-permitted leverage. If a lower leverage is
+    # required by MEXC, its larger initial margin is accounted for against the
+    # available balance (up to the configured 98% cap), not by changing 1R.
     chosen_leverage = None
     initial_margin = None
-    for leverage in range(minimum_allowed_leverage, max_allowed_leverage + 1):
+    for leverage in range(max_allowed_leverage, minimum_allowed_leverage - 1, -1):
         estimate = notional * max(1.0 / leverage, tier_imr)
         if estimate <= margin_budget + 1e-9:
             chosen_leverage = leverage
             initial_margin = estimate
             break
     if chosen_leverage is None:
-        raise MexcLiveError("No permitted leverage can fit this position while preserving the reserve")
+        raise MexcLiveError(
+            "Required initial margin exceeds 98% of available Futures balance "
+            "even at the highest permitted leverage"
+        )
 
     price_loss = volume * contract_size * gap
     # Keep the displayed/sized 1R identical to paper mode; fees are exchange costs,
