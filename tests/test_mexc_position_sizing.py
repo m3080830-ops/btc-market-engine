@@ -28,7 +28,7 @@ class PositionSizingTests(unittest.TestCase):
             "account_max_leverage": 500,
             "risk_limit_rows": [{
                 "positionType": 1, "openType": 1, "maxVol": 50000,
-                "maxLeverage": 500, "imr": 0.002
+                "maxLeverage": 500, "imr": 0.002, "mmr": 0.001
             }],
             "position_type": 1,
             "open_type": 1,
@@ -39,8 +39,8 @@ class PositionSizingTests(unittest.TestCase):
     def test_closer_stop_sizes_larger_notional_at_same_risk_budget(self):
         tight = self.make_sizing(0.10)
         wide = self.make_sizing(1.00)
-        self.assertEqual(tight["leverage"], 500)
-        self.assertEqual(wide["leverage"], 500)
+        self.assertLessEqual(tight["leverage"], 500)
+        self.assertLess(wide["leverage"], tight["leverage"])
         self.assertGreater(tight["notional_usdt"], wide["notional_usdt"])
         self.assertLessEqual(tight["estimated_total_risk_usdt"], 1.0)
         self.assertLessEqual(wide["estimated_total_risk_usdt"], 1.0)
@@ -69,7 +69,7 @@ class PositionSizingTests(unittest.TestCase):
                 contract_max_vol=50000,
                 risk_limit_rows=[{
                     "positionType": 1, "openType": 1, "maxVol": 10,
-                    "maxLeverage": 500, "imr": 0.002
+                    "maxLeverage": 500, "imr": 0.002, "mmr": 0.001, "mmr": 0.001
                 }],
             )
 
@@ -78,6 +78,8 @@ class PositionSizingTests(unittest.TestCase):
         self.assertEqual(result["leverage"], 10)
         self.assertLessEqual(result["estimated_initial_margin_usdt"], 8.0)
         self.assertLessEqual(result["estimated_total_risk_usdt"], 1.0)
+        self.assertLessEqual(result["estimated_initial_margin_usdt"], 8.0)
+        self.assertAlmostEqual(result["estimated_total_risk_usdt"], 1.0, places=6)
         self.assertLess(result["volume"], self.make_sizing(0.10)["volume"])
 
     def test_hard_leverage_cap_is_500(self):
@@ -87,15 +89,14 @@ class PositionSizingTests(unittest.TestCase):
             account_max_leverage=1000,
             risk_limit_rows=[{
                 "positionType": 1, "openType": 1, "maxVol": 50000,
-                "maxLeverage": 1000, "imr": 0.0
+                "maxLeverage": 1000, "imr": 0.0, "mmr": 0.001, "mmr": 0.001
             }],
         )
         self.assertLessEqual(result["leverage"], 500)
 
-    def test_margin_shortfall_reduces_volume_without_breaking_risk_limit(self):
-        result = self.make_sizing(0.10, margin_use_fraction=0.05)
-        self.assertLessEqual(result["estimated_initial_margin_usdt"], 0.5)
-        self.assertLessEqual(result["estimated_total_risk_usdt"], 1.0)
+    def test_margin_shortfall_rejects_instead_of_reducing_risk_size(self):
+        with self.assertRaisesRegex(MexcLiveError, "Full 10% ENTRY-to-SL risk size"):
+            self.make_sizing(0.10, margin_use_fraction=0.0001)
 
     def test_minimum_order_volume_cannot_exceed_one_r(self):
         with self.assertRaises(MexcLiveError):
