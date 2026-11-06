@@ -76,6 +76,23 @@ PORT = int(
 # BASIC HELPERS
 # ============================================================
 
+ETH_MIN_STOP_DISTANCE_PCT = 0.005
+
+
+def passes_minimum_stop_distance(symbol, entry_price, stop_price):
+    """Apply the 0.5% initial Entry-to-SL minimum to ETH only."""
+    if symbol != "ETH_USDT":
+        return True
+    try:
+        entry = float(entry_price)
+        stop = float(stop_price)
+    except (TypeError, ValueError):
+        return False
+    if entry <= 0:
+        return False
+    return abs(entry - stop) >= entry * ETH_MIN_STOP_DISTANCE_PCT
+
+
 def now_ts():
     return int(time.time())
 
@@ -1603,8 +1620,10 @@ def rebuild_history():
                 if active_until is not None and entry["time"] <= active_until:
                     continue
                 sl = choose_structural_sl(h1, m15, setup)
+                if sl is None or not passes_minimum_stop_distance(symbol, entry["price"], sl):
+                    continue
                 plan = planned_trade(h1, m15, setup, entry["price"], sl)
-                if sl is None or plan is None or plan["rr"] < MIN_SETUP_RR:
+                if plan is None or plan["rr"] < MIN_SETUP_RR:
                     continue
 
                 upsert_setup(setup)
@@ -1841,8 +1860,11 @@ def live_refresh():
                     entry = build_entry(setup, m15)
                     if entry:
                         sl = choose_structural_sl(h1, m15, setup)
-                        plan = planned_trade(h1, m15, setup, entry["price"], sl)
-                        if sl is not None and plan is not None and plan["rr"] >= MIN_SETUP_RR:
+                        if sl is not None and passes_minimum_stop_distance(symbol, entry["price"], sl):
+                            plan = planned_trade(h1, m15, setup, entry["price"], sl)
+                        else:
+                            plan = None
+                        if plan is not None and plan["rr"] >= MIN_SETUP_RR:
                             if not duplicate:
                                 upsert_setup(setup)
                                 update_setup(
