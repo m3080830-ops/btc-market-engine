@@ -226,10 +226,11 @@ def calculate_position_sizing(
 
         # Do not decrease target volume to fit margin. Full 1R or no order.
         candidate_volume = floor_volume(min(risk_volume, contract_cap, tier_max_vol))
+        required_volume = floor_volume(risk_volume)
         lower_band_min = floor_volume(previous_tier_max) + volume_unit
         band_min = max(float(min_vol), lower_band_min)
 
-        if candidate_volume + 1e-9 >= band_min:
+        if candidate_volume + 1e-9 >= band_min and candidate_volume + 1e-9 >= required_volume:
             notional = candidate_volume * per_contract_notional
             initial_margin = notional * margin_rate
             price_loss = candidate_volume * per_contract_risk
