@@ -69,18 +69,13 @@ class PositionSizingTests(unittest.TestCase):
                 contract_max_vol=50000,
                 risk_limit_rows=[{
                     "positionType": 1, "openType": 1, "maxVol": 10,
-                    "maxLeverage": 500, "imr": 0.002, "mmr": 0.001, "mmr": 0.001
+                    "maxLeverage": 500, "imr": 0.002, "mmr": 0.001
                 }],
             )
 
-    def test_lower_account_leverage_reduces_volume_instead_of_rejecting(self):
-        result = self.make_sizing(0.10, account_max_leverage=10)
-        self.assertEqual(result["leverage"], 10)
-        self.assertLessEqual(result["estimated_initial_margin_usdt"], 8.0)
-        self.assertLessEqual(result["estimated_total_risk_usdt"], 1.0)
-        self.assertLessEqual(result["estimated_initial_margin_usdt"], 8.0)
-        self.assertAlmostEqual(result["estimated_total_risk_usdt"], 1.0, places=6)
-        self.assertLess(result["volume"], self.make_sizing(0.10)["volume"])
+    def test_lower_account_leverage_requires_more_margin_or_rejects(self):
+        with self.assertRaisesRegex(MexcLiveError, "Full 10% ENTRY-to-SL risk size"):
+            self.make_sizing(0.10, account_max_leverage=10)
 
     def test_hard_leverage_cap_is_500(self):
         result = self.make_sizing(
