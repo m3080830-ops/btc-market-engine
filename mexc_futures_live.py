@@ -118,21 +118,19 @@ def calculate_position_sizing(
     open_type=1,
     liquidation_fee_rate=0.0002,
 ):
-    """Size BTC Futures from the strategy SL risk budget, then fit leverage/margin.
+    """Size from ENTRY-to-initial-SL price loss only, then fund the margin.
 
-    Price loss at the strategy SL plus estimated round-trip taker fees and
-    slippage is capped by risk_fraction of available Futures USDT. Leverage is
-    selected per MEXC risk tier and is additionally capped so the estimated
-    liquidation threshold remains beyond the strategy SL by the maintenance
-    margin, liquidation fee and a slippage buffer. If MEXC/account leverage
-    limits are lower, required initial margin increases; volume is reduced only
-    when the available margin reserve cannot support it.
+    Fees, liquidation fees and slippage are deliberately excluded from the
+    risk calculation. Position notional is fixed by risk_budget / stop_gap.
+    Leverage is the highest MEXC-permitted value that keeps estimated
+    liquidation beyond the initial SL using the tier maintenance-margin rate.
+    If the full target position needs more margin than the available margin
+    budget, reject it; never silently reduce the 1R size.
     """
     numeric_values = (
         entry_price, stop_price, available_balance, contract_size, vol_unit,
-        min_vol, taker_fee_rate, slippage_buffer_bps, margin_use_fraction,
-        risk_fraction, min_leverage, contract_max_leverage, account_max_leverage,
-        liquidation_fee_rate,
+        min_vol, margin_use_fraction, risk_fraction, min_leverage,
+        contract_max_leverage, account_max_leverage,
     )
     try:
         values = [float(value) for value in numeric_values]
@@ -143,10 +141,9 @@ def calculate_position_sizing(
     if (
         entry_price <= 0 or stop_price <= 0 or entry_price == stop_price
         or available_balance <= 0 or contract_size <= 0 or vol_unit <= 0
-        or min_vol <= 0 or taker_fee_rate < 0 or taker_fee_rate >= 0.1
-        or slippage_buffer_bps < 0 or margin_use_fraction <= 0
-        or margin_use_fraction >= 1 or risk_fraction <= 0 or risk_fraction >= 1
-        or min_leverage < 1 or liquidation_fee_rate < 0 or liquidation_fee_rate >= 0.1
+        or min_vol <= 0 or margin_use_fraction <= 0 or margin_use_fraction > 1
+        or risk_fraction <= 0 or risk_fraction >= 1 or min_leverage < 1
+        or contract_max_leverage < 1 or account_max_leverage < 1
     ):
         raise MexcLiveError("Position sizing input is outside safe bounds")
 
@@ -176,25 +173,20 @@ def calculate_position_sizing(
             "MEXC returned no valid BTC risk tier with maintenance margin (MMR)"
         )
 
-    gap = abs(entry_price - stop_price)
-    stop_fraction = gap / entry_price
+    stop_gap = abs(entry_price - stop_price)
+    stop_fraction = stop_gap / entry_price
     risk_budget = available_balance * risk_fraction
     margin_budget = available_balance * margin_use_fraction
-    # Conservative round-trip cost estimate: taker fee and slippage on entry
-    # and stop execution. The risk budget therefore includes execution costs.
-    slippage_fraction = slippage_buffer_bps / 10000.0
-    round_trip_cost_fraction = 2.0 * taker_fee_rate + 2.0 * slippage_fraction
-    risk_fraction_per_notional = stop_fraction + round_trip_cost_fraction
+    per_contract_risk = contract_size * stop_gap
+    per_contract_notional = contract_size * entry_price
     if (
-        not math.isfinite(risk_fraction_per_notional)
-        or risk_fraction_per_notional <= 0
-        or not math.isfinite(contract_size * entry_price)
+        per_contract_risk <= 0 or not math.isfinite(per_contract_risk)
+        or per_contract_notional <= 0 or not math.isfinite(per_contract_notional)
     ):
-        raise MexcLiveError("Invalid stop distance or estimated execution costs")
+        raise MexcLiveError("Invalid stop distance or contract value")
 
-    risk_volume = risk_budget / (
-        contract_size * entry_price * risk_fraction_per_notional
-    )
+    # Exact requested position: at the strategy SL, price loss equals 1R.
+    risk_volume = risk_budget / per_contract_risk
     volume_unit = float(vol_unit)
 
     def floor_volume(value):
@@ -208,27 +200,23 @@ def calculate_position_sizing(
     candidates = []
     previous_tier_max = 0.0
     safe_tier_seen = False
+    margin_rejected = False
 
     for tier_max_vol, tier_max_leverage, tier_imr, tier_mmr in matching_tiers:
         max_allowed_leverage = min(
-            MAX_LEVERAGE, int(contract_max_leverage),
-            int(account_max_leverage), int(tier_max_leverage),
+            MAX_LEVERAGE,
+            int(contract_max_leverage),
+            int(account_max_leverage),
+            int(tier_max_leverage),
         )
         if max_allowed_leverage < int(min_leverage):
             previous_tier_max = tier_max_vol
             continue
 
-        # Approximate MEXC liquidation distance: 1/leverage - MMR - fees.
-        # Keep liquidation beyond the initial SL; do not set leverage equal
-        # to entry/SL distance, because that can liquidate before the stop.
-        liquidation_buffer_fraction = (
-            stop_fraction + tier_mmr + liquidation_fee_rate
-            + taker_fee_rate + slippage_fraction
-        )
-        if liquidation_buffer_fraction <= 0:
-            previous_tier_max = tier_max_vol
-            continue
-        safe_leverage = math.floor(1.0 / liquidation_buffer_fraction)
+        # Approximate liquidation distance from entry using MEXC maintenance
+        # margin only. User-requested risk sizing excludes fees and slippage.
+        liquidation_distance = stop_fraction + tier_mmr
+        safe_leverage = math.floor(1.0 / liquidation_distance) if liquidation_distance > 0 else MAX_LEVERAGE
         if safe_leverage < int(min_leverage):
             previous_tier_max = tier_max_vol
             continue
@@ -236,35 +224,28 @@ def calculate_position_sizing(
         leverage = min(max_allowed_leverage, safe_leverage)
         margin_rate = max(1.0 / leverage, tier_imr)
 
-        margin_volume = margin_budget / (contract_size * entry_price * margin_rate)
-        tier_volume_limit = min(
-            risk_volume, contract_cap, tier_max_vol, margin_volume
-        )
-        candidate_volume = floor_volume(tier_volume_limit)
+        # Do not decrease target volume to fit margin. Full 1R or no order.
+        candidate_volume = floor_volume(min(risk_volume, contract_cap, tier_max_vol))
         lower_band_min = floor_volume(previous_tier_max) + volume_unit
         band_min = max(float(min_vol), lower_band_min)
 
         if candidate_volume + 1e-9 >= band_min:
-            notional = candidate_volume * contract_size * entry_price
+            notional = candidate_volume * per_contract_notional
             initial_margin = notional * margin_rate
-            price_loss = notional * stop_fraction
-            fees_est = notional * 2.0 * taker_fee_rate
-            slippage_est = notional * 2.0 * slippage_fraction
-            total_risk = price_loss + fees_est + slippage_est
-            if (
-                initial_margin <= margin_budget + 1e-9
-                and total_risk <= risk_budget + 1e-9
-            ):
+            price_loss = candidate_volume * per_contract_risk
+            if initial_margin > margin_budget + 1e-9:
+                margin_rejected = True
+            else:
                 candidates.append({
                     "volume": candidate_volume,
                     "notional_usdt": notional,
                     "leverage": leverage,
                     "risk_budget_usdt": risk_budget,
-                    "estimated_total_risk_usdt": total_risk,
+                    "estimated_total_risk_usdt": price_loss,
                     "estimated_price_loss_usdt": price_loss,
-                    "estimated_round_trip_fees_usdt": fees_est,
-                    "estimated_slippage_buffer_usdt": slippage_est,
-                    "estimated_entry_fee_usdt": notional * taker_fee_rate,
+                    "estimated_round_trip_fees_usdt": 0.0,
+                    "estimated_slippage_buffer_usdt": 0.0,
+                    "estimated_entry_fee_usdt": 0.0,
                     "estimated_initial_margin_usdt": initial_margin,
                     "margin_budget_usdt": margin_budget,
                     "reserve_after_entry_usdt": available_balance - initial_margin,
@@ -274,21 +255,25 @@ def calculate_position_sizing(
                     "safe_leverage_from_sl_and_mmr": safe_leverage,
                     "maintenance_margin_rate": tier_mmr,
                     "liquidation_buffer_fraction": (
-                        1.0 / leverage - tier_mmr - liquidation_fee_rate
-                        - taker_fee_rate - slippage_fraction - stop_fraction
+                        1.0 / leverage - tier_mmr - stop_fraction
                     ),
                 })
         previous_tier_max = tier_max_vol
 
     if not candidates:
+        if margin_rejected:
+            raise MexcLiveError(
+                "Full 10% ENTRY-to-SL risk size needs more initial margin than "
+                "the available Futures margin budget; target volume was not reduced"
+            )
         if not safe_tier_seen:
             raise MexcLiveError(
-                "No permitted leverage leaves a liquidation buffer beyond the "
-                "initial SL for this BTC setup"
+                "No MEXC-permitted leverage keeps estimated liquidation beyond "
+                "the initial SL"
             )
         raise MexcLiveError(
-            "BTC setup risk size is below MEXC minimum volume or exceeds the "
-            "available Futures margin reserve at permitted leverage"
+            "Full 10% risk size is below MEXC minimum volume or above the "
+            "contract/risk-tier volume limit"
         )
 
     return max(candidates, key=lambda item: item["volume"])
