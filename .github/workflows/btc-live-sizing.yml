@@ -1,0 +1,27 @@
+name: BTC Market Engine live sizing safety tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mexc_futures_live.py"
+      - "tests/test_mexc_position_sizing.py"
+      - ".github/workflows/btc-live-sizing.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sizing-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile live adapter
+        run: python -m py_compile mexc_futures_live.py
+      - name: Run BTC Futures sizing and execution tests
+        run: python -m unittest discover -s tests -p 'test_mexc_position_sizing.py' -v
