@@ -1,0 +1,49 @@
+name: MEXC entry improvement comparison
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_utc:
+        description: "Start UTC inclusive"
+        required: true
+        default: "2026-10-16T00:00:00+00:00"
+      end_utc:
+        description: "End UTC exclusive"
+        required: true
+        default: "2026-11-08T00:00:00+00:00"
+  push:
+    branches:
+      - "backtest/entry-improvement-comparison"
+    paths:
+      - "backtest/**"
+      - ".github/workflows/mexc-entry-comparison.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  compare-entry-variants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      START_UTC: ${{ inputs.start_utc || '2026-10-16T00:00:00+00:00' }}
+      END_UTC: ${{ inputs.end_utc || '2026-11-08T00:00:00+00:00' }}
+      WARMUP_UTC: "2026-06-01T00:00:00+00:00"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download public MEXC Futures candles
+        run: python backtest/download_mexc_klines.py
+      - name: Validate dataset
+        run: python backtest/validate_dataset.py
+      - name: Run entry-only comparison (offline only)
+        run: python backtest/run_entry_comparison.py
+      - name: Upload candles and entry comparison report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mexc-entry-comparison-${{ github.run_id }}
+          path: data/mexc/
+          if-no-files-found: error
+          retention-days: 30
