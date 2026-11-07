@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Read-only downloader for public MEXC USDT-M contract candles."""
 import csv, json, os, time, urllib.parse, urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 BASE="https://api.mexc.com/api/v1/contract/kline"
 SYMBOLS=("BTC_USDT","ETH_USDT")
 INTERVALS={"Min1":60,"Min15":900,"Min60":3600,"Hour4":14400,"Day1":86400}
 START=int(datetime.fromisoformat(os.getenv("START_UTC","2026-10-16T00:00:00+00:00")).timestamp())
-END=int(datetime.fromisoformat(os.getenv("END_UTC","2026-11-08T00:00:00+00:00")).timestamp())
+REQUESTED_END=int(datetime.fromisoformat(os.getenv("END_UTC","2026-11-08T00:00:00+00:00")).timestamp())
+# Do not request future candles: cap the dataset at the latest completed UTC minute.
+NOW=int(datetime.now(timezone.utc).timestamp())
+END=min(REQUESTED_END, NOW-NOW%60)
 WARMUP=int(datetime.fromisoformat(os.getenv("WARMUP_UTC","2026-06-01T00:00:00+00:00")).timestamp())
 OUT=os.getenv("DATA_DIR","data/mexc")
 LIMIT=2000
@@ -71,6 +74,6 @@ def main():
             summary[symbol][interval]=download(symbol,interval,seconds,start,END)
     os.makedirs(OUT,exist_ok=True)
     with open(os.path.join(OUT,"manifest.json"),"w",encoding="utf-8") as f:
-        json.dump({"start_utc":START,"end_exclusive_utc":END,"warmup_utc":WARMUP,
+        json.dump({"start_utc":START,"requested_end_exclusive_utc":REQUESTED_END,"end_exclusive_utc":END,"warmup_utc":WARMUP,
                    "symbols":summary,"source":"MEXC public contract/kline"},f,indent=2)
 if __name__=="__main__": main()
