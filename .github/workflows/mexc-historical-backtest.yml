@@ -24,8 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      START_UTC: \${{ inputs.start_utc || '2026-10-16T00:00:00+00:00' }}
-      END_UTC: \${{ inputs.end_utc || '2026-11-08T00:00:00+00:00' }}
+      START_UTC: ${{ inputs.start_utc || '2026-10-16T00:00:00+00:00' }}
+      END_UTC: ${{ inputs.end_utc || '2026-11-08T00:00:00+00:00' }}
       WARMUP_UTC: "2026-06-01T00:00:00+00:00"
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
       - name: Upload candles and manifest
         uses: actions/upload-artifact@v4
         with:
-          name: mexc-futures-candles-\${{ github.run_id }}
+          name: mexc-futures-candles-${{ github.run_id }}
           path: data/mexc/
           if-no-files-found: error
           retention-days: 30
