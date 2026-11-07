@@ -36,7 +36,10 @@ jobs:
         run: python backtest/download_mexc_klines.py
       - name: Validate dataset
         run: python backtest/validate_dataset.py
-      - name: Upload candles and manifest
+      - name: Run current-logic baseline (offline only)
+        run: python backtest/run_baseline.py
+      - name: Upload candles and baseline report
+
         uses: actions/upload-artifact@v4
         with:
           name: mexc-futures-candles-${{ github.run_id }}
