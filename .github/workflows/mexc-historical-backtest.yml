@@ -11,6 +11,12 @@ on:
         description: "End UTC exclusive"
         required: true
         default: "2026-11-08T00:00:00+00:00"
+  push:
+    branches:
+      - "backtest/mexc-historical-comparison"
+    paths:
+      - "backtest/**"
+      - ".github/workflows/mexc-historical-backtest.yml"
   pull_request:
     paths:
       - "backtest/**"
