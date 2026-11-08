@@ -28,6 +28,8 @@ else:
     MEXC_LIVE_IMPORT_ERROR = None
 
 LIVE_EXECUTORS = {}
+LIVE_REFRESH_LOCK = threading.Lock()
+M15_WS_LAST_CANDLE = {}
 
 
 # ============================================================
@@ -39,7 +41,7 @@ SYMBOL_LABELS = {"BTC_USDT": "BTC", "ETH_USDT": "ETH"}
 
 BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
 
-POLL_SECONDS = 2  # Detect a newly closed M15 candle promptly.
+POLL_SECONDS = 30  # M1 trailing and position reconciliation; M15 triggers use WebSocket.
 
 DB_FILE = os.environ.get("DB_FILE", "/data/market_history.db")
 
@@ -1794,7 +1796,7 @@ def manage_open_positions(symbol, m1, m15):
 
         update_setup(row["setup_time"], symbol=symbol, **fields)
 
-def live_refresh():
+def _live_refresh_impl():
     errors = []
 
     for symbol in SYMBOLS:
@@ -1931,6 +1933,75 @@ def live_refresh():
 
     state_set("last_live_update", now_ts())
     state_set("latest_error", " | ".join(errors))
+
+def live_refresh():
+    """Serialize REST refreshes shared by the 30s manager and M15 WebSocket."""
+    with LIVE_REFRESH_LOCK:
+        return _live_refresh_impl()
+
+
+def mexc_m15_websocket_loop():
+    """Wake the strategy immediately when MEXC starts a new M15 candle."""
+    try:
+        import websocket
+    except ImportError:
+        print("MEXC_WS status=DISABLED reason=websocket_client_missing", flush=True)
+        return
+
+    def on_open(ws):
+        for symbol in SYMBOLS:
+            ws.send(json.dumps({
+                "method": "sub.kline",
+                "param": {"symbol": symbol, "interval": "Min15"},
+            }))
+        print("MEXC_WS status=SUBSCRIBED interval=Min15 symbols=BTC_USDT,ETH_USDT", flush=True)
+
+    def on_message(ws, raw_message):
+        try:
+            message = json.loads(raw_message)
+            if message.get("channel") != "push.kline":
+                return
+            data = message.get("data") or {}
+            symbol = data.get("symbol")
+            if symbol not in SYMBOLS or data.get("interval") != "Min15":
+                return
+            candle_time = int(data.get("t", 0))
+            if candle_time <= 0:
+                return
+            previous = M15_WS_LAST_CANDLE.get(symbol)
+            M15_WS_LAST_CANDLE[symbol] = candle_time
+            # First push after startup/reconnect only seeds state; a later
+            # candle rollover proves the previous M15 candle has closed.
+            if previous is not None and candle_time > previous:
+                print(
+                    f"MEXC_WS event=M15_CANDLE_CLOSED symbol={symbol} "
+                    f"closed_candle={previous} next_candle={candle_time}",
+                    flush=True,
+                )
+                live_refresh()
+        except Exception as exc:
+            print(f"MEXC_WS event=MESSAGE_ERROR error={type(exc).__name__} detail={str(exc)[:140]}", flush=True)
+
+    def on_error(ws, error):
+        print(f"MEXC_WS status=ERROR error={type(error).__name__} detail={str(error)[:140]}", flush=True)
+
+    def on_close(ws, status_code, message):
+        print(f"MEXC_WS status=CLOSED code={status_code} detail={str(message)[:100]}", flush=True)
+
+    while True:
+        try:
+            app = websocket.WebSocketApp(
+                "wss://contract.mexc.com/edge",
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+            )
+            app.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as exc:
+            print(f"MEXC_WS status=RECONNECTING error={type(exc).__name__} detail={str(exc)[:140]}", flush=True)
+        time.sleep(5)
+
 
 # ============================================================
 # CHART DATA
@@ -4991,6 +5062,10 @@ def engine_loop():
         print("MEXC_LIVE status=DISABLED reason=env_flag_false", flush=True)
 
     rebuild_history()
+
+    # M15 close events trigger immediately over WebSocket; 30s REST loop
+    # remains for closed-M1 trailing and position reconciliation.
+    threading.Thread(target=mexc_m15_websocket_loop, daemon=True).start()
 
     while True:
         try:
