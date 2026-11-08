@@ -39,7 +39,7 @@ SYMBOL_LABELS = {"BTC_USDT": "BTC", "ETH_USDT": "ETH"}
 
 BASE_URL = "https://api.mexc.com/api/v1/contract/kline"
 
-POLL_SECONDS = 30
+POLL_SECONDS = 2  # Detect a newly closed M15 candle promptly.
 
 DB_FILE = os.environ.get("DB_FILE", "/data/market_history.db")
 
