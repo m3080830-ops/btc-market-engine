@@ -794,8 +794,15 @@ class MexcFuturesLive:
         try:
             entry_time = int(entry["time"])
             now = int(now_ts)
-            # Only execute during the M15 candle selected by the strategy.
-            if entry_time != (now // 900) * 900 or entry_time > now:
+            # Strategy selects the OPEN of the M15 candle immediately after
+            # the closed signal candle. Keep the signal executable for that
+            # entire 15-minute candle; do not require a fragile bucket equality.
+            if entry_time > now or now - entry_time >= 900:
+                self._log(
+                    "ENTRY_SKIPPED", setup_time=setup_time,
+                    reason="entry_window_expired",
+                    entry_time=entry_time, now=now,
+                )
                 return False
             last_attempt = int(self._last_entry_attempt.get(setup_time, 0) or 0)
             if now - last_attempt < 60:
