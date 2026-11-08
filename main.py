@@ -2152,19 +2152,32 @@ def dashboard():
         row for row in rows
         if row["exit_time"] and row["exit_r"] is not None
     ]
-    net_r = sum(float(row["exit_r"]) for row in closed_rows)
 
-    # NETTO $ is the signed price movement from ENTRY to EXIT,
-    # not R multiplied by an assumed monetary risk amount.
-    net_price_move = sum(
-        (
-            float(row["exit_price"]) - float(row["entry_price"])
-            if row["direction"] == "LONG"
-            else float(row["entry_price"]) - float(row["exit_price"])
+    def symbol_history_summary(symbol):
+        symbol_rows = [row for row in closed_rows if row["symbol"] == symbol]
+        symbol_net_r = sum(float(row["exit_r"]) for row in symbol_rows)
+        # Signed ENTRY-to-EXIT price movement, not R multiplied by a fixed dollar risk.
+        symbol_net_price_move = sum(
+            (
+                float(row["exit_price"]) - float(row["entry_price"])
+                if row["direction"] == "LONG"
+                else float(row["entry_price"]) - float(row["exit_price"])
+            )
+            for row in symbol_rows
+            if row["entry_price"] is not None and row["exit_price"] is not None
         )
-        for row in closed_rows
-        if row["entry_price"] is not None and row["exit_price"] is not None
-    )
+        return {
+            "count": len(symbol_rows),
+            "net_r": symbol_net_r,
+            "net_price_move": symbol_net_price_move,
+        }
+
+    btc_summary = symbol_history_summary("BTC_USDT")
+    eth_summary = symbol_history_summary("ETH_USDT")
+    total_summary = {
+        "net_r": btc_summary["net_r"] + eth_summary["net_r"],
+        "net_price_move": btc_summary["net_price_move"] + eth_summary["net_price_move"],
+    }
 
     options = ""
 
@@ -3163,14 +3176,22 @@ Brak setupów.
     </div>
 </div>
 <div class="summary-grid">
-    <div class="card"><b>NETTO R</b><span id="summaryNetR">__NET_R_DISPLAY__</span></div>
-    <div class="card"><b>NETTO $ RUCHU CENY</b><span id="summaryNetUsd">__NET_USD__ $</span></div>
+    <div class="card"><b>BTC · NETTO R</b><span>__BTC_NET_R__</span></div>
+    <div class="card"><b>BTC · NETTO RUCHU CENY</b><span>__BTC_NET_MOVE__ $</span></div>
+    <div class="card"><b>ETH · NETTO R</b><span>__ETH_NET_R__</span></div>
+    <div class="card"><b>ETH · NETTO RUCHU CENY</b><span>__ETH_NET_MOVE__ $</span></div>
+    <div class="card"><b>ŁĄCZNIE · NETTO R</b><span>__TOTAL_NET_R__</span></div>
+    <div class="card"><b>ŁĄCZNIE · NETTO RUCHU CENY</b><span>__TOTAL_NET_MOVE__ $</span></div>
 </div>
 </div>
 </section>
 """
-    summary_html = summary_html.replace("__NET_R_DISPLAY__", fmt_r(net_r))
-    summary_html = summary_html.replace("__NET_USD__", fmt_num(net_price_move, 2))
+    summary_html = summary_html.replace("__BTC_NET_R__", fmt_r(btc_summary["net_r"]))
+    summary_html = summary_html.replace("__BTC_NET_MOVE__", fmt_num(btc_summary["net_price_move"], 2))
+    summary_html = summary_html.replace("__ETH_NET_R__", fmt_r(eth_summary["net_r"]))
+    summary_html = summary_html.replace("__ETH_NET_MOVE__", fmt_num(eth_summary["net_price_move"], 2))
+    summary_html = summary_html.replace("__TOTAL_NET_R__", fmt_r(total_summary["net_r"]))
+    summary_html = summary_html.replace("__TOTAL_NET_MOVE__", fmt_num(total_summary["net_price_move"], 2))
     body.append(summary_html)
 
     body.append(
