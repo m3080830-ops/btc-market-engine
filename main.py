@@ -1848,7 +1848,9 @@ def live_refresh():
                                 flush=True,
                             )
 
-            if not active:
+            # In LIVE mode, PAPER history must never suppress fresh signal detection.
+            # The LIVE adapter independently enforces one exchange position per symbol.
+            if not active or symbol in LIVE_EXECUTORS:
                 setup = find_latest_setup(h4, h1, m15, d1)
                 if setup:
                     setup["symbol"] = symbol
