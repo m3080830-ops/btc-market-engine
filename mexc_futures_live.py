@@ -1,8 +1,8 @@
-"""Live execution adapter for BTC_USDT MEXC Futures only.
+"""Symbol-scoped live execution adapter for MEXC USDT-M Futures.
 
 Strategy signals and M1 swing calculations stay in main.py/strategy.py.
-This module only sizes orders, opens Futures positions, and applies the SL value
-provided by the engine. It intentionally never trades spot or ETH.
+This module only sizes Futures orders, opens positions, and applies the SL value
+provided by the engine. Only explicitly supported USDT-M Futures symbols are allowed.
 """
 import hashlib
 import hmac
@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 
 BASE_URL = "https://api.mexc.com"
 SYMBOL = "BTC_USDT"
+SUPPORTED_SYMBOLS = frozenset({"BTC_USDT", "ETH_USDT"})
+ETH_MIN_STOP_DISTANCE_PCT = 0.005
 RISK_FRACTION = float(os.getenv("MEXC_RISK_FRACTION", "0.10"))
 MARGIN_USE_CAP = float(os.getenv("MEXC_MAX_MARGIN_FRACTION", "0.98"))
 MAX_LEVERAGE = 500
@@ -279,15 +281,18 @@ def calculate_position_sizing(
 
     return max(candidates, key=lambda item: item["volume"])
 
-def build_market_open_payload(*, direction, volume, leverage, position_mode, external_oid, stop_loss_price):
+def build_market_open_payload(*, direction, volume, leverage, position_mode, external_oid, stop_loss_price, symbol=SYMBOL):
     """Build the MEXC Futures order payload using the 2026-10-23 API schema."""
+    symbol = str(symbol).upper()
+    if symbol not in SUPPORTED_SYMBOLS:
+        raise MexcLiveError("Unsupported MEXC Futures symbol")
     direction = str(direction).upper()
     if direction not in ("LONG", "SHORT"):
-        raise MexcLiveError("Unsupported BTC setup direction")
+        raise MexcLiveError("Unsupported Futures direction")
     if int(position_mode) != 1:
         raise MexcLiveError("Only verified Hedge Mode is supported")
     return {
-        "symbol": SYMBOL,
+        "symbol": symbol,
         "price": 0,
         "vol": volume,
         "leverage": leverage,
@@ -304,7 +309,10 @@ def build_market_open_payload(*, direction, volume, leverage, position_mode, ext
 
 
 class MexcFuturesLive:
-    def __init__(self, db_file):
+    def __init__(self, db_file, symbol=SYMBOL):
+        self.symbol = str(symbol).upper()
+        if self.symbol not in SUPPORTED_SYMBOLS:
+            raise MexcLiveError("Unsupported MEXC Futures symbol")
         self.db_file = db_file
         self.access_key = os.getenv("MEXC_ACCESS_KEY", "").strip()
         self.secret_key = os.getenv("MEXC_SECRET_KEY", "").strip()
@@ -575,7 +583,7 @@ class MexcFuturesLive:
     def _fee_info(self):
         data = self._request(
             "GET", "/api/v1/private/account/tiered_fee_rate/v2",
-            {"symbol": SYMBOL}
+            {"symbol": self.symbol}
         )
         if not isinstance(data, dict):
             raise MexcLiveError("MEXC account-specific fee details are unavailable")
@@ -590,10 +598,10 @@ class MexcFuturesLive:
 
     def _risk_limits(self):
         data = self._request(
-            "GET", "/api/v1/private/account/risk_limit", {"symbol": SYMBOL}
+            "GET", "/api/v1/private/account/risk_limit", {"symbol": self.symbol}
         )
         if isinstance(data, dict):
-            rows = data.get(SYMBOL)
+            rows = data.get(self.symbol)
             if isinstance(rows, list):
                 return rows
             if isinstance(rows, dict):
@@ -604,7 +612,7 @@ class MexcFuturesLive:
 
     def _leverage_info(self, position_type):
         data = self._request(
-            "GET", "/api/v1/private/position/leverage", {"symbol": SYMBOL}
+            "GET", "/api/v1/private/position/leverage", {"symbol": self.symbol}
         )
         for row in self._rows(data):
             try:
@@ -617,10 +625,10 @@ class MexcFuturesLive:
         raise MexcLiveError("MEXC leverage limits for the selected side are unavailable")
 
     def _market_price(self, direction):
-        data = self._request("GET", "/api/v1/contract/ticker", {"symbol": SYMBOL})
+        data = self._request("GET", "/api/v1/contract/ticker", {"symbol": self.symbol})
         if isinstance(data, list):
-            data = next((row for row in data if row.get("symbol") == SYMBOL), None)
-        if not isinstance(data, dict) or data.get("symbol") != SYMBOL:
+            data = next((row for row in data if row.get("symbol") == self.symbol), None)
+        if not isinstance(data, dict) or data.get("symbol") != self.symbol:
             raise MexcLiveError("MEXC live BTC_USDT ticker is unavailable")
         key = "ask1" if direction == "LONG" else "bid1"
         try:
@@ -635,7 +643,7 @@ class MexcFuturesLive:
         self._request(
             "POST", "/api/v1/private/position/change_leverage",
             {
-                "symbol": SYMBOL,
+                "symbol": self.symbol,
                 "openType": 1,
                 "positionType": int(position_type),
                 "leverage": int(leverage),
@@ -647,10 +655,10 @@ class MexcFuturesLive:
         return verified
 
     def _contract(self):
-        data = self._request("GET", "/api/v1/contract/detail", {"symbol": SYMBOL})
+        data = self._request("GET", "/api/v1/contract/detail", {"symbol": self.symbol})
         if isinstance(data, list):
-            data = next((x for x in data if x.get("symbol") == SYMBOL), None)
-        if not isinstance(data, dict) or data.get("symbol") != SYMBOL:
+            data = next((x for x in data if x.get("symbol") == self.symbol), None)
+        if not isinstance(data, dict) or data.get("symbol") != self.symbol:
             raise MexcLiveError("MEXC did not return BTC_USDT contract metadata")
         if data.get("apiAllowed") is False or int(data.get("state", 0)) != 0:
             raise MexcLiveError("BTC_USDT Futures contract is not API-tradable")
@@ -670,15 +678,15 @@ class MexcFuturesLive:
         raise MexcLiveError("Unable to confirm MEXC Futures position mode; entry blocked")
 
     def _positions(self):
-        data = self._request("GET", "/api/v1/private/position/open_positions", {"symbol": SYMBOL})
+        data = self._request("GET", "/api/v1/private/position/open_positions", {"symbol": self.symbol})
         return [
             p for p in self._rows(data)
-            if p.get("symbol") == SYMBOL and int(p.get("state", 1)) == 1
+            if p.get("symbol") == self.symbol and int(p.get("state", 1)) == 1
             and float(p.get("holdVol", p.get("vol", 0)) or 0) > 0
         ]
 
     def _stop_orders(self):
-        data = self._request("GET", "/api/v1/private/stoporder/list/orders", {"symbol": SYMBOL, "page_num": 1, "page_size": 100, "is_finished": 0})
+        data = self._request("GET", "/api/v1/private/stoporder/list/orders", {"symbol": self.symbol, "page_num": 1, "page_size": 100, "is_finished": 0})
         return self._rows(data)
 
     def _store(self, setup_time, **fields):
@@ -763,14 +771,21 @@ class MexcFuturesLive:
         }
 
     def maybe_open(self, setup, entry, initial_sl, planned_rr, current_price, now_ts):
-        """Open one fresh BTC_USDT Futures setup; never replays a stale PAPER entry."""
-        if not self.enabled or not setup or setup.get("symbol", SYMBOL) != SYMBOL:
+        """Open one fresh setup for this Futures symbol; never replay stale PAPER entries."""
+        if not self.enabled or not setup or setup.get("symbol", self.symbol) != self.symbol:
             return False
         if entry is None or initial_sl is None or planned_rr is None:
             return False
         try:
             planned_rr = float(planned_rr)
-        except (TypeError, ValueError):
+            entry_price = float(entry["price"])
+            initial_sl = float(initial_sl)
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not math.isfinite(entry_price) or not math.isfinite(initial_sl) or entry_price <= 0:
+            return False
+        if self.symbol == "ETH_USDT" and abs(entry_price - initial_sl) < entry_price * ETH_MIN_STOP_DISTANCE_PCT:
+            self._log("ENTRY_SKIPPED", symbol=self.symbol, reason="minimum_stop_distance_0.5pct")
             return False
         if planned_rr < 1.0:
             return False
@@ -789,7 +804,7 @@ class MexcFuturesLive:
 
             direction = str(setup["direction"]).upper()
             if direction not in ("LONG", "SHORT"):
-                raise MexcLiveError("Unsupported BTC setup direction")
+                raise MexcLiveError("Unsupported Futures setup direction")
             position_type = 1 if direction == "LONG" else 2
 
             with self._conn() as conn:
@@ -818,13 +833,13 @@ class MexcFuturesLive:
             if self._positions():
                 self._log(
                     "ENTRY_SKIPPED", setup_time=setup_time,
-                    reason="BTC_USDT_position_already_exists"
+                    reason=f"{self.symbol}_position_already_exists"
                 )
                 return False
 
             mode = self._position_mode()
             if mode != 1:
-                raise MexcLiveError("BTC Futures account is not in the verified Hedge Mode")
+                raise MexcLiveError(f"{self.symbol} Futures account is not in the verified Hedge Mode")
 
             available = self._usdt_available()
             if available <= 0:
@@ -853,7 +868,7 @@ class MexcFuturesLive:
                 and int(row.get("openType", 1)) == 1
             ]
             if not matching_limits:
-                raise MexcLiveError("No BTC_USDT risk tier for the selected direction")
+                raise MexcLiveError(f"No {self.symbol} risk tier for the selected direction")
 
             contract_max_vol = float(meta.get("maxVol", 0) or 0)
             if contract_max_vol <= 0:
@@ -894,7 +909,7 @@ class MexcFuturesLive:
                         entry_price,initial_sl,current_sl,risk_usdt,created_at,updated_at)
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        setup_time, SYMBOL, direction, "OPENING", external_oid,
+                        setup_time, self.symbol, direction, "OPENING", external_oid,
                         sizing["volume"], float(meta["contractSize"]), price, sl, sl,
                         sizing["estimated_total_risk_usdt"], created_at, created_at,
                     )
@@ -909,6 +924,7 @@ class MexcFuturesLive:
                 position_mode=mode,
                 external_oid=external_oid,
                 stop_loss_price=self._format_price(sl, meta, direction),
+                symbol=self.symbol,
             )
             try:
                 data = self._request("POST", "/api/v1/private/order/create", payload)
