@@ -1808,7 +1808,18 @@ def _live_refresh_impl():
             m1 = get_klines(symbol, "Min1", 2000)
 
             if not h4 or not h1 or not m15 or not m1:
+                print(
+                    f"LIVE_ANALYSIS symbol={symbol} result=SKIP "
+                    f"reason=MARKET_DATA_MISSING h4={len(h4 or [])} "
+                    f"h1={len(h1 or [])} m15={len(m15 or [])} m1={len(m1 or [])}",
+                    flush=True,
+                )
                 continue
+            print(
+                f"LIVE_ANALYSIS symbol={symbol} event=START "
+                f"m15_last={m15[-1].get('time')} price={m15[-1].get('close')}",
+                flush=True,
+            )
 
             with db_conn() as conn:
                 active = conn.execute(
@@ -1854,7 +1865,18 @@ def _live_refresh_impl():
             # The LIVE adapter independently enforces one exchange position per symbol.
             if not active or symbol in LIVE_EXECUTORS:
                 setup = find_latest_setup(h4, h1, m15, d1)
+                if not setup:
+                    print(
+                        f"LIVE_ANALYSIS symbol={symbol} result=NO_SETUP",
+                        flush=True,
+                    )
                 if setup:
+                    print(
+                        f"LIVE_ANALYSIS symbol={symbol} result=SETUP_FOUND "
+                        f"direction={setup.get('direction')} "
+                        f"signal_time={setup.get('signal_time')} model={setup.get('model')}",
+                        flush=True,
+                    )
                     setup["symbol"] = symbol
                     with db_conn() as conn:
                         duplicate = conn.execute(
@@ -1863,13 +1885,48 @@ def _live_refresh_impl():
                         ).fetchone()
 
                     entry = build_entry(setup, m15)
+                    if not entry:
+                        print(
+                            f"LIVE_ANALYSIS symbol={symbol} result=REJECT "
+                            f"reason=BUILD_ENTRY_NONE signal_time={setup.get('signal_time')}",
+                            flush=True,
+                        )
                     if entry:
+                        print(
+                            f"LIVE_ANALYSIS symbol={symbol} event=ENTRY_BUILT "
+                            f"direction={setup.get('direction')} entry={entry.get('price')} "
+                            f"entry_time={entry.get('time')}",
+                            flush=True,
+                        )
                         sl = choose_structural_sl(h1, m15, setup)
-                        if sl is not None and passes_minimum_stop_distance(symbol, entry["price"], sl):
+                        stop_ok = sl is not None and passes_minimum_stop_distance(symbol, entry["price"], sl)
+                        if stop_ok:
                             plan = planned_trade(h1, m15, setup, entry["price"], sl)
                         else:
                             plan = None
+                            print(
+                                f"LIVE_ANALYSIS symbol={symbol} result=REJECT "
+                                f"reason=STOP_DISTANCE_OR_SL_INVALID sl={sl} entry={entry['price']}",
+                                flush=True,
+                            )
+                        if plan is not None and plan["rr"] < MIN_SETUP_RR:
+                            print(
+                                f"LIVE_ANALYSIS symbol={symbol} result=REJECT "
+                                f"reason=RR_BELOW_MIN rr={plan['rr']} min_rr={MIN_SETUP_RR}",
+                                flush=True,
+                            )
                         if plan is not None and plan["rr"] >= MIN_SETUP_RR:
+                            print(
+                                f"LIVE_ANALYSIS symbol={symbol} event=PLAN_ACCEPTED "
+                                f"rr={plan['rr']} sl={sl} target={plan['target']}",
+                                flush=True,
+                            )
+                            if duplicate:
+                                print(
+                                    f"LIVE_ANALYSIS symbol={symbol} result=DUPLICATE "
+                                    f"signal_time={setup.get('signal_time')}",
+                                    flush=True,
+                                )
                             if not duplicate:
                                 upsert_setup(setup)
                                 update_setup(
@@ -1888,9 +1945,20 @@ def _live_refresh_impl():
                             # entry candle and its own idempotency in the LIVE DB.
                             if symbol in LIVE_EXECUTORS:
                                 try:
-                                    LIVE_EXECUTORS[symbol].maybe_open(
+                                    print(
+                                        f"MEXC_LIVE ENTRY_ATTEMPT symbol={symbol} "
+                                        f"direction={setup.get('direction')} "
+                                        f"entry={entry['price']} sl={sl} rr={plan['rr']}",
+                                        flush=True,
+                                    )
+                                    opened = LIVE_EXECUTORS[symbol].maybe_open(
                                         setup, entry, sl, plan["rr"],
                                         float(m15[-1]["close"]), now_ts()
+                                    )
+                                    print(
+                                        f"MEXC_LIVE ENTRY_RESULT symbol={symbol} "
+                                        f"opened={bool(opened)}",
+                                        flush=True,
                                     )
                                 except Exception as live_exc:
                                     print(
