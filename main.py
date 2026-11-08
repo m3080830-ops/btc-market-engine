@@ -1948,17 +1948,43 @@ def mexc_m15_websocket_loop():
         print("MEXC_WS status=DISABLED reason=websocket_client_missing", flush=True)
         return
 
+    def heartbeat_loop(ws):
+        # MEXC Futures requires an application-level JSON ping every 10-20s.
+        # websocket-client's native WebSocket control ping is not a substitute.
+        while getattr(ws, "keep_running", False):
+            time.sleep(15)
+            if not getattr(ws, "keep_running", False):
+                break
+            try:
+                ws.send(json.dumps({"method": "ping"}))
+            except Exception as exc:
+                print(
+                    f"MEXC_WS status=HEARTBEAT_ERROR "
+                    f"error={type(exc).__name__} detail={str(exc)[:120]}",
+                    flush=True,
+                )
+                break
+
     def on_open(ws):
         for symbol in SYMBOLS:
             ws.send(json.dumps({
                 "method": "sub.kline",
                 "param": {"symbol": symbol, "interval": "Min15"},
             }))
-        print("MEXC_WS status=SUBSCRIBED interval=Min15 symbols=BTC_USDT,ETH_USDT", flush=True)
+        threading.Thread(
+            target=heartbeat_loop, args=(ws,), daemon=True
+        ).start()
+        print(
+            "MEXC_WS status=SUBSCRIBED interval=Min15 "
+            "symbols=BTC_USDT,ETH_USDT heartbeat=json_ping_15s",
+            flush=True,
+        )
 
     def on_message(ws, raw_message):
         try:
             message = json.loads(raw_message)
+            if message.get("channel") == "pong":
+                return
             if message.get("channel") != "push.kline":
                 return
             data = message.get("data") or {}
@@ -1997,7 +2023,7 @@ def mexc_m15_websocket_loop():
                 on_error=on_error,
                 on_close=on_close,
             )
-            app.run_forever(ping_interval=20, ping_timeout=10)
+            app.run_forever()
         except Exception as exc:
             print(f"MEXC_WS status=RECONNECTING error={type(exc).__name__} detail={str(exc)[:140]}", flush=True)
         time.sleep(5)
