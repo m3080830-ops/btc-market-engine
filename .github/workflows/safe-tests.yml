@@ -16,6 +16,7 @@ on:
       - "strategy.py"
       - "mexc_futures_live.py"
       - "Dockerfile"
+      - "tests/**"
       - ".github/workflows/safe-tests.yml"
 
 permissions:
@@ -24,7 +25,7 @@ permissions:
 jobs:
   syntax-and-import:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -37,7 +38,7 @@ jobs:
       - name: Check Python syntax
         run: python -m compileall -q main.py strategy.py mexc_futures_live.py
 
-      - name: Smoke-test imports (no network, no orders)
+      - name: Smoke-test imports (no orders)
         run: |
           python - <<'PY'
           import main
@@ -48,11 +49,84 @@ jobs:
           assert callable(strategy.choose_structural_sl)
           assert callable(strategy.planned_trade)
           assert callable(strategy.build_entry)
-          print("PASS: main.py and strategy.py import successfully")
           assert callable(mexc_futures_live.MexcFuturesLive)
-          print("PASS: expected strategy entry points are available")
-          print("PASS: live adapter imports without network calls")
+          assert main.SYMBOLS == ["BTC_USDT", "ETH_USDT"]
+          print("PASS: engine imports; BTC and ETH are enabled in the strategy universe")
+          print("PASS: adapter imports without network access or order submission")
           PY
 
-      - name: Test Futures sizing (offline, no orders)
+      - name: Test Futures sizing and symbol safeguards (offline, no orders)
         run: python -m unittest discover -s tests -v
+
+      - name: Check public MEXC Futures connectivity for BTC and ETH (read-only)
+        run: |
+          python - <<'PY'
+          import json
+          import time
+          import urllib.parse
+          import urllib.request
+
+          for symbol in ("BTC_USDT", "ETH_USDT"):
+              url = "https://api.mexc.com/api/v1/contract/detail?" + urllib.parse.urlencode({"symbol": symbol})
+              last_error = None
+              for attempt in range(3):
+                  try:
+                      request = urllib.request.Request(url, headers={"User-Agent": "btc-market-engine-ci/1.0"})
+                      with urllib.request.urlopen(request, timeout=15) as response:
+                          payload = json.loads(response.read().decode("utf-8"))
+                      data = payload.get("data") if isinstance(payload, dict) else None
+                      if isinstance(data, list):
+                          data = next((row for row in data if row.get("symbol") == symbol), None)
+                      if not isinstance(data, dict) or data.get("symbol") != symbol:
+                          raise RuntimeError("MEXC returned no matching contract metadata")
+                      if data.get("apiAllowed") is False or int(data.get("state", 0)) != 0:
+                          raise RuntimeError("contract is not API-tradable")
+                      print(f"PASS: public MEXC Futures contract reachable: {symbol}")
+                      break
+                  except Exception as exc:
+                      last_error = exc
+                      if attempt < 2:
+                          time.sleep(2 ** attempt)
+              else:
+                  raise SystemExit(f"FAIL: MEXC public Futures connectivity for {symbol}: {type(last_error).__name__}: {last_error}")
+          PY
+
+      - name: Check authenticated MEXC read-only connectivity (when CI secrets exist)
+        env:
+          MEXC_ACCESS_KEY: ${{ secrets.MEXC_ACCESS_KEY }}
+          MEXC_SECRET_KEY: ${{ secrets.MEXC_SECRET_KEY }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import hmac
+          import json
+          import os
+          import time
+          import urllib.parse
+          import urllib.request
+
+          access = os.getenv("MEXC_ACCESS_KEY", "").strip()
+          secret = os.getenv("MEXC_SECRET_KEY", "").strip()
+          if not access or not secret:
+              print("SKIP: authenticated MEXC check; repository secrets are not configured")
+              raise SystemExit(0)
+
+          for symbol in ("BTC_USDT", "ETH_USDT"):
+              timestamp = str(int(time.time() * 1000))
+              canonical = urllib.parse.urlencode({"symbol": symbol})
+              signature = hmac.new(secret.encode(), f"{access}{timestamp}{canonical}".encode(), hashlib.sha256).hexdigest()
+              url = "https://api.mexc.com/api/v1/private/account/tiered_fee_rate/v2?" + canonical
+              request = urllib.request.Request(url, headers={
+                  "ApiKey": access,
+                  "Request-Time": timestamp,
+                  "Signature": signature,
+                  "Recv-Window": "10000",
+                  "Accept": "application/json",
+              })
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  payload = json.loads(response.read().decode("utf-8"))
+              if not isinstance(payload, dict) or payload.get("success") is not True or not isinstance(payload.get("data"), dict):
+                  code = payload.get("code") if isinstance(payload, dict) else "invalid-response"
+                  raise SystemExit(f"FAIL: authenticated MEXC read-only check for {symbol}; API code={code}")
+              print(f"PASS: authenticated MEXC read-only account check: {symbol}")
+          PY
