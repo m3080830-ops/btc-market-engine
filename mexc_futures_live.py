@@ -289,7 +289,7 @@ def calculate_position_sizing(
             for row in matching_tiers
         )
         raise MexcLiveError(
-            "Full 10% risk size cannot fit MEXC volume/leverage tiers "
+            "Full 10% ENTRY-to-SL risk size cannot fit MEXC volume/leverage tiers "
             f"(targetVol={risk_volume:.8g}, minVol={min_vol}, "
             f"contractMaxVol={contract_cap}, stopPct={stop_fraction:.6%}, "
             f"marginBudget={margin_budget:.4f}, tiers=[{tier_summary}])"
