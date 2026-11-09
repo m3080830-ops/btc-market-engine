@@ -26,6 +26,25 @@ MARGIN_USE_CAP = 0.20  # Maximum initial margin is 20% of available Futures USDT
 MAX_LEVERAGE = 500
 SLIPPAGE_BUFFER_BPS = float(os.getenv("MEXC_SLIPPAGE_BUFFER_BPS", "5"))
 MAX_API_RESPONSE_BYTES = 1_048_576
+M15_CANDLE_SECONDS = 15 * 60
+
+
+def is_current_m15_entry_candle(entry_time, now):
+    """True only when the planned entry candle is the currently forming M15 candle.
+
+    Strategy signals are historical closed-candle events. Live execution may
+    enter only on the immediately following M15 candle, never by replaying an
+    old signal after a restart, delayed refresh, or stale market-data response.
+    """
+    try:
+        entry_time = int(entry_time)
+        now = int(now)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if entry_time <= 0 or now <= 0 or entry_time > now:
+        return False
+    current_m15_open = (now // M15_CANDLE_SECONDS) * M15_CANDLE_SECONDS
+    return entry_time == current_m15_open
 
 
 def probe_mexc_https(host="api.mexc.com", port=443, timeout=4):
@@ -842,10 +861,21 @@ class MexcFuturesLive:
         try:
             entry_time = int(entry["time"])
             now = int(now_ts)
-            # Execute as soon as the strategy has produced the closed-candle
-            # trigger. Do not impose an M15-age timeout or a 60-second cooldown.
-            # Durable per-signal ledger/idempotency below prevents duplicate orders.
-            if entry_time > now:
+            # The strategy's entry timestamp is the OPEN time of the M15 candle
+            # immediately following its closed-candle trigger. Execute only while
+            # that exact candle is current. A historical signal must never become
+            # a delayed MARKET order after a restart or missed WebSocket refresh.
+            current_m15_open = (now // M15_CANDLE_SECONDS) * M15_CANDLE_SECONDS
+            if entry_time != current_m15_open:
+                reason = "future_entry_candle" if entry_time > now else "stale_entry_candle"
+                self._log(
+                    "ENTRY_SKIPPED",
+                    setup_time=setup_time,
+                    reason=reason,
+                    entry_time=entry_time,
+                    current_m15_candle=current_m15_open,
+                    age_seconds=now - entry_time,
+                )
                 return False
             self._last_entry_attempt[setup_time] = now
 
