@@ -4,6 +4,7 @@ from unittest.mock import Mock
 from mexc_futures_live import (
     MexcLiveError, MexcFuturesLive, calculate_position_sizing,
     build_market_open_payload,
+    is_current_m15_entry_candle,
 )
 
 
@@ -178,6 +179,46 @@ class FuturesPreflightTests(unittest.TestCase):
             client.preflight()
         client._usdt_available.assert_not_called()
         client._request.assert_not_called()
+
+
+class M15LiveEntryFreshnessTests(unittest.TestCase):
+    def test_only_current_m15_candle_is_eligible(self):
+        now = 1_794_178_205
+        current_open = (now // 900) * 900
+        self.assertTrue(is_current_m15_entry_candle(current_open, now))
+        self.assertFalse(is_current_m15_entry_candle(current_open - 900, now))
+        self.assertFalse(is_current_m15_entry_candle(current_open - 4 * 900, now))
+        self.assertFalse(is_current_m15_entry_candle(current_open + 900, now))
+
+    def test_invalid_timestamps_are_not_eligible(self):
+        self.assertFalse(is_current_m15_entry_candle(None, 1_794_178_205))
+        self.assertFalse(is_current_m15_entry_candle("bad", 1_794_178_205))
+        self.assertFalse(is_current_m15_entry_candle(0, 1_794_178_205))
+
+    def test_maybe_open_skips_old_signal_before_any_exchange_or_database_call(self):
+        client = object.__new__(MexcFuturesLive)
+        client.enabled = True
+        client.symbol = "BTC_USDT"
+        client._log = Mock()
+
+        now = 1_794_178_205
+        current_open = (now // 900) * 900
+        result = client.maybe_open(
+            {"symbol": "BTC_USDT", "signal_time": current_open - 2 * 900, "direction": "SHORT"},
+            {"time": current_open - 900, "price": 75_565.5},
+            75_910.97,
+            2.0,
+            74_500.0,
+            now,
+        )
+
+        self.assertFalse(result)
+        client._log.assert_called_once()
+        logged = client._log.call_args
+        self.assertEqual(logged.args[0], "ENTRY_SKIPPED")
+        self.assertEqual(logged.kwargs["reason"], "stale_entry_candle")
+        self.assertEqual(logged.kwargs["current_m15_candle"], current_open)
+        self.assertEqual(logged.kwargs["age_seconds"], 900)
 
 
 if __name__ == "__main__":
