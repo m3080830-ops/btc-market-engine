@@ -218,7 +218,7 @@ class M15LiveEntryFreshnessTests(unittest.TestCase):
         self.assertEqual(logged.args[0], "ENTRY_SKIPPED")
         self.assertEqual(logged.kwargs["reason"], "stale_entry_candle")
         self.assertEqual(logged.kwargs["current_m15_candle"], current_open)
-        self.assertEqual(logged.kwargs["age_seconds"], 900)
+        self.assertEqual(logged.kwargs["age_seconds"], now - (current_open - 900))
 
 
 if __name__ == "__main__":
