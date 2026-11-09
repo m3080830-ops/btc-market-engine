@@ -22,7 +22,7 @@ SYMBOL = "BTC_USDT"
 SUPPORTED_SYMBOLS = frozenset({"BTC_USDT", "ETH_USDT"})
 ETH_MIN_STOP_DISTANCE_PCT = 0.005
 RISK_FRACTION = float(os.getenv("MEXC_RISK_FRACTION", "0.10"))
-MARGIN_USE_CAP = float(os.getenv("MEXC_MAX_MARGIN_FRACTION", "0.98"))
+MARGIN_USE_CAP = 0.20  # At most 20% of available Futures balance as initial margin.
 MAX_LEVERAGE = 500
 SLIPPAGE_BUFFER_BPS = float(os.getenv("MEXC_SLIPPAGE_BUFFER_BPS", "5"))
 MAX_API_RESPONSE_BYTES = 1_048_576
@@ -223,11 +223,21 @@ def calculate_position_sizing(
             previous_tier_max = tier_max_vol
             continue
         safe_tier_seen = True
-        leverage = min(max_allowed_leverage, safe_leverage)
+        # Derive leverage from the margin budget: about 110x BTC / 90x ETH
+        # for a 1 USDT risk budget and 2 USDT margin at the observed SL distances.
+        candidate_volume = floor_volume(min(risk_volume, contract_cap, tier_max_vol))
+        if candidate_volume <= 0:
+            previous_tier_max = tier_max_vol
+            continue
+        notional_for_target = candidate_volume * per_contract_notional
+        required_leverage = math.ceil(notional_for_target / margin_budget)
+        leverage = max(int(min_leverage), required_leverage)
+        if leverage > min(max_allowed_leverage, safe_leverage):
+            previous_tier_max = tier_max_vol
+            continue
         margin_rate = max(1.0 / leverage, tier_imr)
 
-        # Do not decrease target volume to fit margin. Full 1R or no order.
-        candidate_volume = floor_volume(min(risk_volume, contract_cap, tier_max_vol))
+        # Do not decrease target volume to fit margin.
         required_volume = floor_volume(risk_volume)
         lower_band_min = floor_volume(previous_tier_max) + volume_unit
         band_min = max(float(min_vol), lower_band_min)
@@ -274,9 +284,15 @@ def calculate_position_sizing(
                 "No MEXC-permitted leverage keeps estimated liquidation beyond "
                 "the initial SL"
             )
+        tier_summary = ",".join(
+            f"maxVol={int(row[0])}:maxLev={int(row[1])}:mmr={row[3]:.4g}:imr={row[2]:.4g}"
+            for row in matching_tiers
+        )
         raise MexcLiveError(
-            "Full 10% risk size is below MEXC minimum volume or above the "
-            "contract/risk-tier volume limit"
+            "Full 10% risk size cannot fit MEXC volume/leverage tiers "
+            f"(targetVol={risk_volume:.8g}, minVol={min_vol}, "
+            f"contractMaxVol={contract_cap}, stopPct={stop_fraction:.6%}, "
+            f"marginBudget={margin_budget:.4f}, tiers=[{tier_summary}])"
         )
 
     return max(candidates, key=lambda item: item["volume"])
@@ -331,33 +347,35 @@ class MexcFuturesLive:
         return conn
 
     def _init_db(self):
+        columns_sql = """
+            setup_time INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            status TEXT NOT NULL,
+            external_oid TEXT NOT NULL UNIQUE,
+            order_id TEXT,
+            position_id TEXT,
+            stop_order_id TEXT,
+            vol REAL,
+            contract_size REAL,
+            entry_price REAL,
+            initial_sl REAL,
+            current_sl REAL,
+            risk_usdt REAL,
+            max_r REAL NOT NULL DEFAULT 0,
+            min_r REAL NOT NULL DEFAULT 0,
+            trail_r REAL,
+            last_m1_candle INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_error TEXT,
+            missing_position_checks INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (setup_time, symbol)
+        """
         with self._conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS mexc_live_trades (
-                    setup_time INTEGER PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    direction TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    external_oid TEXT NOT NULL UNIQUE,
-                    order_id TEXT,
-                    position_id TEXT,
-                    stop_order_id TEXT,
-                    vol REAL,
-                    contract_size REAL,
-                    entry_price REAL,
-                    initial_sl REAL,
-                    current_sl REAL,
-                    risk_usdt REAL,
-                    max_r REAL NOT NULL DEFAULT 0,
-                    min_r REAL NOT NULL DEFAULT 0,
-                    trail_r REAL,
-                    last_m1_candle INTEGER,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    last_error TEXT,
-                    missing_position_checks INTEGER NOT NULL DEFAULT 0
-                )
-            """)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS mexc_live_trades (" + columns_sql + ")"
+            )
             columns = {
                 row["name"] for row in conn.execute(
                     "PRAGMA table_info(mexc_live_trades)"
@@ -367,6 +385,35 @@ class MexcFuturesLive:
                 conn.execute(
                     "ALTER TABLE mexc_live_trades ADD COLUMN "
                     "missing_position_checks INTEGER NOT NULL DEFAULT 0"
+                )
+            pk = [
+                row["name"] for row in sorted(
+                    conn.execute("PRAGMA table_info(mexc_live_trades)").fetchall(),
+                    key=lambda item: int(item["pk"])
+                ) if int(row["pk"]) > 0
+            ]
+            if pk != ["setup_time", "symbol"]:
+                conn.execute("DROP TABLE IF EXISTS mexc_live_trades_v2")
+                conn.execute(
+                    "CREATE TABLE mexc_live_trades_v2 (" + columns_sql + ")"
+                )
+                conn.execute(
+                    """INSERT OR IGNORE INTO mexc_live_trades_v2
+                       (setup_time,symbol,direction,status,external_oid,order_id,
+                        position_id,stop_order_id,vol,contract_size,entry_price,
+                        initial_sl,current_sl,risk_usdt,max_r,min_r,trail_r,
+                        last_m1_candle,created_at,updated_at,last_error,
+                        missing_position_checks)
+                       SELECT setup_time,symbol,direction,status,external_oid,order_id,
+                              position_id,stop_order_id,vol,contract_size,entry_price,
+                              initial_sl,current_sl,risk_usdt,max_r,min_r,trail_r,
+                              last_m1_candle,created_at,updated_at,last_error,
+                              missing_position_checks
+                       FROM mexc_live_trades"""
+                )
+                conn.execute("DROP TABLE mexc_live_trades")
+                conn.execute(
+                    "ALTER TABLE mexc_live_trades_v2 RENAME TO mexc_live_trades"
                 )
             conn.commit()
 
@@ -697,8 +744,8 @@ class MexcFuturesLive:
         with self._conn() as conn:
             conn.execute(
                 "UPDATE mexc_live_trades SET " + ", ".join(f"{k}=?" for k in cols)
-                + " WHERE setup_time=?",
-                [fields[k] for k in cols] + [int(setup_time)]
+                + " WHERE setup_time=? AND symbol=?",
+                [fields[k] for k in cols] + [int(setup_time), self.symbol]
             )
             conn.commit()
 
@@ -706,8 +753,9 @@ class MexcFuturesLive:
         with self._conn() as conn:
             rows = conn.execute(
                 """SELECT * FROM mexc_live_trades
-                   WHERE status IN ('OPEN','OPENING','UNKNOWN','PROTECTING')
-                   ORDER BY created_at"""
+                   WHERE symbol=? AND status IN ('OPEN','OPENING','UNKNOWN','PROTECTING')
+                   ORDER BY created_at""",
+                (self.symbol,)
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -808,8 +856,8 @@ class MexcFuturesLive:
 
             with self._conn() as conn:
                 existing = conn.execute(
-                    "SELECT status FROM mexc_live_trades WHERE setup_time=?",
-                    (setup_time,)
+                    "SELECT status FROM mexc_live_trades WHERE setup_time=? AND symbol=?",
+                    (setup_time, self.symbol)
                 ).fetchone()
                 if existing:
                     self._log(
@@ -819,8 +867,9 @@ class MexcFuturesLive:
                     return False
                 busy = conn.execute(
                     """SELECT 1 FROM mexc_live_trades
-                       WHERE status IN ('OPEN','OPENING','UNKNOWN','PROTECTING')
-                       LIMIT 1"""
+                       WHERE symbol=? AND status IN ('OPEN','OPENING','UNKNOWN','PROTECTING')
+                       LIMIT 1""",
+                    (self.symbol,)
                 ).fetchone()
                 if busy:
                     self._log(
@@ -899,7 +948,7 @@ class MexcFuturesLive:
             # MEXC change_leverage is documented for a symbol/side before entry.
             self._set_leverage(position_type, sizing["leverage"])
 
-            external_oid = f"BTCM{setup_time}"
+            external_oid = f"BTCM{self.symbol.replace('_', '')}{setup_time}"
             created_at = int(time.time())
             with self._conn() as conn:
                 conn.execute(
@@ -1096,8 +1145,8 @@ class MexcFuturesLive:
             return False
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT * FROM mexc_live_trades WHERE setup_time=? AND status='OPEN'",
-                (int(setup_time),)
+                "SELECT * FROM mexc_live_trades WHERE setup_time=? AND symbol=? AND status='OPEN'",
+                (int(setup_time), self.symbol)
             ).fetchone()
         if not row:
             return False
@@ -1123,8 +1172,8 @@ class MexcFuturesLive:
             if not stop_id:
                 self.sync_positions()
                 with self._conn() as conn:
-                    latest = conn.execute("SELECT stop_order_id,current_sl FROM mexc_live_trades WHERE setup_time=?",
-                                          (int(setup_time),)).fetchone()
+                    latest = conn.execute("SELECT stop_order_id,current_sl FROM mexc_live_trades WHERE setup_time=? AND symbol=?",
+                                          (int(setup_time), self.symbol)).fetchone()
                 stop_id = latest["stop_order_id"] if latest else None
                 if not stop_id:
                     raise MexcLiveError("No active MEXC SL order to modify")
