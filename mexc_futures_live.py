@@ -22,7 +22,7 @@ SYMBOL = "BTC_USDT"
 SUPPORTED_SYMBOLS = frozenset({"BTC_USDT", "ETH_USDT"})
 ETH_MIN_STOP_DISTANCE_PCT = 0.005
 RISK_FRACTION = float(os.getenv("MEXC_RISK_FRACTION", "0.10"))
-MARGIN_USE_CAP = 0.20  # At most 20% of available Futures balance as initial margin.
+MARGIN_BUDGET_USDT = 2.0  # User-approved fixed maximum initial margin per position.
 MAX_LEVERAGE = 500
 SLIPPAGE_BUFFER_BPS = float(os.getenv("MEXC_SLIPPAGE_BUFFER_BPS", "5"))
 MAX_API_RESPONSE_BYTES = 1_048_576
@@ -178,7 +178,7 @@ def calculate_position_sizing(
     stop_gap = abs(entry_price - stop_price)
     stop_fraction = stop_gap / entry_price
     risk_budget = available_balance * risk_fraction
-    margin_budget = available_balance * margin_use_fraction
+    margin_budget = min(available_balance * margin_use_fraction, MARGIN_BUDGET_USDT)
     per_contract_risk = contract_size * stop_gap
     per_contract_notional = contract_size * entry_price
     if (
@@ -932,7 +932,7 @@ class MexcFuturesLive:
                 contract_max_vol=contract_max_vol,
                 taker_fee_rate=float(fees["realTakerFee"]),
                 slippage_buffer_bps=SLIPPAGE_BUFFER_BPS,
-                margin_use_fraction=MARGIN_USE_CAP,
+                margin_use_fraction=1.0,
                 risk_fraction=RISK_FRACTION,
                 min_leverage=int(fees.get("minLeverage", meta.get("minLeverage", 1)) or 1),
                 contract_max_leverage=int(meta.get("maxLeverage", 0) or 0),
