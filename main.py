@@ -1707,12 +1707,43 @@ def manage_open_positions(symbol, m1, m15, live_executor=None):
                     (symbol, int(trade["setup_time"]))
                 ).fetchone()
             if setup_row is None:
+                # An exchange-authoritative position may have no corresponding
+                # strategy/history row (for example after a lost local write).
+                # Create a dashboard projection from exchange facts; do not invent
+                # the original strategy SL or enable R/trailing without it.
                 live_executor._log(
                     "LIVE_MANAGEMENT_CONTEXT_MISSING",
                     symbol=symbol, setup_time=trade["setup_time"],
                     position_id=trade.get("position_id"),
+                    action="CREATE_EXCHANGE_PROJECTION",
                 )
-                continue
+                upsert_setup({
+                    "symbol": symbol,
+                    "signal_time": int(trade["setup_time"]),
+                    "direction": trade["direction"],
+                    "price": float(trade.get("entry_price") or trade.get("setup_price") or 0),
+                })
+                update_setup(
+                    int(trade["setup_time"]), symbol=symbol,
+                    status="OTWARTA",
+                    entry_time=trade.get("entry_time"),
+                    entry_price=trade.get("entry_price"),
+                    setup_sl=trade.get("initial_sl"),
+                    position_sl=trade.get("current_sl"),
+                    exit_time=None, exit_price=None, exit_reason=None,
+                    decision_reason=(
+                        "Pozycja wykryta na MEXC; brak danych strategii — "
+                        "automatyczny trailing zablokowany do odzyskania początkowego SL"
+                    ),
+                )
+                with db_conn() as conn:
+                    setup_row = conn.execute(
+                        "SELECT * FROM setups WHERE symbol=? AND setup_time=? LIMIT 1",
+                        (symbol, int(trade["setup_time"]))
+                    ).fetchone()
+                if setup_row is None:
+                    continue
+
             # Exchange execution ledger overrides stale website values, including
             # rows previously marked closed by the PAPER/history simulator.
             row = dict(setup_row)
@@ -1724,6 +1755,7 @@ def manage_open_positions(symbol, m1, m15, live_executor=None):
             row["position_min_r"] = trade.get("min_r", row["position_min_r"])
             row["trail_r"] = trade.get("trail_r", row["trail_r"])
             row["position_last_candle"] = trade.get("last_m1_candle")
+            row["_live_status"] = trade.get("status")
             # A local simulated exit is not an exchange fill. Re-open the website
             # projection while MEXC still reports this position as active.
             row["exit_time"] = None
@@ -1739,7 +1771,27 @@ def manage_open_positions(symbol, m1, m15, live_executor=None):
         entry = row["entry_price"]
         current_sl = row["position_sl"]
         original_sl = row["setup_sl"]
-        if entry is None or current_sl is None or original_sl is None:
+        if entry is None or current_sl is None:
+            continue
+        if live_executor is not None and (
+            row.get("_live_status") != "OPEN" or original_sl is None
+        ):
+            # Show the actual exchange position and its actual stop, but never
+            # calculate R or modify the stop while protection/context is uncertain.
+            update_setup(
+                row["setup_time"], symbol=symbol,
+                status="OTWARTA", entry_time=row.get("entry_time"),
+                entry_price=entry, position_sl=current_sl,
+                exit_time=None, exit_price=None, exit_reason=None,
+            )
+            live_executor._log(
+                "LIVE_TRAILING_HELD",
+                symbol=symbol, setup_time=row["setup_time"],
+                position_id="linked" if row.get("_live_status") else "unknown",
+                reason="EXCHANGE_PROTECTION_OR_INITIAL_SL_CONTEXT_NOT_CONFIRMED",
+            )
+            continue
+        if original_sl is None:
             continue
 
         max_r = row["position_max_r"] if row["position_max_r"] is not None else 0.0
