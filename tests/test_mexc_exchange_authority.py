@@ -111,6 +111,75 @@ class ExchangeAuthorityTests(unittest.TestCase):
             adapter._stop_reference_price = Mock(return_value=74400.0)
             self.assertEqual(adapter._validate_stop_side("SHORT", 74500.0), 74400.0)
 
+
+    def test_trailing_stop_update_uses_exchange_position_and_confirms_remote_price(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            self.insert_trade(adapter, status="OPEN")
+            setup_time = 1_794_239_100
+            with adapter._conn() as conn:
+                conn.execute(
+                    """UPDATE mexc_live_trades
+                       SET position_id=?, stop_order_id=?,
+                           initial_sl=?, current_sl=?
+                       WHERE setup_time=? AND symbol=?""",
+                    ("98765", "456", 75910.9, 75910.9, setup_time, "BTC_USDT"),
+                )
+                conn.commit()
+
+            adapter._contract = Mock(return_value={"priceUnit": 0.1, "priceScale": 1})
+            adapter._validate_stop_side = Mock(return_value=74400.0)
+            adapter._positions = Mock(return_value=[{
+                "symbol": "BTC_USDT", "positionId": 98765,
+                "positionType": 2, "state": 1, "holdVol": 10,
+            }])
+            adapter._stop_orders = Mock(return_value=[{
+                "id": 456, "orderId": 111, "positionId": 98765,
+                "state": 1, "stopLossPrice": 75910.9,
+            }])
+            adapter._request = Mock(return_value={"success": True})
+            adapter._confirm_stop_order = Mock(return_value={
+                "id": 456, "orderId": 111, "positionId": 98765,
+                "state": 1, "stopLossPrice": 75800.0,
+            })
+            adapter._log = Mock()
+
+            self.assertTrue(adapter.update_stop(setup_time, "SHORT", 75800.0))
+            adapter._request.assert_called_once_with(
+                "POST", "/api/v1/private/stoporder/change_price",
+                {"orderId": 111, "lossTrend": 1, "stopLossPrice": 75800.0},
+            )
+            trade = adapter.open_trades()[0]
+            self.assertEqual(trade["current_sl"], 75800.0)
+            self.assertEqual(trade["status"], "OPEN")
+
+    def test_trailing_stop_candidate_invalid_side_is_not_sent_to_exchange(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            self.insert_trade(adapter, status="OPEN")
+            setup_time = 1_794_239_100
+            with adapter._conn() as conn:
+                conn.execute(
+                    """UPDATE mexc_live_trades
+                       SET position_id=?, stop_order_id=?,
+                           initial_sl=?, current_sl=?
+                       WHERE setup_time=? AND symbol=?""",
+                    ("98765", "456", 75910.9, 75910.9, setup_time, "BTC_USDT"),
+                )
+                conn.commit()
+            adapter._contract = Mock(return_value={"priceUnit": 0.1, "priceScale": 1})
+            adapter._validate_stop_side = Mock(
+                side_effect=RuntimeError("SL_CANDIDATE_INVALID_SIDE")
+            )
+            adapter._request = Mock()
+            adapter._log = Mock()
+
+            with self.assertRaisesRegex(RuntimeError, "SL_CANDIDATE_INVALID_SIDE"):
+                adapter.update_stop(setup_time, "SHORT", 75800.0)
+            adapter._request.assert_not_called()
+            trade = adapter.open_trades()[0]
+            self.assertEqual(trade["current_sl"], 75910.9)
+
     def test_exchange_read_failure_returns_none_not_a_false_flat_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
