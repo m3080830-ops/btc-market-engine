@@ -756,7 +756,7 @@ class MexcFuturesLive:
         data = self._request("GET", "/api/v1/private/position/open_positions", {"symbol": self.symbol})
         return [
             p for p in self._rows(data)
-            if p.get("symbol") == self.symbol and int(p.get("state", 1)) == 1
+            if p.get("symbol") == self.symbol and int(p.get("state", 1)) in (1, 2)
             and float(p.get("holdVol", p.get("vol", 0)) or 0) > 0
         ]
 
