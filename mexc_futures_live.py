@@ -1074,12 +1074,81 @@ class MexcFuturesLive:
             return round(units * tick, int(meta.get("priceScale", 1) or 1))
         return float(price)
 
-    def sync_positions(self):
-        """Reconcile local execution records against MEXC's authoritative positions.
+    def _stop_reference_price(self, direction):
+        """Return the executable market edge that a protective stop must remain beyond."""
+        data = self._request("GET", "/api/v1/contract/ticker", {"symbol": self.symbol})
+        if isinstance(data, list):
+            data = next((row for row in data if row.get("symbol") == self.symbol), None)
+        if not isinstance(data, dict) or data.get("symbol") != self.symbol:
+            raise MexcLiveError("MEXC ticker unavailable for stop-side validation")
+        field = "bid1" if str(direction).upper() == "LONG" else "ask1"
+        try:
+            price = float(data[field])
+        except (KeyError, TypeError, ValueError):
+            raise MexcLiveError(f"MEXC ticker {field} unavailable for stop-side validation") from None
+        if not math.isfinite(price) or price <= 0:
+            raise MexcLiveError(f"MEXC ticker {field} invalid for stop-side validation")
+        return price
 
-        Returns the current exchange snapshot on success, including an empty list.
-        Returns None on API failure so callers never mistake an unavailable snapshot
-        for a flat account.
+    def _validate_stop_side(self, direction, stop_price):
+        """Reject a stop already through the live market; never move it to the wrong side."""
+        direction = str(direction).upper()
+        candidate = float(stop_price)
+        reference = self._stop_reference_price(direction)
+        invalid = (
+            candidate >= reference if direction == "LONG"
+            else candidate <= reference
+        )
+        if invalid:
+            raise MexcLiveError(
+                "SL_CANDIDATE_INVALID_SIDE "
+                f"symbol={self.symbol} direction={direction} "
+                f"candidate={candidate} market_reference={reference}; "
+                "existing exchange stop was left unchanged"
+            )
+        return reference
+
+    @staticmethod
+    def _active_stop_for_position(position_id, stops):
+        """Find an active MEXC stop-loss belonging to this exact position."""
+        for stop in stops:
+            if str(stop.get("positionId", stop.get("position_id", ""))) != str(position_id):
+                continue
+            try:
+                if int(stop.get("state", 0) or 0) != 1:
+                    continue
+                price = float(stop.get("stopLossPrice", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            stop_id = stop.get("id", stop.get("stopOrderId"))
+            if stop_id is not None and math.isfinite(price) and price > 0:
+                return stop
+        return None
+
+    def _confirm_stop_order(self, position_id, expected_price, *, meta=None, attempts=4):
+        """Return the MEXC stop row only after an active stop at the requested price is visible."""
+        meta = meta or self._contract()
+        tick = float(meta.get("priceUnit", 0) or 0)
+        tolerance = max(tick / 2.0, 1e-8)
+        for attempt in range(max(1, int(attempts))):
+            stop = self._active_stop_for_position(position_id, self._stop_orders())
+            if stop is not None:
+                try:
+                    remote_price = float(stop.get("stopLossPrice", 0) or 0)
+                except (TypeError, ValueError):
+                    remote_price = 0.0
+                if remote_price > 0 and abs(remote_price - float(expected_price)) <= tolerance:
+                    return stop
+            if attempt + 1 < attempts:
+                time.sleep(0.2)
+        return None
+
+    def sync_positions(self):
+        """Reconcile every LIVE ledger row to MEXC, which is the sole position authority.
+
+        Returns the successful exchange snapshot (including [] when flat), or None
+        when MEXC could not be queried. Unknown exchange positions are adopted into
+        a protective, non-trailing ledger state instead of being silently ignored.
         """
         if not self.enabled:
             return None
@@ -1087,9 +1156,9 @@ class MexcFuturesLive:
             positions = self._positions()
             live = self.open_trades()
             by_id = {
-                str(p.get("positionId")): p
-                for p in positions
-                if p.get("positionId") is not None
+                str(position.get("positionId")): position
+                for position in positions
+                if position.get("positionId") is not None
             }
             matched_ids = set()
 
@@ -1098,40 +1167,36 @@ class MexcFuturesLive:
                 stored_id = str(trade.get("position_id")) if trade.get("position_id") else None
                 position = by_id.get(stored_id) if stored_id else None
 
-                # A stored positionId can be absent or stale after an API timeout.
-                # Recover only when exactly one exchange position and exactly one
-                # local active trade exist for that direction; never guess across sides.
+                # There is only one engine position per symbol. When the exchange
+                # positionId was not persisted, recover only on an unambiguous side match.
                 if position is None:
-                    wanted = 1 if trade["direction"] == "LONG" else 2
+                    direction = str(trade.get("direction", "")).upper()
+                    wanted = 1 if direction == "LONG" else 2 if direction == "SHORT" else 0
                     side_trades = [
                         item for item in live
-                        if ("LONG" if str(item["direction"]).upper() == "LONG" else "SHORT")
-                        == ("LONG" if wanted == 1 else "SHORT")
+                        if str(item.get("direction", "")).upper() == direction
                     ]
                     candidates = [
-                        p for p in positions
-                        if str(p.get("positionId")) not in matched_ids
-                        and int(p.get("positionType", 0) or 0) == wanted
-                    ]
+                        item for item in positions
+                        if str(item.get("positionId")) not in matched_ids
+                        and int(item.get("positionType", 0) or 0) == wanted
+                    ] if wanted else []
                     if len(side_trades) == 1 and len(candidates) == 1:
                         position = candidates[0]
                         self._log(
                             "POSITION_LINK_RECOVERED",
-                            symbol=self.symbol,
-                            setup_time=setup_time,
+                            symbol=self.symbol, setup_time=setup_time,
                             old_position_id=stored_id or "missing",
                             position_id=position.get("positionId"),
                         )
 
                 if position is None:
-                    if trade["status"] == "OPEN":
-                        # A single empty API snapshot can be transient. Require three
-                        # consecutive successful position reads before declaring exit.
+                    if trade["status"] in ("OPEN", "PROTECTING"):
                         misses = int(trade.get("missing_position_checks", 0) or 0) + 1
                         if misses >= 3:
                             self._store(
                                 setup_time, status="CLOSED",
-                                missing_position_checks=misses, last_error=None
+                                missing_position_checks=misses, last_error=None,
                             )
                             self._log(
                                 "POSITION_CLOSED_ON_EXCHANGE",
@@ -1144,101 +1209,125 @@ class MexcFuturesLive:
 
                 position_id = str(position.get("positionId"))
                 matched_ids.add(position_id)
+                direction = str(trade.get("direction", "")).upper()
                 try:
                     actual_entry = float(
                         position.get("holdAvgPriceFullyScale")
                         or position.get("holdAvgPrice")
                         or position.get("openAvgPrice")
-                        or trade["entry_price"]
+                        or trade.get("entry_price")
                     )
-                except (TypeError, ValueError, KeyError):
-                    actual_entry = float(trade["entry_price"])
+                    if not math.isfinite(actual_entry) or actual_entry <= 0:
+                        raise ValueError("invalid exchange entry price")
+                except (TypeError, ValueError):
+                    self._store(
+                        setup_time, status="PROTECTING",
+                        position_id=position_id,
+                        last_error="MEXC position has no valid entry price",
+                    )
+                    self._log(
+                        "POSITION_DATA_INVALID", symbol=self.symbol,
+                        setup_time=setup_time, position_id=position_id,
+                        field="entry_price",
+                    )
+                    continue
 
                 raw_create_time = position.get("createTime")
                 try:
                     exchange_entry_time = int(raw_create_time)
                     if exchange_entry_time > 10_000_000_000:
                         exchange_entry_time //= 1000
+                    if exchange_entry_time <= 0:
+                        raise ValueError("invalid createTime")
                 except (TypeError, ValueError):
                     exchange_entry_time = int(
                         trade.get("entry_time") or trade.get("created_at") or time.time()
                     )
 
                 self._store(
-                    setup_time,
-                    status="PROTECTING",
-                    position_id=position_id,
-                    entry_price=actual_entry,
-                    entry_time=exchange_entry_time,
-                    missing_position_checks=0,
+                    setup_time, status="PROTECTING",
+                    position_id=position_id, entry_price=actual_entry,
+                    entry_time=exchange_entry_time, missing_position_checks=0,
                 )
 
-                # Read the exchange stop attached to this exact position. Its
-                # trigger price, not the website's position_sl, is authoritative.
-                stop_order_id = trade.get("stop_order_id")
-                existing_stop = None
+                # A stop-list API failure is not evidence that protection is absent.
                 try:
                     stops = self._stop_orders()
-                    for stop in stops:
-                        pid = stop.get("positionId", stop.get("position_id"))
-                        oid = stop.get("id", stop.get("stopOrderId", stop.get("orderId")))
-                        stop_price = stop.get("stopLossPrice", stop.get("triggerPrice"))
-                        if (
-                            str(pid) == position_id and oid is not None
-                            and int(stop.get("state", 1) or 1) == 1
-                            and stop_price not in (None, "", 0, "0")
-                        ):
-                            existing_stop = stop
-                            break
                 except Exception as exc:
-                    self._log(
-                        "STOP_ORDER_READ_FAILED",
-                        symbol=self.symbol, setup_time=setup_time,
-                        position_id=position_id,
-                        error=type(exc).__name__, detail=str(exc)[:140],
-                    )
-                    # A failed stop-list read is not evidence that no stop exists.
-                    # Never create a duplicate protective order on an API read error.
                     self._store(
                         setup_time, status="PROTECTING",
-                        last_error=f"Stop list read failed: {type(exc).__name__}: {str(exc)[:140]}"
-                    )
-                    continue
-
-                if existing_stop is not None:
-                    stop_order_id = str(
-                        existing_stop.get("id", existing_stop.get("stopOrderId", existing_stop.get("orderId")))
-                    )
-                    remote_sl = float(
-                        existing_stop.get("stopLossPrice", existing_stop.get("triggerPrice"))
-                    )
-                    self._store(
-                        setup_time, status="OPEN", position_id=position_id,
-                        stop_order_id=stop_order_id, entry_price=actual_entry,
-                        entry_time=exchange_entry_time, current_sl=remote_sl,
-                        last_error=None,
+                        last_error=f"Stop list read failed: {type(exc).__name__}: {str(exc)[:140]}",
                     )
                     self._log(
-                        "POSITION_RECONCILED",
-                        symbol=self.symbol, setup_time=setup_time,
-                        position_id=position_id, direction=trade["direction"],
-                        entry=actual_entry, exchange_sl=remote_sl,
-                        vol=position.get("holdVol"),
+                        "STOP_ORDER_READ_FAILED", symbol=self.symbol,
+                        setup_time=setup_time, position_id=position_id,
+                        error=type(exc).__name__, detail=str(exc)[:140],
                     )
                     continue
 
-                # No active exchange SL was found: restore protection before
-                # permitting trailing management or another entry.
+                existing_stop = self._active_stop_for_position(position_id, stops)
+                if existing_stop is not None:
+                    remote_sl = float(existing_stop["stopLossPrice"])
+                    stop_order_id = str(existing_stop["id"])
+                    if trade.get("initial_sl") is None:
+                        # The exchange stop is visible, but without the strategy's
+                        # original risk anchor we cannot calculate R or trail safely.
+                        self._store(
+                            setup_time, status="PROTECTING",
+                            position_id=position_id, stop_order_id=stop_order_id,
+                            entry_price=actual_entry, entry_time=exchange_entry_time,
+                            current_sl=remote_sl,
+                            last_error="Strategy initial SL context missing; trailing is disabled",
+                        )
+                        self._log(
+                            "POSITION_RECONCILED_CONTEXT_MISSING",
+                            symbol=self.symbol, setup_time=setup_time,
+                            position_id=position_id, direction=direction,
+                            entry=actual_entry, exchange_sl=remote_sl,
+                        )
+                    else:
+                        self._store(
+                            setup_time, status="OPEN", position_id=position_id,
+                            stop_order_id=stop_order_id, entry_price=actual_entry,
+                            entry_time=exchange_entry_time, current_sl=remote_sl,
+                            last_error=None,
+                        )
+                        self._log(
+                            "POSITION_RECONCILED", symbol=self.symbol,
+                            setup_time=setup_time, position_id=position_id,
+                            direction=direction, entry=actual_entry,
+                            exchange_sl=remote_sl, vol=position.get("holdVol"),
+                        )
+                    continue
+
+                # Never mark an unprotected position OPEN. Restore only from the
+                # strategy's persisted SL; never invent an R anchor from website data.
+                initial_sl = trade.get("initial_sl")
+                candidate_sl = trade.get("current_sl") or initial_sl
+                if initial_sl is None or candidate_sl is None:
+                    error = "No persisted strategy initial SL; automatic protection recovery blocked"
+                    self._store(
+                        setup_time, status="PROTECTING", position_id=position_id,
+                        entry_price=actual_entry, entry_time=exchange_entry_time,
+                        last_error=error,
+                    )
+                    self._log(
+                        "SL_PROTECTION_BLOCKED", symbol=self.symbol,
+                        setup_time=setup_time, position_id=position_id,
+                        reason="INITIAL_SL_CONTEXT_MISSING",
+                    )
+                    continue
+
                 try:
                     meta = self._contract()
-                    pos_type = int(position.get("positionType", 1 if trade["direction"] == "LONG" else 2))
-                    current_sl = float(trade["current_sl"])
+                    candidate_sl = self._format_price(candidate_sl, meta, direction)
+                    self._validate_stop_side(direction, candidate_sl)
                     data = self._request("POST", "/api/v1/private/stoporder/place", {
-                        "positionId": int(position["positionId"]),
-                        "vol": float(position.get("holdVol", trade["vol"])),
+                        "positionId": int(position_id),
+                        "vol": float(position.get("holdVol", trade.get("vol") or 0)),
                         "lossTrend": 1,
                         "profitTrend": 1,
-                        "stopLossPrice": self._format_price(current_sl, meta, trade["direction"]),
+                        "stopLossPrice": candidate_sl,
                         "takeProfitPrice": 0,
                         "priceProtect": 0,
                         "volType": 2,
@@ -1247,56 +1336,69 @@ class MexcFuturesLive:
                         "stopLossOrderPrice": 0,
                         "takeProfitOrderPrice": 0,
                     })
-                    oid = data.get("orderId", data.get("id")) if isinstance(data, dict) else data
-                    if oid is None:
-                        raise MexcLiveError("MEXC accepted stop request without stop order ID")
+                    request_id = (
+                        data.get("orderId", data.get("id"))
+                        if isinstance(data, dict) else data
+                    )
+                    if request_id is None:
+                        raise MexcLiveError("MEXC accepted stop request without a stop order ID")
+                    confirmed = self._confirm_stop_order(
+                        position_id, candidate_sl, meta=meta, attempts=5,
+                    )
+                    if confirmed is None:
+                        raise MexcLiveError(
+                            "MEXC did not expose an active stop for the position after placement"
+                        )
+                    confirmed_id = str(confirmed["id"])
+                    confirmed_sl = float(confirmed["stopLossPrice"])
                     self._store(
                         setup_time, status="OPEN", position_id=position_id,
-                        stop_order_id=str(oid), entry_price=actual_entry,
-                        entry_time=exchange_entry_time, last_error=None,
+                        stop_order_id=confirmed_id, entry_price=actual_entry,
+                        entry_time=exchange_entry_time, current_sl=confirmed_sl,
+                        last_error=None,
                     )
                     self._log(
-                        "INITIAL_SL_CONFIRMED",
-                        symbol=self.symbol, setup_time=setup_time,
-                        position_id=position_id, sl=current_sl,
+                        "INITIAL_SL_CONFIRMED", symbol=self.symbol,
+                        setup_time=setup_time, position_id=position_id,
+                        stop_order_id=confirmed_id, sl=confirmed_sl,
                     )
                 except Exception as exc:
                     self._store(
                         setup_time, status="PROTECTING",
-                        last_error=f"SL protection: {type(exc).__name__}: {str(exc)[:180]}"
+                        last_error=f"SL protection: {type(exc).__name__}: {str(exc)[:180]}",
                     )
                     self._log(
                         "SL_PROTECTION_RETRY", symbol=self.symbol,
                         setup_time=setup_time, position_id=position_id,
-                        error=type(exc).__name__, detail=str(exc)[:180]
+                        error=type(exc).__name__, detail=str(exc)[:180],
                     )
 
+            # Recover records whose old local status was CLOSED/REJECTED. If there
+            # is no unique historical attempt, create an exchange-only protective
+            # record. This mirrors the MEXC position but deliberately has no
+            # initial_sl, so it cannot be trailed using a fabricated risk value.
             for position in positions:
                 position_id = str(position.get("positionId"))
-                if position_id in matched_ids:
+                if position_id in matched_ids or not position_id:
                     continue
-                # Recover a previously CLOSED/REJECTED local ledger row only when
-                # exchange direction and open timestamp identify exactly one
-                # historical attempt. This repairs stale local state without
-                # adopting a manually opened or unrelated exchange position.
                 try:
                     position_type = int(position.get("positionType", 0) or 0)
                     direction = "LONG" if position_type == 1 else "SHORT" if position_type == 2 else None
-                    exchange_ms = int(position.get("createTime", 0) or 0)
-                    exchange_seconds = exchange_ms // 1000 if exchange_ms > 10_000_000_000 else exchange_ms
+                    raw_time = int(position.get("createTime", 0) or 0)
+                    exchange_seconds = raw_time // 1000 if raw_time > 10_000_000_000 else raw_time
                     actual_entry = float(
                         position.get("holdAvgPriceFullyScale")
                         or position.get("holdAvgPrice")
                         or position.get("openAvgPrice")
                     )
+                    volume = float(position.get("holdVol", 0) or 0)
                 except (TypeError, ValueError):
-                    direction = None
-                    exchange_seconds = 0
-                    actual_entry = 0.0
-                candidates = []
+                    direction, exchange_seconds, actual_entry, volume = None, 0, 0.0, 0.0
+
+                historical = []
                 if direction and exchange_seconds > 0:
                     with self._conn() as conn:
-                        candidates = conn.execute(
+                        historical = conn.execute(
                             """SELECT * FROM mexc_live_trades
                                WHERE symbol=? AND direction=?
                                AND status IN ('CLOSED','REJECTED')
@@ -1304,9 +1406,10 @@ class MexcFuturesLive:
                                ORDER BY ABS(created_at-?) LIMIT 2""",
                             (self.symbol, direction, exchange_seconds, exchange_seconds),
                         ).fetchall()
-                if len(candidates) == 1:
-                    candidate = dict(candidates[0])
-                    setup_time = int(candidate["setup_time"])
+
+                if len(historical) == 1:
+                    recovered = dict(historical[0])
+                    setup_time = int(recovered["setup_time"])
                     self._store(
                         setup_time, status="PROTECTING",
                         position_id=position_id, entry_price=actual_entry,
@@ -1315,33 +1418,84 @@ class MexcFuturesLive:
                     )
                     matched_ids.add(position_id)
                     self._log(
-                        "POSITION_LINK_RECOVERED",
-                        symbol=self.symbol, setup_time=setup_time,
-                        position_id=position_id, direction=direction,
-                        entry=actual_entry, prior_status=candidate["status"],
+                        "POSITION_LINK_RECOVERED", symbol=self.symbol,
+                        setup_time=setup_time, position_id=position_id,
+                        direction=direction, entry=actual_entry,
+                        prior_status=recovered["status"],
                     )
-                else:
+                    continue
+
+                remote_stop = None
+                stop_read_error = None
+                try:
+                    remote_stop = self._active_stop_for_position(
+                        position_id, self._stop_orders()
+                    )
+                except Exception as exc:
+                    stop_read_error = f"{type(exc).__name__}: {str(exc)[:140]}"
+                if not direction or actual_entry <= 0 or exchange_seconds <= 0:
                     self._log(
-                        "POSITION_UNLINKED",
-                        symbol=self.symbol, position_id=position_id,
-                        direction=direction or "unknown",
-                        entry=position.get("holdAvgPrice"),
-                        vol=position.get("holdVol"),
-                        reason="no_unique_exchange_time_and_direction_match_in_live_ledger",
+                        "POSITION_UNLINKED", symbol=self.symbol,
+                        position_id=position_id, reason="INVALID_EXCHANGE_POSITION_DATA",
                     )
+                    continue
+
+                # Setup timestamp is only a local projection key here; it is not
+                # used as a strategy signal or as an R calculation anchor.
+                setup_time = exchange_seconds
+                with self._conn() as conn:
+                    while conn.execute(
+                        "SELECT 1 FROM mexc_live_trades WHERE setup_time=? AND symbol=?",
+                        (setup_time, self.symbol),
+                    ).fetchone():
+                        setup_time += 1
+                    remote_sl = (
+                        float(remote_stop.get("stopLossPrice"))
+                        if remote_stop is not None else None
+                    )
+                    stop_order_id = (
+                        str(remote_stop.get("id")) if remote_stop is not None else None
+                    )
+                    conn.execute(
+                        """INSERT INTO mexc_live_trades
+                           (setup_time,symbol,direction,status,external_oid,position_id,
+                            stop_order_id,vol,entry_price,entry_time,current_sl,
+                            max_r,min_r,created_at,updated_at,last_error)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            setup_time, self.symbol, direction, "PROTECTING",
+                            f"EXCHANGE-{self.symbol.replace('_', '')}-{position_id}",
+                            position_id, stop_order_id, volume, actual_entry,
+                            exchange_seconds, remote_sl, 0.0, 0.0,
+                            exchange_seconds, int(time.time()),
+                            (
+                                "Strategy initial SL context missing; trailing disabled"
+                                if not stop_read_error else
+                                f"Stop list read failed: {stop_read_error}"
+                            ),
+                        ),
+                    )
+                    conn.commit()
+                matched_ids.add(position_id)
+                self._log(
+                    "POSITION_ADOPTED_CONTEXT_MISSING", symbol=self.symbol,
+                    setup_time=setup_time, position_id=position_id,
+                    direction=direction, entry=actual_entry, exchange_sl=remote_sl,
+                    stop_order_id=stop_order_id,
+                    trailing_enabled=False,
+                )
 
             self._log(
-                "POSITION_SYNC_OK",
-                symbol=self.symbol,
+                "POSITION_SYNC_OK", symbol=self.symbol,
                 exchange_positions=len(positions),
                 linked_positions=len(matched_ids),
-                active_ledger_trades=len(live),
+                active_ledger_trades=len(self.open_trades()),
             )
             return positions
         except Exception as exc:
             self._log(
                 "POSITION_SYNC_ERROR", symbol=self.symbol,
-                error=type(exc).__name__, detail=str(exc)[:180]
+                error=type(exc).__name__, detail=str(exc)[:180],
             )
             return None
 
