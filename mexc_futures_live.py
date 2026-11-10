@@ -1177,10 +1177,8 @@ class MexcFuturesLive:
                 # trigger price, not the website's position_sl, is authoritative.
                 stop_order_id = trade.get("stop_order_id")
                 existing_stop = None
-                stop_list_read_ok = False
                 try:
                     stops = self._stop_orders()
-                    stop_list_read_ok = True
                     for stop in stops:
                         pid = stop.get("positionId", stop.get("position_id"))
                         oid = stop.get("id", stop.get("stopOrderId", stop.get("orderId")))
@@ -1275,14 +1273,61 @@ class MexcFuturesLive:
 
             for position in positions:
                 position_id = str(position.get("positionId"))
-                if position_id not in matched_ids:
+                if position_id in matched_ids:
+                    continue
+                # Recover a previously CLOSED/REJECTED local ledger row only when
+                # exchange direction and open timestamp identify exactly one
+                # historical attempt. This repairs stale local state without
+                # adopting a manually opened or unrelated exchange position.
+                try:
+                    position_type = int(position.get("positionType", 0) or 0)
+                    direction = "LONG" if position_type == 1 else "SHORT" if position_type == 2 else None
+                    exchange_ms = int(position.get("createTime", 0) or 0)
+                    exchange_seconds = exchange_ms // 1000 if exchange_ms > 10_000_000_000 else exchange_ms
+                    actual_entry = float(
+                        position.get("holdAvgPriceFullyScale")
+                        or position.get("holdAvgPrice")
+                        or position.get("openAvgPrice")
+                    )
+                except (TypeError, ValueError):
+                    direction = None
+                    exchange_seconds = 0
+                    actual_entry = 0.0
+                candidates = []
+                if direction and exchange_seconds > 0:
+                    with self._conn() as conn:
+                        candidates = conn.execute(
+                            """SELECT * FROM mexc_live_trades
+                               WHERE symbol=? AND direction=?
+                               AND status IN ('CLOSED','REJECTED')
+                               AND ABS(created_at-?) <= 900
+                               ORDER BY ABS(created_at-?) LIMIT 2""",
+                            (self.symbol, direction, exchange_seconds, exchange_seconds),
+                        ).fetchall()
+                if len(candidates) == 1:
+                    candidate = dict(candidates[0])
+                    setup_time = int(candidate["setup_time"])
+                    self._store(
+                        setup_time, status="PROTECTING",
+                        position_id=position_id, entry_price=actual_entry,
+                        entry_time=exchange_seconds, missing_position_checks=0,
+                        last_error=None,
+                    )
+                    matched_ids.add(position_id)
+                    self._log(
+                        "POSITION_LINK_RECOVERED",
+                        symbol=self.symbol, setup_time=setup_time,
+                        position_id=position_id, direction=direction,
+                        entry=actual_entry, prior_status=candidate["status"],
+                    )
+                else:
                     self._log(
                         "POSITION_UNLINKED",
                         symbol=self.symbol, position_id=position_id,
-                        direction=("LONG" if int(position.get("positionType", 0) or 0) == 1 else "SHORT"),
+                        direction=direction or "unknown",
                         entry=position.get("holdAvgPrice"),
                         vol=position.get("holdVol"),
-                        reason="exchange_position_has_no_unambiguous_live_ledger_record",
+                        reason="no_unique_exchange_time_and_direction_match_in_live_ledger",
                     )
 
             self._log(
