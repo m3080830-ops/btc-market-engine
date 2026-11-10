@@ -1166,6 +1166,16 @@ class MexcFuturesLive:
                 setup_time = int(trade["setup_time"])
                 stored_id = str(trade.get("position_id")) if trade.get("position_id") else None
                 position = by_id.get(stored_id) if stored_id else None
+                expected_side = 1 if trade.get("direction") == "LONG" else 2
+                if position is not None and int(position.get("positionType", 0) or 0) != expected_side:
+                    self._log(
+                        "POSITION_LINK_SIDE_MISMATCH",
+                        symbol=self.symbol, setup_time=setup_time,
+                        position_id=stored_id,
+                        ledger_direction=trade.get("direction"),
+                        exchange_position_type=position.get("positionType"),
+                    )
+                    position = None
 
                 # There is only one engine position per symbol. When the exchange
                 # positionId was not persisted, recover only on an unambiguous side match.
@@ -1191,7 +1201,10 @@ class MexcFuturesLive:
                         )
 
                 if position is None:
-                    if trade["status"] in ("OPEN", "PROTECTING"):
+                    # OPENING/UNKNOWN may be an accepted order with an ambiguous
+                    # response. Do not allow a new entry until MEXC is flat across
+                    # several successful reads. Never blindly resubmit the order.
+                    if trade["status"] in ("OPEN", "PROTECTING", "OPENING", "UNKNOWN"):
                         misses = int(trade.get("missing_position_checks", 0) or 0) + 1
                         if misses >= 3:
                             self._store(
