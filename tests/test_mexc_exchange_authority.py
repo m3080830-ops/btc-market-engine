@@ -180,6 +180,68 @@ class ExchangeAuthorityTests(unittest.TestCase):
             trade = adapter.open_trades()[0]
             self.assertEqual(trade["current_sl"], 75910.9)
 
+    def test_new_opening_trade_links_to_exchange_position_and_confirms_existing_sl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            exchange_time = 1_794_240_000
+            self.insert_trade(adapter, status="OPENING", created_at=exchange_time)
+            position = {
+                "symbol": "BTC_USDT", "positionId": 98767,
+                "positionType": 2, "state": 1, "holdVol": 10,
+                "holdAvgPrice": 74464.3, "holdAvgPriceFullyScale": "74464.3",
+                "createTime": exchange_time * 1000,
+            }
+            adapter._positions = Mock(return_value=[position])
+            adapter._stop_orders = Mock(return_value=[{
+                "id": 458, "positionId": 98767, "state": 1,
+                "stopLossPrice": 75910.9,
+            }])
+            adapter._log = Mock()
+
+            self.assertEqual(adapter.sync_positions(), [position])
+            trade = adapter.open_trades()[0]
+            self.assertEqual(trade["status"], "OPEN")
+            self.assertEqual(trade["position_id"], "98767")
+            self.assertEqual(trade["entry_price"], 74464.3)
+            self.assertEqual(trade["current_sl"], 75910.9)
+            self.assertTrue(any(
+                call.args[0] == "POSITION_RECONCILED"
+                for call in adapter._log.call_args_list
+            ))
+
+    def test_missing_exchange_sl_is_placed_and_confirmed_before_open_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            exchange_time = 1_794_240_000
+            self.insert_trade(adapter, status="OPENING", created_at=exchange_time)
+            position = {
+                "symbol": "BTC_USDT", "positionId": 98768,
+                "positionType": 2, "state": 1, "holdVol": 10,
+                "holdAvgPrice": 74464.3, "holdAvgPriceFullyScale": "74464.3",
+                "createTime": exchange_time * 1000,
+            }
+            adapter._positions = Mock(return_value=[position])
+            adapter._stop_orders = Mock(return_value=[])
+            adapter._contract = Mock(return_value={"priceUnit": 0.1, "priceScale": 1})
+            adapter._validate_stop_side = Mock(return_value=74400.0)
+            adapter._request = Mock(return_value={"orderId": 459})
+            adapter._confirm_stop_order = Mock(return_value={
+                "id": 459, "positionId": 98768, "state": 1,
+                "stopLossPrice": 75910.9,
+            })
+            adapter._log = Mock()
+
+            self.assertEqual(adapter.sync_positions(), [position])
+            trade = adapter.open_trades()[0]
+            self.assertEqual(trade["status"], "OPEN")
+            self.assertEqual(trade["position_id"], "98768")
+            self.assertEqual(trade["current_sl"], 75910.9)
+            adapter._request.assert_called_once()
+            adapter._confirm_stop_order.assert_called_once_with(
+                "98768", 75910.9,
+                meta={"priceUnit": 0.1, "priceScale": 1}, attempts=5,
+            )
+
     def test_exchange_read_failure_returns_none_not_a_false_flat_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
