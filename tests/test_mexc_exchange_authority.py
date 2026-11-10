@@ -1,0 +1,104 @@
+import os
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+from mexc_futures_live import MexcFuturesLive
+
+
+class ExchangeAuthorityTests(unittest.TestCase):
+    def make_adapter(self, db_path):
+        env = {
+            "MEXC_LIVE_TRADING_ENABLED": "true",
+            "MEXC_ACCESS_KEY": "test-access",
+            "MEXC_SECRET_KEY": "test-secret",
+        }
+        with patch.dict(os.environ, env):
+            return MexcFuturesLive(db_path, symbol="BTC_USDT")
+
+    def insert_trade(self, adapter, *, status="CLOSED", created_at=1_794_240_000):
+        with adapter._conn() as conn:
+            conn.execute(
+                """INSERT INTO mexc_live_trades
+                   (setup_time,symbol,direction,status,external_oid,vol,
+                    contract_size,entry_price,entry_time,initial_sl,current_sl,
+                    risk_usdt,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (1_794_239_100, "BTC_USDT", "SHORT", status,
+                 "BTCMTEST", 10, 0.0001, 74464.3, created_at,
+                 75910.9, 75910.9, 1.0, created_at, created_at),
+            )
+            conn.commit()
+
+    def test_exchange_position_recovers_uniquely_matched_closed_ledger_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            exchange_time = 1_794_240_000
+            self.insert_trade(adapter, status="CLOSED", created_at=exchange_time)
+            position = {
+                "symbol": "BTC_USDT", "positionId": 98765,
+                "positionType": 2, "state": 1, "holdVol": 10,
+                "holdAvgPrice": 74464.3, "holdAvgPriceFullyScale": "74464.3",
+                "createTime": exchange_time * 1000,
+            }
+            adapter._positions = Mock(return_value=[position])
+            adapter._stop_orders = Mock(return_value=[{
+                "id": 456, "positionId": 98765, "state": 1,
+                "stopLossPrice": 75910.9,
+            }])
+            adapter._log = Mock()
+
+            first = adapter.sync_positions()
+            self.assertEqual(first, [position])
+            recovered = adapter.open_trades()
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(recovered[0]["status"], "PROTECTING")
+            self.assertEqual(recovered[0]["position_id"], "98765")
+
+            second = adapter.sync_positions()
+            self.assertEqual(second, [position])
+            reconciled = adapter.open_trades()
+            self.assertEqual(reconciled[0]["status"], "OPEN")
+            self.assertEqual(reconciled[0]["current_sl"], 75910.9)
+            self.assertEqual(reconciled[0]["entry_price"], 74464.3)
+            self.assertEqual(reconciled[0]["entry_time"], exchange_time)
+            self.assertTrue(any(
+                call.args[0] == "POSITION_RECONCILED"
+                for call in adapter._log.call_args_list
+            ))
+
+    def test_exchange_read_failure_returns_none_not_a_false_flat_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            adapter._positions = Mock(side_effect=RuntimeError("MEXC unavailable"))
+            adapter._log = Mock()
+            self.assertIsNone(adapter.sync_positions())
+            self.assertTrue(any(
+                call.args[0] == "POSITION_SYNC_ERROR"
+                for call in adapter._log.call_args_list
+            ))
+
+    def test_stop_list_read_failure_never_places_a_duplicate_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            self.insert_trade(adapter, status="OPEN")
+            position = {
+                "symbol": "BTC_USDT", "positionId": 98765,
+                "positionType": 2, "state": 1, "holdVol": 10,
+                "holdAvgPrice": 74464.3, "createTime": 1_794_240_000_000,
+            }
+            adapter._positions = Mock(return_value=[position])
+            adapter._stop_orders = Mock(side_effect=RuntimeError("stop list unavailable"))
+            adapter._request = Mock()
+            adapter._log = Mock()
+
+            result = adapter.sync_positions()
+            self.assertEqual(result, [position])
+            adapter._request.assert_not_called()
+            trade = adapter.open_trades()[0]
+            self.assertEqual(trade["status"], "PROTECTING")
+            self.assertIn("Stop list read failed", trade["last_error"])
+
+
+if __name__ == "__main__":
+    unittest.main()
