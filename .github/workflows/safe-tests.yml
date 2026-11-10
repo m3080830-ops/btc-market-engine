@@ -1,3 +1,4 @@
+# CI retrigger for the exchange-sync and protective-stop repair.
 name: Safe code checks
 
 on:
