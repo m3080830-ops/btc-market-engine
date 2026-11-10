@@ -1500,50 +1500,64 @@ class MexcFuturesLive:
             return None
 
     def update_stop(self, setup_time, direction, new_sl):
-        """Apply the engine's already-calculated tighter SL to MEXC Futures."""
+        """Apply a tighter strategy SL only after validating and confirming it on MEXC."""
         if not self.enabled:
             return False
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT * FROM mexc_live_trades WHERE setup_time=? AND symbol=? AND status='OPEN'",
-                (int(setup_time), self.symbol)
+                """SELECT * FROM mexc_live_trades
+                   WHERE setup_time=? AND symbol=? AND status='OPEN'""",
+                (int(setup_time), self.symbol),
             ).fetchone()
         if not row:
             return False
+
+        direction = str(direction).upper()
+        if direction not in ("LONG", "SHORT"):
+            raise MexcLiveError("Unsupported direction for stop update")
         current_sl = float(row["current_sl"])
         candidate = float(new_sl)
+        if not math.isfinite(candidate) or candidate <= 0:
+            raise MexcLiveError("Invalid candidate stop price")
         if direction == "LONG" and candidate <= current_sl:
             return False
         if direction == "SHORT" and candidate >= current_sl:
             return False
+
         try:
             meta = self._contract()
             candidate = self._format_price(candidate, meta, direction)
-            # Never send an SL past the current market where it may instantly
-            # close a position due to rounding.
+            self._validate_stop_side(direction, candidate)
+
+            position_id = str(row["position_id"] or "")
+            if not position_id:
+                raise MexcLiveError("Missing MEXC positionId; stop update blocked")
+
+            # Confirm the position still exists on MEXC before touching its stop.
             positions = self._positions()
-            position = next((p for p in positions if str(p.get("positionId")) == str(row["position_id"])), None)
+            position = next(
+                (p for p in positions if str(p.get("positionId")) == position_id),
+                None,
+            )
             if position is None:
-                self._store(setup_time, status="CLOSED")
+                self._log(
+                    "SL_UPDATE_BLOCKED", setup_time=int(setup_time),
+                    position_id=position_id, reason="POSITION_NOT_FOUND_ON_EXCHANGE",
+                )
                 return False
-            # A trailing stop may legitimately cross the entry price after profit.
-            # The initial entry order ID is the MEXC order TP/SL modification key.
-            stop_id = row["stop_order_id"]
-            if not stop_id:
-                self.sync_positions()
-                with self._conn() as conn:
-                    latest = conn.execute("SELECT stop_order_id,current_sl FROM mexc_live_trades WHERE setup_time=? AND symbol=?",
-                                          (int(setup_time), self.symbol)).fetchone()
-                stop_id = latest["stop_order_id"] if latest else None
-                if not stop_id:
-                    raise MexcLiveError("No active MEXC SL order to modify")
-            # MEXC distinguishes TP/SL attached to an order from position-based
-            # trigger orders. Select the documented endpoint from the live order.
-            stop = next((x for x in self._stop_orders()
-                         if str(x.get("id", x.get("stopOrderId"))) == str(stop_id)
-                         and int(x.get("state", 1) or 1) == 1), None)
+
+            # Resolve the active stop from MEXC on every update. Never trust a
+            # stale locally cached stop order ID.
+            stops = self._stop_orders()
+            stop = self._active_stop_for_position(position_id, stops)
             if stop is None:
-                raise MexcLiveError("Active MEXC stop order not found during modification")
+                self._store(
+                    setup_time, status="PROTECTING",
+                    last_error="No active MEXC stop found; update blocked pending protection recovery",
+                )
+                raise MexcLiveError("No active MEXC SL order to modify")
+
+            stop_id = str(stop["id"])
             parent_order_id = int(stop.get("orderId", 0) or 0)
             if parent_order_id > 0:
                 self._request("POST", "/api/v1/private/stoporder/change_price", {
@@ -1556,36 +1570,36 @@ class MexcFuturesLive:
                     "stopPlanOrderId": int(stop_id),
                     "stopLossPrice": candidate,
                 })
-            # Read the stop list back; do not mark the local SL updated until MEXC confirms it.
-            confirmed = False
-            for _ in range(3):
-                for current_stop in self._stop_orders():
-                    current_id = current_stop.get("id", current_stop.get("stopOrderId"))
-                    if str(current_id) != str(stop_id) or int(current_stop.get("state", 1) or 1) != 1:
-                        continue
-                    remote_price = current_stop.get("stopLossPrice", current_stop.get("triggerPrice"))
-                    try:
-                        if remote_price not in (None, "", 0, "0") and abs(float(remote_price) - candidate) <= max(float(meta.get("priceUnit", 0) or 0) / 2, 1e-8):
-                            confirmed = True
-                            break
-                    except (TypeError, ValueError):
-                        pass
-                if confirmed:
-                    break
-                time.sleep(0.2)
-            if not confirmed:
-                raise MexcLiveError("MEXC did not confirm the updated stop-loss price")
-            self._store(setup_time, current_sl=candidate, last_error=None)
-            self._log("SL_UPDATED", setup_time=int(setup_time), sl=candidate)
+
+            # Verify the same position has an active stop at the requested price.
+            confirmed = self._confirm_stop_order(
+                position_id, candidate, meta=meta, attempts=5,
+            )
+            if confirmed is None:
+                raise MexcLiveError(
+                    "MEXC did not confirm the updated SL; local SL remains unchanged"
+                )
+            confirmed_id = str(confirmed["id"])
+            confirmed_price = float(confirmed["stopLossPrice"])
+            self._store(
+                setup_time, status="OPEN", stop_order_id=confirmed_id,
+                current_sl=confirmed_price, last_error=None,
+            )
+            self._log(
+                "SL_UPDATED", setup_time=int(setup_time),
+                position_id=position_id, stop_order_id=confirmed_id,
+                sl=confirmed_price,
+            )
             return True
         except Exception as exc:
             self._store(
                 setup_time,
-                last_error=f"SL update: {type(exc).__name__}: {str(exc)[:180]}"
+                last_error=f"SL update: {type(exc).__name__}: {str(exc)[:180]}",
             )
             self._log(
                 "SL_UPDATE_FAILED", setup_time=int(setup_time),
-                error=type(exc).__name__, detail=str(exc)[:180]
+                position_id=row["position_id"] or "unknown",
+                error=type(exc).__name__, detail=str(exc)[:180],
             )
             raise
 
