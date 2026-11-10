@@ -67,6 +67,50 @@ class ExchangeAuthorityTests(unittest.TestCase):
                 for call in adapter._log.call_args_list
             ))
 
+
+    def test_exchange_only_position_is_adopted_without_fabricating_initial_sl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            position = {
+                "symbol": "BTC_USDT", "positionId": 98766,
+                "positionType": 2, "state": 1, "holdVol": 4,
+                "holdAvgPrice": 74500.0, "holdAvgPriceFullyScale": "74500.0",
+                "createTime": 1_794_240_000_000,
+            }
+            adapter._positions = Mock(return_value=[position])
+            adapter._stop_orders = Mock(return_value=[{
+                "id": 457, "positionId": 98766, "state": 1,
+                "stopLossPrice": 76000.0,
+            }])
+            adapter._log = Mock()
+
+            self.assertEqual(adapter.sync_positions(), [position])
+            adopted = adapter.open_trades()
+            self.assertEqual(len(adopted), 1)
+            self.assertEqual(adopted[0]["status"], "PROTECTING")
+            self.assertEqual(adopted[0]["position_id"], "98766")
+            self.assertEqual(adopted[0]["entry_price"], 74500.0)
+            self.assertEqual(adopted[0]["current_sl"], 76000.0)
+            self.assertIsNone(adopted[0]["initial_sl"])
+            self.assertTrue(any(
+                call.args[0] == "POSITION_ADOPTED_CONTEXT_MISSING"
+                for call in adapter._log.call_args_list
+            ))
+
+    def test_stop_side_validation_rejects_candidate_past_market(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            adapter._stop_reference_price = Mock(return_value=74400.0)
+            with self.assertRaisesRegex(Exception, "SL_CANDIDATE_INVALID_SIDE"):
+                adapter._validate_stop_side("SHORT", 74399.0)
+            adapter._stop_reference_price.assert_called_once_with("SHORT")
+
+    def test_stop_side_validation_accepts_candidate_on_safe_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            adapter._stop_reference_price = Mock(return_value=74400.0)
+            self.assertEqual(adapter._validate_stop_side("SHORT", 74500.0), 74400.0)
+
     def test_exchange_read_failure_returns_none_not_a_false_flat_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
