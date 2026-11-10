@@ -1177,8 +1177,10 @@ class MexcFuturesLive:
                 # trigger price, not the website's position_sl, is authoritative.
                 stop_order_id = trade.get("stop_order_id")
                 existing_stop = None
+                stop_list_read_ok = False
                 try:
                     stops = self._stop_orders()
+                    stop_list_read_ok = True
                     for stop in stops:
                         pid = stop.get("positionId", stop.get("position_id"))
                         oid = stop.get("id", stop.get("stopOrderId", stop.get("orderId")))
@@ -1197,6 +1199,13 @@ class MexcFuturesLive:
                         position_id=position_id,
                         error=type(exc).__name__, detail=str(exc)[:140],
                     )
+                    # A failed stop-list read is not evidence that no stop exists.
+                    # Never create a duplicate protective order on an API read error.
+                    self._store(
+                        setup_time, status="PROTECTING",
+                        last_error=f"Stop list read failed: {type(exc).__name__}: {str(exc)[:140]}"
+                    )
+                    continue
 
                 if existing_stop is not None:
                     stop_order_id = str(
