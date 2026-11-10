@@ -1683,14 +1683,53 @@ def rebuild_history():
 # LIVE POSITION MANAGEMENT
 # ============================================================
 
-def manage_open_positions(symbol, m1, m15):
-    with db_conn() as c:
-        open_rows = c.execute(
-            """SELECT * FROM setups
-               WHERE symbol=? AND entry_time IS NOT NULL AND exit_time IS NULL
-               ORDER BY entry_time""",
-            (symbol,)
-        ).fetchall()
+def manage_open_positions(symbol, m1, m15, live_executor=None):
+    """Manage PAPER rows locally; in LIVE mode MEXC positions are authoritative."""
+    if live_executor is None:
+        with db_conn() as conn:
+            open_rows = conn.execute(
+                """SELECT * FROM setups
+                   WHERE symbol=? AND entry_time IS NOT NULL AND exit_time IS NULL
+                   ORDER BY entry_time""",
+                (symbol,)
+            ).fetchall()
+    else:
+        exchange_positions = live_executor.sync_positions()
+        # None means the exchange snapshot failed. Never manage, close, or open
+        # from stale local state when MEXC could not be queried.
+        if exchange_positions is None:
+            return
+        open_rows = []
+        for trade in live_executor.open_trades():
+            with db_conn() as conn:
+                setup_row = conn.execute(
+                    "SELECT * FROM setups WHERE symbol=? AND setup_time=? LIMIT 1",
+                    (symbol, int(trade["setup_time"]))
+                ).fetchone()
+            if setup_row is None:
+                live_executor._log(
+                    "LIVE_MANAGEMENT_CONTEXT_MISSING",
+                    symbol=symbol, setup_time=trade["setup_time"],
+                    position_id=trade.get("position_id"),
+                )
+                continue
+            # Exchange execution ledger overrides stale website values, including
+            # rows previously marked closed by the PAPER/history simulator.
+            row = dict(setup_row)
+            row["entry_price"] = trade.get("entry_price") or row["entry_price"]
+            row["entry_time"] = trade.get("entry_time") or row["entry_time"]
+            row["setup_sl"] = trade.get("initial_sl") or row["setup_sl"]
+            row["position_sl"] = trade.get("current_sl") or row["position_sl"]
+            row["position_max_r"] = trade.get("max_r", row["position_max_r"])
+            row["position_min_r"] = trade.get("min_r", row["position_min_r"])
+            row["trail_r"] = trade.get("trail_r", row["trail_r"])
+            row["position_last_candle"] = trade.get("last_m1_candle")
+            # A local simulated exit is not an exchange fill. Re-open the website
+            # projection while MEXC still reports this position as active.
+            row["exit_time"] = None
+            row["exit_price"] = None
+            row["exit_reason"] = None
+            open_rows.append(row)
 
     closed_m1 = closed(m1)
     swings_low, swings_high = confirmed_m1_swings(m1)
@@ -1711,6 +1750,8 @@ def manage_open_positions(symbol, m1, m15):
         reason = None
         last_candle = row["position_last_candle"]
         processed_candle = last_candle
+        stop_changed = False
+        stop_change_time = None
 
         for candle in closed_m1:
             candle_time = candle["time"]
@@ -1725,26 +1766,32 @@ def manage_open_positions(symbol, m1, m15):
             min_r = min(min_r, lo_r, hi_r)
             processed_candle = candle_time
 
-            # Evaluate the previously active stop before changing it.
-            if direction == "LONG" and candle["low"] <= current_sl:
-                exit_time, exit_price, reason = candle_time, current_sl, "SL"
-                break
-            if direction == "SHORT" and candle["high"] >= current_sl:
-                exit_time, exit_price, reason = candle_time, current_sl, "SL"
-                break
+            # Only PAPER mode simulates a stop fill from local candle data.
+            # LIVE exits are determined exclusively by MEXC's position snapshot.
+            if live_executor is None:
+                if direction == "LONG" and candle["low"] <= current_sl:
+                    exit_time, exit_price, reason = candle_time, current_sl, "SL"
+                    break
+                if direction == "SHORT" and candle["high"] >= current_sl:
+                    exit_time, exit_price, reason = candle_time, current_sl, "SL"
+                    break
 
-            # At +0.5R, protect -0.5R; never loosen a tighter stop.
             risk = abs(entry - original_sl)
             if max_r >= SL_PROTECT_ACTIVATION_R:
-                protected_sl = entry + SL_PROTECT_LOCK_R * risk if direction == "LONG" else entry - SL_PROTECT_LOCK_R * risk
-                if direction == "LONG" and protected_sl > current_sl:
+                protected_sl = (
+                    entry + SL_PROTECT_LOCK_R * risk
+                    if direction == "LONG"
+                    else entry - SL_PROTECT_LOCK_R * risk
+                )
+                tighter = (
+                    protected_sl > current_sl if direction == "LONG"
+                    else protected_sl < current_sl
+                )
+                if tighter:
                     current_sl = protected_sl
-                    update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=current_sl)
-                elif direction == "SHORT" and protected_sl < current_sl:
-                    current_sl = protected_sl
-                    update_setup(row["setup_time"], symbol=symbol, trail_time=candle_time, trail_price=current_sl)
+                    stop_changed = True
+                    stop_change_time = candle_time
 
-            # M1 swing trailing activates only after +0.7R.
             if max_r >= TRAIL_ACTIVATION_R:
                 if direction == "LONG":
                     valid = [
@@ -1752,30 +1799,72 @@ def manage_open_positions(symbol, m1, m15):
                         if x["confirmed_at"] < candle_time
                         and x["price"] < candle["close"]
                     ]
-                    if valid:
-                        candidate = valid[-1]["price"]
-                        if candidate > current_sl:
-                            current_sl = candidate
-                            update_setup(
-                                row["setup_time"], symbol=symbol,
-                                trail_time=candle_time, trail_price=candidate
-                            )
+                    if valid and valid[-1]["price"] > current_sl:
+                        current_sl = valid[-1]["price"]
+                        stop_changed = True
+                        stop_change_time = candle_time
                 else:
                     valid = [
                         x for x in swings_high
                         if x["confirmed_at"] < candle_time
                         and x["price"] > candle["close"]
                     ]
-                    if valid:
-                        candidate = valid[-1]["price"]
-                        if candidate < current_sl:
-                            current_sl = candidate
-                            update_setup(
-                                row["setup_time"], symbol=symbol,
-                                trail_time=candle_time, trail_price=candidate
-                            )
+                    if valid and valid[-1]["price"] < current_sl:
+                        current_sl = valid[-1]["price"]
+                        stop_changed = True
+                        stop_change_time = candle_time
 
             trail_r = r_value(direction, entry, original_sl, candle["close"])
+
+        if live_executor is not None:
+            # Persist metrics in the exchange ledger first. Keep its current_sl
+            # unchanged until MEXC confirms the stop modification.
+            live_executor.update_metrics(
+                int(row["setup_time"]),
+                max_r=max_r, min_r=min_r, trail_r=trail_r,
+                last_m1_candle=processed_candle,
+            )
+            confirmed_sl = float(row["position_sl"])
+            if stop_changed and current_sl != confirmed_sl:
+                live_executor._log(
+                    "SL_PROTECTION_CHECK",
+                    symbol=symbol, setup_time=row["setup_time"],
+                    entry=entry, initial_sl=original_sl,
+                    max_r=round(max_r, 5),
+                    activation_r=SL_PROTECT_ACTIVATION_R,
+                    trailing_activation_r=TRAIL_ACTIVATION_R,
+                    exchange_sl=confirmed_sl, candidate_sl=current_sl,
+                )
+                try:
+                    if live_executor.update_stop(
+                        int(row["setup_time"]), direction, current_sl
+                    ):
+                        confirmed_sl = current_sl
+                        live_executor._log(
+                            "SL_PROTECTION_CONFIRMED",
+                            symbol=symbol, setup_time=row["setup_time"],
+                            sl=confirmed_sl, max_r=round(max_r, 5),
+                            candle_time=stop_change_time,
+                        )
+                except Exception as live_exc:
+                    live_executor._log(
+                        "SL_PROTECTION_FAILED",
+                        symbol=symbol, setup_time=row["setup_time"],
+                        candidate_sl=current_sl,
+                        error=type(live_exc).__name__,
+                        detail=str(live_exc)[:160],
+                    )
+            update_setup(
+                row["setup_time"], symbol=symbol,
+                status="OTWARTA", exit_time=None, exit_price=None,
+                exit_reason=None, exit_r=None,
+                position_max_r=max_r, position_min_r=min_r,
+                trail_r=trail_r, position_sl=confirmed_sl,
+                position_last_candle=processed_candle,
+                trail_time=stop_change_time if stop_changed else row["trail_time"],
+                trail_price=confirmed_sl if stop_changed and confirmed_sl == current_sl else row["trail_price"],
+            )
+            continue
 
         fields = {
             "position_max_r": max_r,
@@ -1784,7 +1873,6 @@ def manage_open_positions(symbol, m1, m15):
             "position_sl": current_sl,
             "position_last_candle": processed_candle
         }
-
         if exit_time is not None:
             fields.update(
                 exit_time=exit_time,
@@ -1793,7 +1881,6 @@ def manage_open_positions(symbol, m1, m15):
                 exit_r=r_value(direction, entry, original_sl, exit_price),
                 trail_r=r_value(direction, entry, original_sl, exit_price)
             )
-
         update_setup(row["setup_time"], symbol=symbol, **fields)
 
 def _live_refresh_impl():
@@ -1968,33 +2055,10 @@ def _live_refresh_impl():
                                         flush=True,
                                     )
 
-            manage_open_positions(symbol, m1, m15)
-            if symbol in LIVE_EXECUTORS:
-                live_executor = LIVE_EXECUTORS[symbol]
-                # Reconcile actual Futures positions, then mirror only tighter SL
-                # values already computed by the unchanged M1 engine logic.
-                live_executor.sync_positions()
-                with db_conn() as conn:
-                    live_rows = conn.execute(
-                        """SELECT setup_time, direction, position_sl FROM setups
-                           WHERE symbol=? AND entry_time IS NOT NULL
-                           AND exit_time IS NULL AND position_sl IS NOT NULL""",
-                        (symbol,)
-                    ).fetchall()
-                for live_row in live_rows:
-                    try:
-                        live_executor.update_stop(
-                            int(live_row["setup_time"]), live_row["direction"],
-                            float(live_row["position_sl"])
-                        )
-                    except Exception as live_exc:
-                        print(
-                            "MEXC_LIVE STOP_HOOK_ERROR "
-                            f"setup_time={live_row['setup_time']} "
-                            f"error={type(live_exc).__name__} "
-                            f"detail={str(live_exc)[:180]}",
-                            flush=True,
-                        )
+            manage_open_positions(
+                symbol, m1, m15,
+                live_executor=LIVE_EXECUTORS.get(symbol),
+            )
 
         except Exception as e:
             errors.append(f"{symbol}: {repr(e)}")
