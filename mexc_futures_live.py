@@ -378,6 +378,7 @@ class MexcFuturesLive:
             vol REAL,
             contract_size REAL,
             entry_price REAL,
+            entry_time INTEGER,
             initial_sl REAL,
             current_sl REAL,
             risk_usdt REAL,
@@ -405,6 +406,14 @@ class MexcFuturesLive:
                     "ALTER TABLE mexc_live_trades ADD COLUMN "
                     "missing_position_checks INTEGER NOT NULL DEFAULT 0"
                 )
+            if "entry_time" not in columns:
+                conn.execute(
+                    "ALTER TABLE mexc_live_trades ADD COLUMN entry_time INTEGER"
+                )
+                conn.execute(
+                    "UPDATE mexc_live_trades SET entry_time=created_at "
+                    "WHERE entry_time IS NULL"
+                )
             pk = [
                 row["name"] for row in sorted(
                     conn.execute("PRAGMA table_info(mexc_live_trades)").fetchall(),
@@ -420,14 +429,14 @@ class MexcFuturesLive:
                     """INSERT OR IGNORE INTO mexc_live_trades_v2
                        (setup_time,symbol,direction,status,external_oid,order_id,
                         position_id,stop_order_id,vol,contract_size,entry_price,
-                        initial_sl,current_sl,risk_usdt,max_r,min_r,trail_r,
+                        entry_time,initial_sl,current_sl,risk_usdt,max_r,min_r,trail_r,
                         last_m1_candle,created_at,updated_at,last_error,
                         missing_position_checks)
                        SELECT setup_time,symbol,direction,status,external_oid,order_id,
                               position_id,stop_order_id,vol,contract_size,entry_price,
-                              initial_sl,current_sl,risk_usdt,max_r,min_r,trail_r,
-                              last_m1_candle,created_at,updated_at,last_error,
-                              missing_position_checks
+                              COALESCE(entry_time,created_at),initial_sl,current_sl,
+                              risk_usdt,max_r,min_r,trail_r,last_m1_candle,
+                              created_at,updated_at,last_error,missing_position_checks
                        FROM mexc_live_trades"""
                 )
                 conn.execute("DROP TABLE mexc_live_trades")
@@ -984,12 +993,12 @@ class MexcFuturesLive:
                 conn.execute(
                     """INSERT INTO mexc_live_trades
                        (setup_time,symbol,direction,status,external_oid,vol,contract_size,
-                        entry_price,initial_sl,current_sl,risk_usdt,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        entry_price,entry_time,initial_sl,current_sl,risk_usdt,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         setup_time, self.symbol, direction, "OPENING", external_oid,
-                        sizing["volume"], float(meta["contractSize"]), price, sl, sl,
-                        sizing["estimated_total_risk_usdt"], created_at, created_at,
+                        sizing["volume"], float(meta["contractSize"]), price, created_at,
+                        sl, sl, sizing["estimated_total_risk_usdt"], created_at, created_at,
                     )
                 )
                 conn.commit()
@@ -1066,43 +1075,106 @@ class MexcFuturesLive:
         return float(price)
 
     def sync_positions(self):
+        """Reconcile local execution records against MEXC's authoritative positions.
+
+        Returns the current exchange snapshot on success, including an empty list.
+        Returns None on API failure so callers never mistake an unavailable snapshot
+        for a flat account.
+        """
         if not self.enabled:
-            return
+            return None
         try:
             positions = self._positions()
             live = self.open_trades()
-            by_id = {str(p.get("positionId")): p for p in positions if p.get("positionId") is not None}
+            by_id = {
+                str(p.get("positionId")): p
+                for p in positions
+                if p.get("positionId") is not None
+            }
+            matched_ids = set()
+
             for trade in live:
                 setup_time = int(trade["setup_time"])
-                position = by_id.get(str(trade.get("position_id"))) if trade.get("position_id") else None
-                if position is None and trade["status"] == "OPEN":
-                    # A single empty API snapshot may be transient. Require three
-                    # consecutive successful position reads before declaring exit.
-                    misses = int(trade.get("missing_position_checks", 0) or 0) + 1
-                    if misses >= 3:
-                        self._store(
-                            setup_time, status="CLOSED",
-                            missing_position_checks=misses, last_error=None
-                        )
-                    else:
-                        self._store(setup_time, missing_position_checks=misses)
-                    continue
-                if position is None and trade["status"] in ("OPENING", "PROTECTING", "UNKNOWN"):
-                    # Adopt a matching position only if its direction is consistent.
-                    wanted = 1 if trade["direction"] == "LONG" else 2
-                    candidates = [p for p in positions if int(p.get("positionType", 0)) == wanted]
-                    if len(candidates) == 1 and len(live) == 1:
-                        position = candidates[0]
-                        self._store(
-                            setup_time, status="PROTECTING",
-                            position_id=str(position.get("positionId")),
-                            entry_price=float(position.get("holdAvgPrice", trade["entry_price"])),
-                        )
+                stored_id = str(trade.get("position_id")) if trade.get("position_id") else None
+                position = by_id.get(stored_id) if stored_id else None
+
+                # A stored positionId can be absent or stale after an API timeout.
+                # Recover only when exactly one exchange position and exactly one
+                # local active trade exist for that direction; never guess across sides.
                 if position is None:
+                    wanted = 1 if trade["direction"] == "LONG" else 2
+                    side_trades = [
+                        item for item in live
+                        if ("LONG" if str(item["direction"]).upper() == "LONG" else "SHORT")
+                        == ("LONG" if wanted == 1 else "SHORT")
+                    ]
+                    candidates = [
+                        p for p in positions
+                        if str(p.get("positionId")) not in matched_ids
+                        and int(p.get("positionType", 0) or 0) == wanted
+                    ]
+                    if len(side_trades) == 1 and len(candidates) == 1:
+                        position = candidates[0]
+                        self._log(
+                            "POSITION_LINK_RECOVERED",
+                            symbol=self.symbol,
+                            setup_time=setup_time,
+                            old_position_id=stored_id or "missing",
+                            position_id=position.get("positionId"),
+                        )
+
+                if position is None:
+                    if trade["status"] == "OPEN":
+                        # A single empty API snapshot can be transient. Require three
+                        # consecutive successful position reads before declaring exit.
+                        misses = int(trade.get("missing_position_checks", 0) or 0) + 1
+                        if misses >= 3:
+                            self._store(
+                                setup_time, status="CLOSED",
+                                missing_position_checks=misses, last_error=None
+                            )
+                            self._log(
+                                "POSITION_CLOSED_ON_EXCHANGE",
+                                symbol=self.symbol, setup_time=setup_time,
+                                position_id=stored_id or "unknown",
+                            )
+                        else:
+                            self._store(setup_time, missing_position_checks=misses)
                     continue
-                self._store(setup_time, missing_position_checks=0)
-                # A stop-loss order by position is mandatory. If the entry did
-                # not create an SL, put one on immediately or try again next poll.
+
+                position_id = str(position.get("positionId"))
+                matched_ids.add(position_id)
+                try:
+                    actual_entry = float(
+                        position.get("holdAvgPriceFullyScale")
+                        or position.get("holdAvgPrice")
+                        or position.get("openAvgPrice")
+                        or trade["entry_price"]
+                    )
+                except (TypeError, ValueError, KeyError):
+                    actual_entry = float(trade["entry_price"])
+
+                raw_create_time = position.get("createTime")
+                try:
+                    exchange_entry_time = int(raw_create_time)
+                    if exchange_entry_time > 10_000_000_000:
+                        exchange_entry_time //= 1000
+                except (TypeError, ValueError):
+                    exchange_entry_time = int(
+                        trade.get("entry_time") or trade.get("created_at") or time.time()
+                    )
+
+                self._store(
+                    setup_time,
+                    status="PROTECTING",
+                    position_id=position_id,
+                    entry_price=actual_entry,
+                    entry_time=exchange_entry_time,
+                    missing_position_checks=0,
+                )
+
+                # Read the exchange stop attached to this exact position. Its
+                # trigger price, not the website's position_sl, is authoritative.
                 stop_order_id = trade.get("stop_order_id")
                 existing_stop = None
                 try:
@@ -1111,63 +1183,113 @@ class MexcFuturesLive:
                         pid = stop.get("positionId", stop.get("position_id"))
                         oid = stop.get("id", stop.get("stopOrderId", stop.get("orderId")))
                         stop_price = stop.get("stopLossPrice", stop.get("triggerPrice"))
-                        if (str(pid) == str(position.get("positionId")) and oid is not None
-                                and int(stop.get("state", 1) or 1) == 1
-                                and stop_price not in (None, "", 0, "0")):
+                        if (
+                            str(pid) == position_id and oid is not None
+                            and int(stop.get("state", 1) or 1) == 1
+                            and stop_price not in (None, "", 0, "0")
+                        ):
                             existing_stop = stop
                             break
-                except Exception:
-                    # Try the position-level stop endpoint below if the listing API
-                    # is unavailable; failures are recorded and retried next refresh.
-                    existing_stop = None
+                except Exception as exc:
+                    self._log(
+                        "STOP_ORDER_READ_FAILED",
+                        symbol=self.symbol, setup_time=setup_time,
+                        position_id=position_id,
+                        error=type(exc).__name__, detail=str(exc)[:140],
+                    )
+
                 if existing_stop is not None:
-                    stop_order_id = str(existing_stop.get("id", existing_stop.get("stopOrderId", existing_stop.get("orderId"))))
-                    self._store(setup_time, status="OPEN", position_id=str(position["positionId"]),
-                                stop_order_id=stop_order_id,
-                                entry_price=float(position.get("holdAvgPrice", trade["entry_price"])),
-                                current_sl=float(existing_stop.get("stopLossPrice", existing_stop.get("triggerPrice", trade["current_sl"]))),
-                                last_error=None)
+                    stop_order_id = str(
+                        existing_stop.get("id", existing_stop.get("stopOrderId", existing_stop.get("orderId")))
+                    )
+                    remote_sl = float(
+                        existing_stop.get("stopLossPrice", existing_stop.get("triggerPrice"))
+                    )
+                    self._store(
+                        setup_time, status="OPEN", position_id=position_id,
+                        stop_order_id=stop_order_id, entry_price=actual_entry,
+                        entry_time=exchange_entry_time, current_sl=remote_sl,
+                        last_error=None,
+                    )
+                    self._log(
+                        "POSITION_RECONCILED",
+                        symbol=self.symbol, setup_time=setup_time,
+                        position_id=position_id, direction=trade["direction"],
+                        entry=actual_entry, exchange_sl=remote_sl,
+                        vol=position.get("holdVol"),
+                    )
                     continue
+
+                # No active exchange SL was found: restore protection before
+                # permitting trailing management or another entry.
                 try:
                     meta = self._contract()
                     pos_type = int(position.get("positionType", 1 if trade["direction"] == "LONG" else 2))
-                    close_side = 4 if pos_type == 1 else 2
+                    current_sl = float(trade["current_sl"])
                     data = self._request("POST", "/api/v1/private/stoporder/place", {
                         "positionId": int(position["positionId"]),
                         "vol": float(position.get("holdVol", trade["vol"])),
                         "lossTrend": 1,
                         "profitTrend": 1,
-                        "stopLossPrice": self._format_price(float(trade["current_sl"]), meta, trade["direction"]),
+                        "stopLossPrice": self._format_price(current_sl, meta, trade["direction"]),
                         "takeProfitPrice": 0,
                         "priceProtect": 0,
                         "volType": 2,
                         "takeProfitType": 0,
-                        "takeProfitOrderPrice": 0,
                         "stopLossType": 0,
                         "stopLossOrderPrice": 0,
+                        "takeProfitOrderPrice": 0,
                     })
                     oid = data.get("orderId", data.get("id")) if isinstance(data, dict) else data
                     if oid is None:
                         raise MexcLiveError("MEXC accepted stop request without stop order ID")
-                    self._store(setup_time, status="OPEN", position_id=str(position["positionId"]),
-                                stop_order_id=str(oid),
-                                entry_price=float(position.get("holdAvgPrice", trade["entry_price"])),
-                                last_error=None)
-                    self._log("INITIAL_SL_CONFIRMED", setup_time=setup_time, sl=trade["current_sl"])
+                    self._store(
+                        setup_time, status="OPEN", position_id=position_id,
+                        stop_order_id=str(oid), entry_price=actual_entry,
+                        entry_time=exchange_entry_time, last_error=None,
+                    )
+                    self._log(
+                        "INITIAL_SL_CONFIRMED",
+                        symbol=self.symbol, setup_time=setup_time,
+                        position_id=position_id, sl=current_sl,
+                    )
                 except Exception as exc:
                     self._store(
                         setup_time, status="PROTECTING",
                         last_error=f"SL protection: {type(exc).__name__}: {str(exc)[:180]}"
                     )
                     self._log(
-                        "SL_PROTECTION_RETRY", setup_time=setup_time,
+                        "SL_PROTECTION_RETRY", symbol=self.symbol,
+                        setup_time=setup_time, position_id=position_id,
                         error=type(exc).__name__, detail=str(exc)[:180]
                     )
+
+            for position in positions:
+                position_id = str(position.get("positionId"))
+                if position_id not in matched_ids:
+                    self._log(
+                        "POSITION_UNLINKED",
+                        symbol=self.symbol, position_id=position_id,
+                        direction=("LONG" if int(position.get("positionType", 0) or 0) == 1 else "SHORT"),
+                        entry=position.get("holdAvgPrice"),
+                        vol=position.get("holdVol"),
+                        reason="exchange_position_has_no_unambiguous_live_ledger_record",
+                    )
+
+            self._log(
+                "POSITION_SYNC_OK",
+                symbol=self.symbol,
+                exchange_positions=len(positions),
+                linked_positions=len(matched_ids),
+                active_ledger_trades=len(live),
+            )
+            return positions
         except Exception as exc:
             self._log(
-                "POSITION_SYNC_ERROR", error=type(exc).__name__,
-                detail=str(exc)[:180]
+                "POSITION_SYNC_ERROR", symbol=self.symbol,
+                error=type(exc).__name__, detail=str(exc)[:180]
             )
+            return None
 
     def update_stop(self, setup_time, direction, new_sl):
         """Apply the engine's already-calculated tighter SL to MEXC Futures."""
