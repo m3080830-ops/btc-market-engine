@@ -1817,6 +1817,47 @@ def manage_open_positions(symbol, m1, m15, live_executor=None):
             trail_r = r_value(direction, entry, original_sl, candle["close"])
 
         if live_executor is not None:
+            # Re-evaluate protection from persisted max-R on every poll. This
+            # retries a failed MEXC SL update even when no new M1 candle arrives.
+            risk = abs(entry - original_sl)
+            if max_r >= SL_PROTECT_ACTIVATION_R:
+                protected_sl = (
+                    entry + SL_PROTECT_LOCK_R * risk
+                    if direction == "LONG"
+                    else entry - SL_PROTECT_LOCK_R * risk
+                )
+                tighter = (
+                    protected_sl > current_sl if direction == "LONG"
+                    else protected_sl < current_sl
+                )
+                if tighter:
+                    current_sl = protected_sl
+                    stop_changed = True
+                    stop_change_time = processed_candle
+
+            if max_r >= TRAIL_ACTIVATION_R and closed_m1:
+                latest_candle = closed_m1[-1]
+                if direction == "LONG":
+                    valid = [
+                        x for x in swings_low
+                        if x["confirmed_at"] < latest_candle["time"]
+                        and x["price"] < latest_candle["close"]
+                    ]
+                    if valid and valid[-1]["price"] > current_sl:
+                        current_sl = valid[-1]["price"]
+                        stop_changed = True
+                        stop_change_time = latest_candle["time"]
+                else:
+                    valid = [
+                        x for x in swings_high
+                        if x["confirmed_at"] < latest_candle["time"]
+                        and x["price"] > latest_candle["close"]
+                    ]
+                    if valid and valid[-1]["price"] < current_sl:
+                        current_sl = valid[-1]["price"]
+                        stop_changed = True
+                        stop_change_time = latest_candle["time"]
+
             # Persist metrics in the exchange ledger first. Keep its current_sl
             # unchanged until MEXC confirms the stop modification.
             live_executor.update_metrics(
