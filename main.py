@@ -2671,6 +2671,35 @@ h1{
     line-height:1.5;
 }
 
+.futures-balance{
+    margin:12px 0 16px;
+    padding:14px 16px;
+    border:1px solid var(--line);
+    border-radius:14px;
+    background:var(--panel);
+}
+.futures-balance b,
+.futures-balance span,
+.futures-balance small{
+    display:block;
+}
+.futures-balance b{
+    color:var(--muted);
+    font-size:10px;
+    letter-spacing:.7px;
+}
+.futures-balance span{
+    margin-top:5px;
+    font-size:22px;
+    font-weight:900;
+    color:var(--text);
+}
+.futures-balance small{
+    margin-top:4px;
+    color:var(--muted);
+    font-size:11px;
+}
+
 .asset-bar{
     display:grid;
     grid-template-columns:repeat(3,minmax(0,1fr));
