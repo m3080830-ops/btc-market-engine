@@ -2210,6 +2210,25 @@ def _live_refresh_impl():
         except Exception as e:
             errors.append(f"{symbol}: {repr(e)}")
 
+    # The dashboard balance is sourced from the authenticated Futures account,
+    # never from the local trade ledger or a cached sizing estimate.
+    balance_executor = LIVE_EXECUTORS.get("BTC_USDT") or LIVE_EXECUTORS.get("ETH_USDT")
+    if balance_executor is not None:
+        try:
+            futures_balance = balance_executor.available_futures_balance()
+            state_set("futures_available_usdt", f"{futures_balance:.8f}")
+            state_set("futures_balance_updated_at", now_ts())
+            state_set("futures_balance_error", "")
+        except Exception as balance_exc:
+            state_set("futures_balance_error", type(balance_exc).__name__)
+            print(
+                "MEXC_FUTURES_BALANCE status=ERROR "
+                f"error={type(balance_exc).__name__} detail={str(balance_exc)[:160]}",
+                flush=True,
+            )
+    else:
+        state_set("futures_balance_error", "LIVE_ADAPTER_UNAVAILABLE")
+
     state_set("last_live_update", now_ts())
     state_set("latest_error", " | ".join(errors))
 
@@ -2513,6 +2532,10 @@ def dashboard():
         "latest_error",
         ""
     )
+
+    futures_balance = state_get("futures_available_usdt")
+    futures_balance_updated_at = state_get("futures_balance_updated_at")
+    futures_balance_error = state_get("futures_balance_error", "")
 
     last_update = state_get(
         "last_live_update"
@@ -3361,6 +3384,28 @@ tbody tr:hover{
 <div class="meta">Ostatnia aktualizacja:
 {fmt_ts(last_update)}
 · auto refresh 10 s
+</div>
+"""
+    )
+
+    if futures_balance is not None and not futures_balance_error:
+        balance_value = f"{float(futures_balance):,.4f} USDT"
+        balance_status = f"Stan z {fmt_ts(futures_balance_updated_at)}"
+    elif futures_balance_error:
+        balance_value = "BRAK ODCZYTU"
+        balance_status = "Nie udało się pobrać aktualnego salda z MEXC Futures"
+    else:
+        balance_value = "OCZEKIWANIE NA ODCZYT"
+        balance_status = "Saldo zostanie pobrane po uruchomieniu połączenia LIVE"
+
+    body.append(
+        f"""
+<div class="futures-balance" role="status">
+  <div>
+    <b>SALDO KONTA FUTURES · USDT</b>
+    <span>{html.escape(balance_value)}</span>
+    <small>{html.escape(balance_status)}</small>
+  </div>
 </div>
 """
     )
