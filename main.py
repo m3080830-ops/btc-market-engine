@@ -3417,27 +3417,6 @@ tbody tr:hover{
 """
     )
 
-    if futures_balance is not None and not futures_balance_error:
-        balance_value = f"{float(futures_balance):,.4f} USDT"
-        balance_status = f"Stan z {fmt_ts(futures_balance_updated_at)}"
-    elif futures_balance_error:
-        balance_value = "BRAK ODCZYTU"
-        balance_status = "Nie udało się pobrać aktualnego salda z MEXC Futures"
-    else:
-        balance_value = "OCZEKIWANIE NA ODCZYT"
-        balance_status = "Saldo zostanie pobrane po uruchomieniu połączenia LIVE"
-
-    body.append(
-        f"""
-<div class="futures-balance" role="status">
-  <div>
-    <b>SALDO KONTA FUTURES · USDT</b>
-    <span>{html.escape(balance_value)}</span>
-    <small>{html.escape(balance_status)}</small>
-  </div>
-</div>
-"""
-    )
 
     if latest_error:
 
@@ -5177,6 +5156,28 @@ window.addEventListener(
 );
 
 </script>
+"""
+    )
+
+    if futures_balance is not None and not futures_balance_error:
+        balance_value = f"{float(futures_balance):,.4f} USDT"
+        balance_status = f"Stan z {fmt_ts(futures_balance_updated_at)}"
+    elif futures_balance_error:
+        balance_value = "BRAK ODCZYTU"
+        balance_status = "Nie udało się pobrać aktualnego salda z MEXC Futures"
+    else:
+        balance_value = "OCZEKIWANIE NA ODCZYT"
+        balance_status = "Saldo zostanie pobrane po uruchomieniu połączenia LIVE"
+
+    body.append(
+        f"""
+<div class="futures-balance" role="status">
+  <div>
+    <b>DOSTĘPNE SALDO KONTA FUTURES · USDT</b>
+    <span>{html.escape(balance_value)}</span>
+    <small>{html.escape(balance_status)}</small>
+  </div>
+</div>
 """
     )
 
