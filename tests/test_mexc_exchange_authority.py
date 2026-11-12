@@ -156,36 +156,22 @@ class ExchangeAuthorityTests(unittest.TestCase):
                 "symbol": "BTC_USDT", "positionId": 98765,
                 "positionType": 2, "state": 1, "holdVol": 10,
             }])
-            adapter._stop_orders = Mock(side_effect=[
-                [{
-                    "id": 456, "orderId": 0, "positionId": 98765,
-                    "state": 1, "stopLossPrice": 75910.9,
-                }],
-                [],
-            ])
+            adapter._stop_orders = Mock(return_value=[{
+                "id": 456, "orderId": 0, "positionId": 98765,
+                "state": 1, "stopLossPrice": 75910.9,
+            }])
             adapter._request = Mock(return_value={"success": True})
             adapter._confirm_stop_order = Mock(return_value={
-                "id": 789, "orderId": 0, "positionId": 98765,
+                "id": 456, "orderId": 0, "positionId": 98765,
                 "state": 1, "stopLossPrice": 75800.0,
             })
             adapter._log = Mock()
 
             self.assertTrue(adapter.update_stop(setup_time, "SHORT", 75800.0))
-            self.assertEqual(adapter._request.call_args_list[0].args, (
-                "POST", "/api/v1/private/stoporder/cancel_all",
-                {"positionId": 98765},
-            ))
-            self.assertEqual(adapter._request.call_args_list[1].args, (
-                "POST", "/api/v1/private/stoporder/place",
-                {
-                    "positionId": 98765, "vol": 10.0,
-                    "lossTrend": 1, "profitTrend": 1,
-                    "stopLossPrice": 75800.0, "takeProfitPrice": 0,
-                    "priceProtect": 0, "volType": 2,
-                    "takeProfitType": 0, "stopLossType": 0,
-                    "stopLossOrderPrice": 0, "takeProfitOrderPrice": 0,
-                },
-            ))
+            adapter._request.assert_called_once_with(
+                "POST", "/api/v1/private/stoporder/change_plan_price",
+                {"stopPlanOrderId": 456, "stopLossPrice": 75800.0},
+            )
             trade = adapter.open_trades()[0]
             self.assertEqual(trade["current_sl"], 75800.0)
             self.assertEqual(trade["status"], "OPEN")
