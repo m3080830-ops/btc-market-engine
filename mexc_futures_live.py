@@ -655,6 +655,12 @@ class MexcFuturesLive:
                 break
         raise MexcLiveError("Available USDT Futures balance is missing or invalid")
 
+    def available_futures_balance(self):
+        """Return the current available USDT balance in the MEXC Futures account."""
+        if not self.enabled:
+            raise MexcLiveError("MEXC LIVE adapter is not enabled")
+        return self._usdt_available()
+
     def _fee_info(self):
         data = self._request(
             "GET", "/api/v1/private/account/tiered_fee_rate/v2",
