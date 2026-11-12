@@ -1359,26 +1359,22 @@ class MexcFuturesLive:
                     meta = self._contract()
                     candidate_sl = self._format_price(candidate_sl, meta, direction)
                     self._validate_stop_side(direction, candidate_sl)
+                    # MEXC's position-bound TP/SL endpoint accepts this documented
+                    # payload only. Do not send limit-only fields (volType,
+                    # stopLossType, stopLossOrderPrice, etc.): they caused 5003.
+                    # The endpoint's success response may have null data, so the
+                    # authoritative confirmation is the active open_orders row.
+                    position_volume = float(position.get("holdVol", trade.get("vol") or 0))
+                    if position_volume <= 0:
+                        raise MexcLiveError("MEXC position has no positive closable volume")
                     data = self._request("POST", "/api/v1/private/stoporder/place", {
                         "positionId": int(position_id),
-                        "vol": float(position.get("holdVol", trade.get("vol") or 0)),
+                        "vol": position_volume,
                         "lossTrend": 1,
                         "profitTrend": 1,
                         "stopLossPrice": candidate_sl,
-                        "takeProfitPrice": 0,
                         "priceProtect": 0,
-                        "volType": 2,
-                        "takeProfitType": 0,
-                        "stopLossType": 0,
-                        "stopLossOrderPrice": 0,
-                        "takeProfitOrderPrice": 0,
                     })
-                    request_id = (
-                        data.get("orderId", data.get("id"))
-                        if isinstance(data, dict) else data
-                    )
-                    if request_id is None:
-                        raise MexcLiveError("MEXC accepted stop request without a stop order ID")
                     confirmed = self._confirm_stop_order(
                         position_id, candidate_sl, meta=meta, attempts=5,
                     )
