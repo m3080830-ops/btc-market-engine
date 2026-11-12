@@ -1611,54 +1611,62 @@ class MexcFuturesLive:
                 )
                 raise MexcLiveError("No active MEXC SL order to modify")
 
-            # Position-level TP/SL orders (orderId == 0) cannot be edited with
-            # change_price/change_plan_price. Replace the position TP/SL using
-            # the documented position endpoint, then verify it on the exchange.
-            if int(stop.get("orderId", 0) or 0) == 0:
-                old_sl = float(stop["stopLossPrice"])
-                old_stop_id = str(stop["id"])
-                volume = float(position.get("holdVol", 0) or 0)
-                if volume <= 0:
-                    raise MexcLiveError("MEXC position has no valid holdVol for SL replacement")
+            # MEXC change_price accepts LIMIT-order parent IDs only. Our live
+            # entries are MARKET orders, so replace the position-bound TP/SL by
+            # positionId instead of trying to edit a market order's parent ID.
+            old_sl = float(stop["stopLossPrice"])
+            old_stop_id = str(stop["id"])
+            volume = float(position.get("holdVol", 0) or 0)
+            if volume <= 0:
+                raise MexcLiveError("MEXC position has no valid holdVol for SL replacement")
 
-                # Cancel only TP/SL orders belonging to this exact position.
-                self._request("POST", "/api/v1/private/stoporder/cancel_all", {
+            cancel_result = self._request(
+                "POST", "/api/v1/private/stoporder/cancel_all",
+                {"positionId": int(position_id)},
+            )
+            if isinstance(cancel_result, dict) and cancel_result.get("success") is False:
+                raise MexcLiveError(
+                    f"MEXC rejected cancellation of old position SL: {cancel_result}"
+                )
+            remaining = self._active_stop_for_position(position_id, self._stop_orders())
+            if remaining is not None:
+                raise MexcLiveError(
+                    "MEXC did not confirm cancellation of the old position TP/SL"
+                )
+
+            try:
+                placed = self._request("POST", "/api/v1/private/stoporder/place", {
                     "positionId": int(position_id),
+                    "vol": volume,
+                    "lossTrend": 1,
+                    "profitTrend": 1,
+                    "stopLossPrice": candidate,
+                    "takeProfitPrice": 0,
+                    "priceProtect": 0,
+                    "volType": 2,
+                    "takeProfitType": 0,
+                    "stopLossType": 0,
+                    "stopLossOrderPrice": 0,
+                    "takeProfitOrderPrice": 0,
                 })
-                remaining = self._active_stop_for_position(position_id, self._stop_orders())
-                if remaining is not None:
+                if isinstance(placed, dict) and placed.get("success") is False:
                     raise MexcLiveError(
-                        "MEXC did not confirm cancellation of the old position TP/SL"
+                        f"MEXC rejected replacement position SL: {placed}"
                     )
-
+                confirmed = self._confirm_stop_order(
+                    position_id, candidate, meta=meta, attempts=8,
+                )
+                if confirmed is None:
+                    raise MexcLiveError(
+                        "MEXC did not confirm the replacement position SL"
+                    )
+            except Exception as replacement_error:
+                # Restore the previously confirmed protection if the tighter SL
+                # cannot be installed. Never report the new SL as active unverified.
                 try:
-                    placed = self._request("POST", "/api/v1/private/stoporder/place", {
-                        "positionId": int(position_id),
-                        "vol": volume,
-                        "lossTrend": 1,
-                        "profitTrend": 1,
-                        "stopLossPrice": candidate,
-                        "takeProfitPrice": 0,
-                        "priceProtect": 0,
-                        "volType": 2,
-                        "takeProfitType": 0,
-                        "stopLossType": 0,
-                        "stopLossOrderPrice": 0,
-                        "takeProfitOrderPrice": 0,
-                    })
-                    confirmed = self._confirm_stop_order(
-                        position_id, candidate, meta=meta, attempts=8,
-                    )
-                    if confirmed is None:
-                        raise MexcLiveError(
-                            "MEXC did not confirm the replacement position SL"
-                        )
-                except Exception as replacement_error:
-                    # Never leave the position intentionally unprotected: if the
-                    # tighter stop cannot be installed, attempt to restore its
-                    # previously confirmed stop and report failure either way.
-                    try:
-                        self._request("POST", "/api/v1/private/stoporder/place", {
+                    restored_result = self._request(
+                        "POST", "/api/v1/private/stoporder/place",
+                        {
                             "positionId": int(position_id),
                             "vol": volume,
                             "lossTrend": 1,
@@ -1671,50 +1679,36 @@ class MexcFuturesLive:
                             "stopLossType": 0,
                             "stopLossOrderPrice": 0,
                             "takeProfitOrderPrice": 0,
-                        })
-                        restored = self._confirm_stop_order(
-                            position_id, old_sl, meta=meta, attempts=5,
-                        )
-                        if restored is not None:
-                            self._log(
-                                "SL_OLD_PROTECTION_RESTORED",
-                                setup_time=int(setup_time), position_id=position_id,
-                                stop_order_id=restored.get("id"), sl=old_sl,
-                            )
-                        else:
-                            self._log(
-                                "SL_OLD_PROTECTION_RESTORE_UNCONFIRMED",
-                                setup_time=int(setup_time), position_id=position_id,
-                                previous_stop_order_id=old_stop_id, sl=old_sl,
-                            )
-                    except Exception as restore_error:
+                        },
+                    )
+                    if isinstance(restored_result, dict) and restored_result.get("success") is False:
+                        raise MexcLiveError(f"MEXC rejected old SL restoration: {restored_result}")
+                    restored = self._confirm_stop_order(
+                        position_id, old_sl, meta=meta, attempts=5,
+                    )
+                    if restored is not None:
                         self._log(
-                            "SL_OLD_PROTECTION_RESTORE_FAILED",
+                            "SL_OLD_PROTECTION_RESTORED",
+                            setup_time=int(setup_time), position_id=position_id,
+                            stop_order_id=restored.get("id"), sl=old_sl,
+                        )
+                    else:
+                        self._log(
+                            "SL_OLD_PROTECTION_RESTORE_UNCONFIRMED",
                             setup_time=int(setup_time), position_id=position_id,
                             previous_stop_order_id=old_stop_id, sl=old_sl,
-                            error=type(restore_error).__name__,
-                            detail=str(restore_error)[:160],
                         )
-                    raise replacement_error
-                confirmed_id = str(confirmed["id"])
-                confirmed_price = float(confirmed["stopLossPrice"])
-            else:
-                # Order-attached TP/SL is modified through its parent limit order.
-                parent_order_id = int(stop.get("orderId", 0) or 0)
-                self._request("POST", "/api/v1/private/stoporder/change_price", {
-                    "orderId": parent_order_id,
-                    "lossTrend": 1,
-                    "stopLossPrice": candidate,
-                })
-                confirmed = self._confirm_stop_order(
-                    position_id, candidate, meta=meta, attempts=5,
-                )
-                if confirmed is None:
-                    raise MexcLiveError(
-                        "MEXC did not confirm the updated SL; local SL remains unchanged"
+                except Exception as restore_error:
+                    self._log(
+                        "SL_OLD_PROTECTION_RESTORE_FAILED",
+                        setup_time=int(setup_time), position_id=position_id,
+                        previous_stop_order_id=old_stop_id, sl=old_sl,
+                        error=type(restore_error).__name__,
+                        detail=str(restore_error)[:160],
                     )
-                confirmed_id = str(confirmed["id"])
-                confirmed_price = float(confirmed["stopLossPrice"])
+                raise replacement_error
+            confirmed_id = str(confirmed["id"])
+            confirmed_price = float(confirmed["stopLossPrice"])
 
             self._store(
                 setup_time, status="OPEN", stop_order_id=confirmed_id,
