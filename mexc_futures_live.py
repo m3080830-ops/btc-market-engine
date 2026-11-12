@@ -655,6 +655,23 @@ class MexcFuturesLive:
                 break
         raise MexcLiveError("Available USDT Futures balance is missing or invalid")
 
+    def futures_account_equity(self):
+        """Return MEXC's authoritative USDT Futures equity and unrealized PNL."""
+        if not self.enabled:
+            raise MexcLiveError("MEXC LIVE adapter is not enabled")
+        for asset in self._assets():
+            if str(asset.get("currency", "")).upper() == "USDT":
+                try:
+                    equity = float(asset["equity"])
+                    unrealized = float(asset["unrealized"])
+                except (KeyError, TypeError, ValueError):
+                    break
+                if (math.isfinite(equity) and equity >= 0
+                        and math.isfinite(unrealized)):
+                    return {"equity": equity, "unrealized": unrealized}
+                break
+        raise MexcLiveError("USDT Futures equity or unrealized PNL is missing or invalid")
+
     def available_futures_balance(self):
         """Return the current available USDT balance in the MEXC Futures account."""
         if not self.enabled:

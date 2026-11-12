@@ -2209,24 +2209,25 @@ def _live_refresh_impl():
         except Exception as e:
             errors.append(f"{symbol}: {repr(e)}")
 
-    # The dashboard balance is sourced from the authenticated Futures account,
-    # never from the local trade ledger or a cached sizing estimate.
+    # Use MEXC's authoritative account equity: it includes position margin
+    # and unrealized PNL, so margin is not subtracted from the displayed total.
     balance_executor = LIVE_EXECUTORS.get("BTC_USDT") or LIVE_EXECUTORS.get("ETH_USDT")
     if balance_executor is not None:
         try:
-            futures_balance = balance_executor.available_futures_balance()
-            state_set("futures_available_usdt", f"{futures_balance:.8f}")
-            state_set("futures_balance_updated_at", now_ts())
-            state_set("futures_balance_error", "")
+            account_equity = balance_executor.futures_account_equity()
+            state_set("futures_equity_usdt", f"{account_equity['equity']:.8f}")
+            state_set("futures_unrealized_pnl_usdt", f"{account_equity['unrealized']:.8f}")
+            state_set("futures_equity_updated_at", now_ts())
+            state_set("futures_equity_error", "")
         except Exception as balance_exc:
-            state_set("futures_balance_error", type(balance_exc).__name__)
+            state_set("futures_equity_error", type(balance_exc).__name__)
             print(
-                "MEXC_FUTURES_BALANCE status=ERROR "
+                "MEXC_FUTURES_EQUITY status=ERROR "
                 f"error={type(balance_exc).__name__} detail={str(balance_exc)[:160]}",
                 flush=True,
             )
     else:
-        state_set("futures_balance_error", "LIVE_ADAPTER_UNAVAILABLE")
+        state_set("futures_equity_error", "LIVE_ADAPTER_UNAVAILABLE")
 
     state_set("last_live_update", now_ts())
     state_set("latest_error", " | ".join(errors))
@@ -2532,9 +2533,10 @@ def dashboard():
         ""
     )
 
-    futures_balance = state_get("futures_available_usdt")
-    futures_balance_updated_at = state_get("futures_balance_updated_at")
-    futures_balance_error = state_get("futures_balance_error", "")
+    futures_equity = state_get("futures_equity_usdt")
+    futures_unrealized_pnl = state_get("futures_unrealized_pnl_usdt")
+    futures_equity_updated_at = state_get("futures_equity_updated_at")
+    futures_equity_error = state_get("futures_equity_error", "")
 
     last_update = state_get(
         "last_live_update"
@@ -5158,23 +5160,30 @@ window.addEventListener(
 """
     )
 
-    if futures_balance is not None and not futures_balance_error:
-        balance_value = f"{float(futures_balance):,.4f} USDT"
-        balance_status = f"Stan z {fmt_ts(futures_balance_updated_at)}"
-    elif futures_balance_error:
-        balance_value = "BRAK ODCZYTU"
-        balance_status = "Nie udało się pobrać aktualnego salda z MEXC Futures"
+    if futures_equity is not None and not futures_equity_error:
+        equity_value = f"{float(futures_equity):,.4f} USDT"
+        pnl_value = (
+            f"{float(futures_unrealized_pnl):+,.4f} USDT"
+            if futures_unrealized_pnl is not None else "BRAK DANYCH"
+        )
+        equity_status = f"Stan z {fmt_ts(futures_equity_updated_at)}"
+    elif futures_equity_error:
+        equity_value = "BRAK ODCZYTU"
+        pnl_value = "BRAK DANYCH"
+        equity_status = "Nie udało się pobrać kapitału Futures z MEXC"
     else:
-        balance_value = "OCZEKIWANIE NA ODCZYT"
-        balance_status = "Saldo zostanie pobrane po uruchomieniu połączenia LIVE"
+        equity_value = "OCZEKIWANIE NA ODCZYT"
+        pnl_value = "OCZEKIWANIE NA ODCZYT"
+        equity_status = "Dane zostaną pobrane po uruchomieniu połączenia LIVE"
 
     body.append(
         f"""
 <div class="futures-balance" role="status">
   <div>
-    <b>DOSTĘPNE SALDO KONTA FUTURES · USDT</b>
-    <span>{html.escape(balance_value)}</span>
-    <small>{html.escape(balance_status)}</small>
+    <b>ŁĄCZNY KAPITAŁ FUTURES · USDT (Z OTWARTYM PNL)</b>
+    <span>{html.escape(equity_value)}</span>
+    <small>Niezrealizowany PNL: {html.escape(pnl_value)}</small>
+    <small>{html.escape(equity_status)}</small>
   </div>
 </div>
 """
