@@ -1749,9 +1749,8 @@ def manage_open_positions(symbol, m1, m15, live_executor=None):
                 ).fetchone()
             if setup_row is None:
                 # An exchange-authoritative position may have no corresponding
-                # strategy/history row (for example after a lost local write).
-                # Create a dashboard projection from exchange facts; do not invent
-                # the original strategy SL or enable R/trailing without it.
+                # strategy/history row. For adopted manual positions, the confirmed
+                # MEXC exchange SL is persisted as initial_sl and is safe to display.
                 live_executor._log(
                     "LIVE_MANAGEMENT_CONTEXT_MISSING",
                     symbol=symbol, setup_time=trade["setup_time"],
@@ -1773,8 +1772,8 @@ def manage_open_positions(symbol, m1, m15, live_executor=None):
                     position_sl=trade.get("current_sl"),
                     exit_time=None, exit_price=None, exit_reason=None,
                     decision_reason=(
-                        "Pozycja wykryta na MEXC; brak danych strategii — "
-                        "automatyczny trailing zablokowany do odzyskania początkowego SL"
+                        "Pozycja adoptowana z MEXC; początkowy SL pochodzi z aktywnego "
+                        "zlecenia SL na giełdzie"
                     ),
                 )
                 with db_conn() as conn:

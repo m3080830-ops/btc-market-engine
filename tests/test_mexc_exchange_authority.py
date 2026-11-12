@@ -68,7 +68,7 @@ class ExchangeAuthorityTests(unittest.TestCase):
             ))
 
 
-    def test_exchange_only_position_is_adopted_without_fabricating_initial_sl(self):
+    def test_exchange_only_position_with_sl_is_adopted_and_initializes_trailing(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
             position = {
@@ -82,18 +82,41 @@ class ExchangeAuthorityTests(unittest.TestCase):
                 "id": 457, "positionId": 98766, "state": 1,
                 "stopLossPrice": 76000.0,
             }])
+            adapter._validate_stop_side = Mock(return_value=74500.0)
             adapter._log = Mock()
 
             self.assertEqual(adapter.sync_positions(), [position])
             adopted = adapter.open_trades()
             self.assertEqual(len(adopted), 1)
-            self.assertEqual(adopted[0]["status"], "PROTECTING")
+            self.assertEqual(adopted[0]["status"], "OPEN")
             self.assertEqual(adopted[0]["position_id"], "98766")
             self.assertEqual(adopted[0]["entry_price"], 74500.0)
             self.assertEqual(adopted[0]["current_sl"], 76000.0)
-            self.assertIsNone(adopted[0]["initial_sl"])
+            self.assertEqual(adopted[0]["initial_sl"], 76000.0)
             self.assertTrue(any(
-                call.args[0] == "POSITION_ADOPTED_CONTEXT_MISSING"
+                call.args[0] == "POSITION_ADOPTED_WITH_EXCHANGE_SL"
+                for call in adapter._log.call_args_list
+            ))
+
+    def test_exchange_only_position_without_sl_is_not_adopted_or_protected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self.make_adapter(os.path.join(tmp, "live.sqlite3"))
+            position = {
+                "symbol": "BTC_USDT", "positionId": 98769,
+                "positionType": 2, "state": 1, "holdVol": 4,
+                "holdAvgPrice": 74500.0, "holdAvgPriceFullyScale": "74500.0",
+                "createTime": 1_794_240_000_000,
+            }
+            adapter._positions = Mock(return_value=[position])
+            adapter._stop_orders = Mock(return_value=[])
+            adapter._request = Mock()
+            adapter._log = Mock()
+
+            self.assertEqual(adapter.sync_positions(), [position])
+            self.assertEqual(adapter.open_trades(), [])
+            adapter._request.assert_not_called()
+            self.assertTrue(any(
+                call.args[0] == "POSITION_ADOPTION_SKIPPED_NO_SL"
                 for call in adapter._log.call_args_list
             ))
 

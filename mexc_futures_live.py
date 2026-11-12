@@ -1289,20 +1289,21 @@ class MexcFuturesLive:
                     remote_sl = float(existing_stop["stopLossPrice"])
                     stop_order_id = str(existing_stop["id"])
                     if trade.get("initial_sl") is None:
-                        # The exchange stop is visible, but without the strategy's
-                        # original risk anchor we cannot calculate R or trail safely.
+                        # A manual position's confirmed MEXC stop is its initial 1R.
+                        self._validate_stop_side(direction, remote_sl)
                         self._store(
-                            setup_time, status="PROTECTING",
+                            setup_time, status="OPEN",
                             position_id=position_id, stop_order_id=stop_order_id,
                             entry_price=actual_entry, entry_time=exchange_entry_time,
-                            current_sl=remote_sl,
-                            last_error="Strategy initial SL context missing; trailing is disabled",
+                            initial_sl=remote_sl, current_sl=remote_sl,
+                            last_error=None,
                         )
                         self._log(
-                            "POSITION_RECONCILED_CONTEXT_MISSING",
+                            "POSITION_ADOPTED_FROM_EXCHANGE_SL",
                             symbol=self.symbol, setup_time=setup_time,
                             position_id=position_id, direction=direction,
-                            entry=actual_entry, exchange_sl=remote_sl,
+                            entry=actual_entry, initial_sl=remote_sl,
+                            trailing_enabled=True,
                         )
                     else:
                         self._store(
@@ -1459,8 +1460,37 @@ class MexcFuturesLive:
                     )
                     continue
 
-                # Setup timestamp is only a local projection key here; it is not
-                # used as a strategy signal or as an R calculation anchor.
+                # Adopt a manual position only if MEXC confirms an active SL.
+                # If stop retrieval failed or no stop exists, leave it unmanaged.
+                if remote_stop is None:
+                    self._log(
+                        "POSITION_ADOPTION_SKIPPED_NO_SL", symbol=self.symbol,
+                        position_id=position_id, direction=direction,
+                        entry=actual_entry, reason=(
+                            "STOP_LIST_READ_FAILED" if stop_read_error
+                            else "NO_ACTIVE_EXCHANGE_STOP"
+                        ),
+                    )
+                    continue
+                remote_sl = float(remote_stop.get("stopLossPrice") or 0)
+                if not math.isfinite(remote_sl) or remote_sl <= 0:
+                    self._log(
+                        "POSITION_ADOPTION_SKIPPED_INVALID_SL",
+                        symbol=self.symbol, position_id=position_id,
+                        exchange_sl=remote_sl,
+                    )
+                    continue
+                try:
+                    self._validate_stop_side(direction, remote_sl)
+                except Exception as exc:
+                    self._log(
+                        "POSITION_ADOPTION_SKIPPED_INVALID_SL",
+                        symbol=self.symbol, position_id=position_id,
+                        exchange_sl=remote_sl, reason=str(exc)[:140],
+                    )
+                    continue
+
+                # The confirmed exchange SL becomes the manual position's initial 1R.
                 setup_time = exchange_seconds
                 with self._conn() as conn:
                     while conn.execute(
@@ -1468,40 +1498,28 @@ class MexcFuturesLive:
                         (setup_time, self.symbol),
                     ).fetchone():
                         setup_time += 1
-                    remote_sl = (
-                        float(remote_stop.get("stopLossPrice"))
-                        if remote_stop is not None else None
-                    )
-                    stop_order_id = (
-                        str(remote_stop.get("id")) if remote_stop is not None else None
-                    )
+                    stop_order_id = str(remote_stop.get("id"))
                     conn.execute(
                         """INSERT INTO mexc_live_trades
                            (setup_time,symbol,direction,status,external_oid,position_id,
-                            stop_order_id,vol,entry_price,entry_time,current_sl,
+                            stop_order_id,vol,entry_price,entry_time,initial_sl,current_sl,
                             max_r,min_r,created_at,updated_at,last_error)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
-                            setup_time, self.symbol, direction, "PROTECTING",
+                            setup_time, self.symbol, direction, "OPEN",
                             f"EXCHANGE-{self.symbol.replace('_', '')}-{position_id}",
                             position_id, stop_order_id, volume, actual_entry,
-                            exchange_seconds, remote_sl, 0.0, 0.0,
-                            exchange_seconds, int(time.time()),
-                            (
-                                "Strategy initial SL context missing; trailing disabled"
-                                if not stop_read_error else
-                                f"Stop list read failed: {stop_read_error}"
-                            ),
+                            exchange_seconds, remote_sl, remote_sl, 0.0, 0.0,
+                            exchange_seconds, int(time.time()), None,
                         ),
                     )
                     conn.commit()
                 matched_ids.add(position_id)
                 self._log(
-                    "POSITION_ADOPTED_CONTEXT_MISSING", symbol=self.symbol,
+                    "POSITION_ADOPTED_WITH_EXCHANGE_SL", symbol=self.symbol,
                     setup_time=setup_time, position_id=position_id,
-                    direction=direction, entry=actual_entry, exchange_sl=remote_sl,
-                    stop_order_id=stop_order_id,
-                    trailing_enabled=False,
+                    direction=direction, entry=actual_entry, initial_sl=remote_sl,
+                    stop_order_id=stop_order_id, trailing_enabled=True,
                 )
 
             self._log(
