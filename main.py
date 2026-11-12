@@ -1699,8 +1699,49 @@ def manage_open_positions(symbol, m1, m15, live_executor=None):
         # from stale local state when MEXC could not be queried.
         if exchange_positions is None:
             return
+        exchange_position_ids = {
+            str(position.get("positionId"))
+            for position in exchange_positions
+            if position.get("positionId") is not None
+        }
+        live_trades = [
+            trade for trade in live_executor.open_trades()
+            if trade.get("position_id") is not None
+            and str(trade.get("position_id")) in exchange_position_ids
+        ]
+        confirmed_setup_times = {
+            int(trade["setup_time"]) for trade in live_trades
+        }
+
+        # In LIVE mode the website may contain historical PAPER simulations
+        # restored by an earlier revision. They are not exchange positions.
+        # Demote any such row unless its setup is linked to a position currently
+        # returned by MEXC. A failed/empty API snapshot returns above and cannot
+        # clear local records.
+        with db_conn() as conn:
+            stale_rows = conn.execute(
+                """SELECT setup_time FROM setups
+                   WHERE symbol=? AND entry_time IS NOT NULL AND exit_time IS NULL""",
+                (symbol,)
+            ).fetchall()
+        for stale in stale_rows:
+            stale_setup_time = int(stale["setup_time"])
+            if stale_setup_time not in confirmed_setup_times:
+                update_setup(
+                    stale_setup_time, symbol=symbol,
+                    status="NIEPOTWIERDZONY",
+                    entry_time=None, entry_price=None, position_sl=None,
+                    position_max_r=None, position_min_r=None, trail_r=None,
+                    trail_time=None, trail_price=None, position_last_candle=None,
+                )
+                live_executor._log(
+                    "DASHBOARD_STALE_ROW_CLEARED",
+                    symbol=symbol, setup_time=stale_setup_time,
+                    reason="NO_MATCHING_MEXC_OPEN_POSITION",
+                )
+
         open_rows = []
-        for trade in live_executor.open_trades():
+        for trade in live_trades:
             with db_conn() as conn:
                 setup_row = conn.execute(
                     "SELECT * FROM setups WHERE symbol=? AND setup_time=? LIMIT 1",
@@ -2108,12 +2149,14 @@ def _live_refresh_impl():
                                     flush=True,
                                 )
                             if not duplicate:
+                                # Store the accepted strategy setup, but do not
+                                # project an open trade until MEXC confirms an
+                                # actual exchange position in manage_open_positions().
                                 upsert_setup(setup)
                                 update_setup(
                                     setup["signal_time"], symbol=symbol,
-                                    status="OTWARTA", setup_sl=sl,
-                                    entry_time=entry["time"], entry_price=entry["price"],
-                                    position_sl=sl, planned_target=plan["target"],
+                                    status="NIEPOTWIERDZONY", setup_sl=sl,
+                                    planned_target=plan["target"],
                                     planned_rr=plan["rr"], entry_model=setup["model"],
                                     pa_trigger=",".join(setup.get("pa", [])),
                                     decision_reason=None
@@ -2148,10 +2191,21 @@ def _live_refresh_impl():
                                         flush=True,
                                     )
 
-            manage_open_positions(
-                symbol, m1, m15,
-                live_executor=LIVE_EXECUTORS.get(symbol),
-            )
+            live_flag_enabled = os.getenv(
+                "MEXC_LIVE_TRADING_ENABLED", "false"
+            ).strip().lower() in ("1", "true", "yes", "on")
+            live_executor = LIVE_EXECUTORS.get(symbol)
+            if live_flag_enabled and live_executor is None:
+                print(
+                    f"MEXC_LIVE MANAGEMENT_SKIPPED symbol={symbol} "
+                    "reason=LIVE_ADAPTER_UNAVAILABLE",
+                    flush=True,
+                )
+            else:
+                manage_open_positions(
+                    symbol, m1, m15,
+                    live_executor=live_executor,
+                )
 
         except Exception as e:
             errors.append(f"{symbol}: {repr(e)}")
@@ -5312,7 +5366,16 @@ def engine_loop():
     else:
         print("MEXC_LIVE status=DISABLED reason=env_flag_false", flush=True)
 
-    rebuild_history()
+    if live_enabled:
+        # Historical candle simulations are not exchange executions and must
+        # never be presented as open LIVE positions.
+        print(
+            "LIVE_MODE_HISTORY_REBUILD_SKIPPED "
+            "reason=historical_simulation_is_not_exchange_execution",
+            flush=True,
+        )
+    else:
+        rebuild_history()
 
     # M15 close events trigger immediately over WebSocket; 30s REST loop
     # remains for closed-M1 trailing and position reconciliation.
