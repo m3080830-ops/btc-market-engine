@@ -1,0 +1,40 @@
+name: MEXC trailing A-B-C comparison
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "backtest/trailing-abc-comparison"
+    paths:
+      - "backtest/run_trailing_abc.py"
+      - ".github/workflows/mexc-trailing-abc.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      START_UTC: "2026-10-16T00:00:00+00:00"
+      END_UTC: "2026-11-14T00:00:00+00:00"
+      WARMUP_UTC: "2026-06-01T00:00:00+00:00"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download public MEXC Futures candles
+        run: python backtest/download_mexc_klines.py
+      - name: Validate dataset
+        run: python backtest/validate_dataset.py
+      - name: Run trailing A-B-C comparison (offline only)
+        run: python backtest/run_trailing_abc.py
+      - name: Upload candles and report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mexc-trailing-abc-${{ github.run_id }}
+          path: data/mexc/
+          if-no-files-found: error
+          retention-days: 30
