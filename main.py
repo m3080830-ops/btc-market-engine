@@ -2137,7 +2137,13 @@ def _live_refresh_impl():
                             flush=True,
                         )
                         sl = choose_structural_sl(h1, m15, setup)
-                        stop_ok = sl is not None and passes_minimum_stop_distance(symbol, entry["price"], sl)
+                        # LIVE validates ETH's minimum stop distance against the
+                        # executable MEXC quote inside maybe_open(), not this
+                        # indicative next-candle open. PAPER keeps its old rule.
+                        stop_ok = sl is not None and (
+                            symbol in LIVE_EXECUTORS
+                            or passes_minimum_stop_distance(symbol, entry["price"], sl)
+                        )
                         if stop_ok:
                             plan = planned_trade(h1, m15, setup, entry["price"], sl)
                         else:
