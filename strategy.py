@@ -387,16 +387,17 @@ def _m15_trigger(
     if not r:
         return None
 
-    # Only inspect the most recent trigger window. Searching from the H1
-    # reaction forward can keep returning the same stale M15 candle for hours.
-    recent = r[-max(1, int(max_bars)):]
-    candidates = [x for x in recent if x["time"] > after_time]
+    # A live trigger is valid only on the newest fully closed M15 candle.
+    # Falling back to an earlier candle can replay an expired setup on every
+    # scan; the live executor then rejects it as stale forever.
+    candidates = [r[-1]] if r[-1]["time"] > after_time else []
+
     if not candidates:
         return None
 
     e9, e18, e50, e100, av = _ema_state(r)
 
-    for c in reversed(candidates):
+    for c in candidates:
         i = r.index(c)
         a = av[i]
         prev = r[:i]
