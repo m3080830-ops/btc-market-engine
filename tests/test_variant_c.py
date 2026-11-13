@@ -34,6 +34,32 @@ class VariantCTests(unittest.TestCase):
         with patch.object(strategy, "_m15_trend_structure_opposes", return_value=True):
             self.assertFalse(strategy._variant_c_allows(setup, []))
 
+    def test_m15_trigger_uses_only_latest_window_and_prefers_newest(self):
+        rows = [
+            {"time": t, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
+            for t in (100, 200, 300, 400, 500, 600)
+        ]
+        with patch.object(strategy, "_ema_state", return_value=(
+            [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6
+        )), patch.object(strategy, "price_action", side_effect=lambda candle, prev, direction: {
+            "ok": direction == "SHORT", "signals": []
+        }):
+            trigger = strategy._m15_trigger(rows, "SHORT", 50, max_bars=4)
+        self.assertEqual(trigger["signal_time"], 600)
+
+    def test_m15_trigger_does_not_reuse_old_candles_outside_window(self):
+        rows = [
+            {"time": t, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
+            for t in (100, 200, 300, 400, 500, 600)
+        ]
+        with patch.object(strategy, "_ema_state", return_value=(
+            [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6
+        )), patch.object(strategy, "price_action", side_effect=lambda candle, prev, direction: {
+            "ok": direction == "SHORT", "signals": []
+        }):
+            trigger = strategy._m15_trigger(rows, "SHORT", 650, max_bars=4)
+        self.assertIsNone(trigger)
+
 
 if __name__ == "__main__":
     unittest.main()
