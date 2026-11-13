@@ -47,6 +47,21 @@ class VariantCTests(unittest.TestCase):
             trigger = strategy._m15_trigger(rows, "SHORT", 50, max_bars=4)
         self.assertEqual(trigger["signal_time"], 600)
 
+    def test_m15_trigger_does_not_fall_back_to_previous_closed_candle(self):
+        rows = [
+            {"time": t, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
+            for t in (100, 200, 300, 400, 500, 600)
+        ]
+
+        def only_previous_candle_triggers(candle, prev, direction):
+            return {"ok": direction == "SHORT" and candle["time"] == 500, "signals": []}
+
+        with patch.object(strategy, "_ema_state", return_value=(
+            [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6
+        )), patch.object(strategy, "price_action", side_effect=only_previous_candle_triggers):
+            trigger = strategy._m15_trigger(rows, "SHORT", 50, max_bars=4)
+        self.assertIsNone(trigger)
+
     def test_m15_trigger_does_not_reuse_old_candles_outside_window(self):
         rows = [
             {"time": t, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
