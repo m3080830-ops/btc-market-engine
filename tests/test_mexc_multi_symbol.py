@@ -55,9 +55,15 @@ class MultiSymbolLiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = self._adapter(os.path.join(tmp, "eth-live.sqlite3"))
             args = self._setup_and_entry(3000, 2986)
-            with patch.object(adapter, "_positions") as positions:
+            with patch.object(adapter, "_positions", return_value=[]) as positions, \
+                 patch.object(adapter, "_position_mode", return_value=1), \
+                 patch.object(adapter, "_usdt_available", return_value=10.0), \
+                 patch.object(adapter, "_market_price", return_value=3000.0) as market_price, \
+                 patch.object(adapter, "_request") as request:
                 self.assertFalse(adapter.maybe_open(*args))
-                positions.assert_not_called()
+                positions.assert_called_once()
+                market_price.assert_called_once_with("LONG")
+                request.assert_not_called()
 
     def test_eth_adapter_allows_exact_half_percent_to_reach_preflight(self):
         with tempfile.TemporaryDirectory() as tmp:
