@@ -380,18 +380,23 @@ def _m15_trigger(
     Do not demand a bullish/bearish pattern or a candle in trade direction.
     Reject only when the closed M15 candle shows a clear opposing signal.
     """
-    r = _closed(m15_rows)
-    candidates = [x for x in r if x["time"] > after_time]
-    if not candidates:
+    # Callers pass the already-closed M15 series. Do not apply _closed()
+    # again here: that would silently discard another candle and, more
+    # importantly, allow the search to drift back to an old trigger.
+    r = list(m15_rows)
+    if not r:
         return None
 
-    candidates = candidates[:max_bars]
+    # Only inspect the most recent trigger window. Searching from the H1
+    # reaction forward can keep returning the same stale M15 candle for hours.
+    recent = r[-max(1, int(max_bars)):]
+    candidates = [x for x in recent if x["time"] > after_time]
     if not candidates:
         return None
 
     e9, e18, e50, e100, av = _ema_state(r)
 
-    for c in candidates:
+    for c in reversed(candidates):
         i = r.index(c)
         a = av[i]
         prev = r[:i]
