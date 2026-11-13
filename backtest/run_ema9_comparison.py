@@ -44,7 +44,7 @@ def run_symbol(symbol):
             "rr_below_1":0,"overlap":0,"no_m1_coverage":0,"simulation_invalid":0}
         active_until = None
         for setup in setups:
-            if variant == "B_M15_close_vs_EMA9" and not allowed_by_ema9(setup,m15):
+            if variant == "B_M15_close_vs_EMA9" and not allowed_by_ema9(setup,m15_all):
                 rejected["ema9_filter"] += 1
                 continue
             entry = strategy.build_entry(setup,m15)
