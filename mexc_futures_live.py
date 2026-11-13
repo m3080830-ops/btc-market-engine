@@ -869,7 +869,7 @@ class MexcFuturesLive:
             "side_limits": side_limits,
         }
 
-    def maybe_open(self, setup, entry, initial_sl, planned_rr, current_price, now_ts):
+    def maybe_open(self, setup, entry, initial_sl, planned_rr, current_price, now_ts, planned_target=None):
         """Open one fresh setup for this Futures symbol; never replay stale PAPER entries."""
         if not self.enabled or not setup or setup.get("symbol", self.symbol) != self.symbol:
             return False
@@ -883,12 +883,6 @@ class MexcFuturesLive:
             return False
         if not math.isfinite(entry_price) or not math.isfinite(initial_sl) or entry_price <= 0:
             return False
-        if self.symbol == "ETH_USDT" and abs(entry_price - initial_sl) < entry_price * ETH_MIN_STOP_DISTANCE_PCT:
-            self._log("ENTRY_SKIPPED", symbol=self.symbol, reason="minimum_stop_distance_0.5pct")
-            return False
-        if planned_rr < 1.0:
-            return False
-
         setup_time = int(setup.get("signal_time", 0) or 0)
         try:
             entry_time = int(entry["time"])
@@ -961,6 +955,36 @@ class MexcFuturesLive:
             sl = float(initial_sl)
             if not math.isfinite(sl) or sl <= 0:
                 raise MexcLiveError("Initial stop price is invalid")
+            if self.symbol == "ETH_USDT" and abs(price - sl) < price * ETH_MIN_STOP_DISTANCE_PCT:
+                self._log(
+                    "ENTRY_SKIPPED", symbol=self.symbol,
+                    reason="minimum_stop_distance_0.5pct",
+                    market_price=price, sl=sl,
+                )
+                return False
+            if planned_target is None:
+                # Compatibility fallback for older callers. Current live path
+                # always supplies the structural target calculated at signal time.
+                reward_reference = max(0.0, planned_rr) * abs(entry_price - sl)
+                planned_target = (
+                    entry_price + reward_reference if direction == "LONG"
+                    else entry_price - reward_reference
+                )
+            reward = (
+                float(planned_target) - price if direction == "LONG"
+                else price - float(planned_target)
+            )
+            risk = abs(price - sl)
+            live_rr = reward / risk if risk > 0 and reward > 0 else 0.0
+            if live_rr < 1.0:
+                self._log(
+                    "ENTRY_SKIPPED", symbol=self.symbol,
+                    setup_time=setup_time, reason="RR_BELOW_MIN_AT_MARKET",
+                    market_price=price, sl=sl, target=planned_target,
+                    rr=round(live_rr, 6), min_rr=1.0,
+                )
+                return False
+            planned_rr = live_rr
             if direction == "LONG" and sl >= price:
                 self._log("ENTRY_SKIPPED", reason="long_stop_not_below_live_ask", setup_time=setup_time)
                 return False
@@ -1065,6 +1089,8 @@ class MexcFuturesLive:
                 direction=direction,
                 vol=sizing["volume"],
                 risk_usdt=round(sizing["estimated_total_risk_usdt"], 6),
+                rr_at_market=round(planned_rr, 6),
+                target=planned_target,
                 risk_budget_usdt=round(sizing["risk_budget_usdt"], 6),
                 notional_usdt=round(sizing["notional_usdt"], 4),
                 leverage=sizing["leverage"],
