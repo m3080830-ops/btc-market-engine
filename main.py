@@ -1796,6 +1796,23 @@ def manage_open_positions(symbol, m1, m15, live_executor=None):
             row["trail_r"] = trade.get("trail_r", row["trail_r"])
             row["position_last_candle"] = trade.get("last_m1_candle")
             row["_live_status"] = trade.get("status")
+            # R is anchored to MEXC's confirmed average fill, never the
+            # signal candle or the next candle's indicative open.
+            actual_entry = float(row["entry_price"] or 0)
+            original_sl = row["setup_sl"]
+            target = row["planned_target"]
+            if actual_entry > 0 and original_sl is not None and target is not None:
+                risk_distance = abs(actual_entry - float(original_sl))
+                reward_distance = (
+                    float(target) - actual_entry if row["direction"] == "LONG"
+                    else actual_entry - float(target)
+                )
+                if risk_distance > 0 and reward_distance > 0:
+                    row["planned_rr"] = reward_distance / risk_distance
+                    update_setup(
+                        int(row["setup_time"]), symbol=symbol,
+                        planned_rr=row["planned_rr"],
+                    )
             # A local simulated exit is not an exchange fill. Re-open the website
             # projection while MEXC still reports this position as active.
             row["exit_time"] = None
@@ -2071,7 +2088,8 @@ def _live_refresh_impl():
                                     "price": float(active["entry_price"]),
                                 },
                                 float(active_sl), float(active_rr),
-                                float(m15[-1]["close"]), now_ts()
+                                float(m15[-1]["close"]), now_ts(),
+                                planned_target=active["planned_target"]
                             )
                         except Exception as live_exc:
                             print(
@@ -2129,16 +2147,20 @@ def _live_refresh_impl():
                                 f"reason=STOP_DISTANCE_OR_SL_INVALID sl={sl} entry={entry['price']}",
                                 flush=True,
                             )
-                        if plan is not None and plan["rr"] < MIN_SETUP_RR:
+                        # PAPER/history uses its candle-open RR. LIVE rechecks
+                        # RR against the executable MEXC market quote inside maybe_open().
+                        live_rr_check = symbol in LIVE_EXECUTORS
+                        if plan is not None and plan["rr"] < MIN_SETUP_RR and not live_rr_check:
                             print(
                                 f"LIVE_ANALYSIS symbol={symbol} result=REJECT "
                                 f"reason=RR_BELOW_MIN rr={plan['rr']} min_rr={MIN_SETUP_RR}",
                                 flush=True,
                             )
-                        if plan is not None and plan["rr"] >= MIN_SETUP_RR:
+                        if plan is not None and (plan["rr"] >= MIN_SETUP_RR or live_rr_check):
                             print(
-                                f"LIVE_ANALYSIS symbol={symbol} event=PLAN_ACCEPTED "
-                                f"rr={plan['rr']} sl={sl} target={plan['target']}",
+                                f"LIVE_ANALYSIS symbol={symbol} event=PLAN_READY "
+                                f"rr_reference={plan['rr']} sl={sl} target={plan['target']} "
+                                f"rr_validation={'LIVE_MARKET' if live_rr_check else 'CANDLE_OPEN'}",
                                 flush=True,
                             )
                             if duplicate:
@@ -2175,7 +2197,8 @@ def _live_refresh_impl():
                                     )
                                     opened = LIVE_EXECUTORS[symbol].maybe_open(
                                         setup, entry, sl, plan["rr"],
-                                        float(m15[-1]["close"]), now_ts()
+                                        float(m15[-1]["close"]), now_ts(),
+                                        planned_target=plan["target"]
                                     )
                                     print(
                                         f"MEXC_LIVE ENTRY_RESULT symbol={symbol} "
