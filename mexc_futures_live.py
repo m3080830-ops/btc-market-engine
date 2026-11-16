@@ -358,6 +358,9 @@ class MexcFuturesLive:
             and bool(self.secret_key)
         )
         self._last_entry_attempt = {}
+        # Read-only exchange metadata is cached briefly; live account state,
+        # quotes, positions and order outcomes are never cached.
+        self._metadata_cache = {}
         self._init_db()
 
     def _conn(self):
@@ -454,6 +457,7 @@ class MexcFuturesLive:
         )
 
     def _request(self, method, path, params=None):
+        request_started = time.perf_counter()
         if not self.access_key or not self.secret_key:
             raise MexcLiveError("MEXC API keys are not configured")
         params = params or {}
@@ -569,6 +573,12 @@ class MexcFuturesLive:
                 rejected=isinstance(payload, dict),
                 code=(payload.get("code") if isinstance(payload, dict) else None),
             )
+        elapsed_ms = int((time.perf_counter() - request_started) * 1000)
+        if elapsed_ms >= 750:
+            self._log(
+                "API_SLOW_REQUEST", method=method, endpoint=path,
+                elapsed_ms=elapsed_ms,
+            )
         return payload.get("data")
 
     def _invalid_json_detail(self, method, path, status, content_type, raw):
@@ -678,7 +688,20 @@ class MexcFuturesLive:
             raise MexcLiveError("MEXC LIVE adapter is not enabled")
         return self._usdt_available()
 
+    def _cached_metadata(self, key, ttl_seconds, loader):
+        now = time.monotonic()
+        cached = self._metadata_cache.get(key)
+        if cached and now - cached[0] < ttl_seconds:
+            return cached[1]
+        value = loader()
+        self._metadata_cache[key] = (now, value)
+        self._log("METADATA_CACHE_REFRESH", key=key, ttl_seconds=ttl_seconds)
+        return value
+
     def _fee_info(self):
+        return self._cached_metadata("fee_info", 60, self._fetch_fee_info)
+
+    def _fetch_fee_info(self):
         data = self._request(
             "GET", "/api/v1/private/account/tiered_fee_rate/v2",
             {"symbol": self.symbol}
@@ -695,6 +718,9 @@ class MexcFuturesLive:
         return data
 
     def _risk_limits(self):
+        return self._cached_metadata("risk_limits", 60, self._fetch_risk_limits)
+
+    def _fetch_risk_limits(self):
         data = self._request(
             "GET", "/api/v1/private/account/risk_limit", {"symbol": self.symbol}
         )
@@ -753,6 +779,9 @@ class MexcFuturesLive:
         return verified
 
     def _contract(self):
+        return self._cached_metadata("contract", 300, self._fetch_contract)
+
+    def _fetch_contract(self):
         data = self._request("GET", "/api/v1/contract/detail", {"symbol": self.symbol})
         if isinstance(data, list):
             data = next((x for x in data if x.get("symbol") == self.symbol), None)
@@ -1032,7 +1061,10 @@ class MexcFuturesLive:
             )
 
             # MEXC change_leverage is documented for a symbol/side before entry.
-            self._set_leverage(position_type, sizing["leverage"])
+            # Leverage is read live above. Avoid a redundant write + verification
+            # round-trip when the account already has the exact required value.
+            if int(leverage_info["leverage"]) != int(sizing["leverage"]):
+                self._set_leverage(position_type, sizing["leverage"])
 
             external_oid = f"BTCM{self.symbol.replace('_', '')}{setup_time}"
             created_at = int(time.time())
@@ -1060,6 +1092,7 @@ class MexcFuturesLive:
                 stop_loss_price=self._format_price(sl, meta, direction),
                 symbol=self.symbol,
             )
+            order_submit_started = time.perf_counter()
             try:
                 data = self._request("POST", "/api/v1/private/order/create", payload)
             except MexcLiveError as exc:
@@ -1096,6 +1129,7 @@ class MexcFuturesLive:
                 leverage=sizing["leverage"],
                 margin_est_usdt=round(sizing["estimated_initial_margin_usdt"], 4),
                 reserve_est_usdt=round(sizing["reserve_after_entry_usdt"], 4),
+                order_submit_ms=int((time.perf_counter() - order_submit_started) * 1000),
             )
             self.sync_positions()
             return True
