@@ -51,6 +51,40 @@ class MultiSymbolLiveTests(unittest.TestCase):
             now,
         )
 
+    def test_open_position_stop_update_uses_position_stop_plan_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self._adapter(os.path.join(tmp, "eth-live.sqlite3"))
+            now = int(time.time())
+            with adapter._conn() as conn:
+                conn.execute(
+                    """INSERT INTO mexc_live_trades
+                       (setup_time,symbol,direction,status,external_oid,position_id,
+                        stop_order_id,entry_price,entry_time,initial_sl,current_sl,
+                        max_r,min_r,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (now, "ETH_USDT", "LONG", "OPEN", "test-stop-update",
+                     "12345", "777", 100.0, now - 600, 90.0, 99.0,
+                     1.0, 0.0, now, now),
+                )
+            active_stop = {
+                "id": 777, "orderId": 888, "positionId": 12345,
+                "state": 1, "stopLossPrice": 99.0,
+            }
+            confirmed_stop = dict(active_stop, stopLossPrice=98.0)
+            with patch.object(adapter, "_contract", return_value={"priceUnit": 0.1}), \
+                 patch.object(adapter, "_format_price", return_value=98.0), \
+                 patch.object(adapter, "_validate_stop_side"), \
+                 patch.object(adapter, "_positions", return_value=[{"positionId": 12345}]), \
+                 patch.object(adapter, "_stop_orders", return_value=[active_stop]), \
+                 patch.object(adapter, "_request", return_value={"success": True}) as request, \
+                 patch.object(adapter, "_confirm_stop_order", return_value=confirmed_stop):
+                self.assertTrue(adapter.update_stop(now, "LONG", 98.0))
+            request.assert_called_once_with(
+                "POST", "/api/v1/private/stoporder/change_plan_price",
+                {"stopPlanOrderId": 777, "stopLossPrice": 98.0},
+            )
+            self.assertEqual(adapter.open_trades()[0]["current_sl"], 98.0)
+
     def test_rewind_trailing_history_resets_only_replay_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = self._adapter(os.path.join(tmp, "eth-live.sqlite3"))
