@@ -1633,55 +1633,34 @@ class MexcFuturesLive:
                 )
                 raise MexcLiveError("No active MEXC SL order to modify")
 
-            # Position-bound TP/SL orders have orderId=0. Modify the existing
-            # trigger order by its stop-order ID; do NOT cancel it before a
-            # replacement is confirmed, otherwise a rejected replacement leaves
-            # the live position unprotected.
-            if int(stop.get("orderId", 0) or 0) == 0:
-                stop_plan_id = stop.get("id", stop.get("stopOrderId"))
-                if stop_plan_id is None:
-                    raise MexcLiveError("MEXC position TP/SL has no stop-plan ID")
-                changed = self._request(
-                    "POST", "/api/v1/private/stoporder/change_plan_price",
-                    {
-                        "stopPlanOrderId": int(stop_plan_id),
-                        "stopLossPrice": candidate,
-                    },
+            # The stop has been resolved by its live positionId above. For an
+            # already-open position, MEXC requires the stop-plan identifier
+            # (stoporder row id), not the parent entry orderId. A MARKET entry's
+            # filled orderId can be nonzero/stale; change_price then returns 5002
+            # ("Stop-limit order is nonexistent or closed"). Modify the active
+            # position-bound trigger by its own id and confirm it before storing.
+            stop_plan_id = stop.get("id", stop.get("stopOrderId"))
+            if stop_plan_id is None:
+                raise MexcLiveError("MEXC position TP/SL has no stop-plan ID")
+            changed = self._request(
+                "POST", "/api/v1/private/stoporder/change_plan_price",
+                {
+                    "stopPlanOrderId": int(stop_plan_id),
+                    "stopLossPrice": candidate,
+                },
+            )
+            if isinstance(changed, dict) and changed.get("success") is False:
+                raise MexcLiveError(
+                    f"MEXC rejected position stop-plan update: {changed}"
                 )
-                if isinstance(changed, dict) and changed.get("success") is False:
-                    raise MexcLiveError(
-                        f"MEXC rejected position stop-plan update: {changed}"
-                    )
-                confirmed = self._confirm_stop_order(
-                    position_id, candidate, meta=meta, attempts=8,
+            confirmed = self._confirm_stop_order(
+                position_id, candidate, meta=meta, attempts=8,
+            )
+            if confirmed is None:
+                raise MexcLiveError(
+                    "MEXC did not confirm the modified position SL; "
+                    "the previous stop was not canceled by this operation"
                 )
-                if confirmed is None:
-                    raise MexcLiveError(
-                        "MEXC did not confirm the modified position SL; "
-                        "the previous stop was not canceled by this operation"
-                    )
-            else:
-                # TP/SL attached to a LIMIT entry is changed by its parent order ID.
-                parent_order_id = int(stop.get("orderId", 0) or 0)
-                changed = self._request(
-                    "POST", "/api/v1/private/stoporder/change_price",
-                    {
-                        "orderId": parent_order_id,
-                        "lossTrend": 1,
-                        "stopLossPrice": candidate,
-                    },
-                )
-                if isinstance(changed, dict) and changed.get("success") is False:
-                    raise MexcLiveError(
-                        f"MEXC rejected limit-order TP/SL update: {changed}"
-                    )
-                confirmed = self._confirm_stop_order(
-                    position_id, candidate, meta=meta, attempts=8,
-                )
-                if confirmed is None:
-                    raise MexcLiveError(
-                        "MEXC did not confirm the updated SL; local SL remains unchanged"
-                    )
             confirmed_id = str(confirmed["id"])
             confirmed_price = float(confirmed["stopLossPrice"])
 
