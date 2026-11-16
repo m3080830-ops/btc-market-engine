@@ -51,6 +51,30 @@ class MultiSymbolLiveTests(unittest.TestCase):
             now,
         )
 
+    def test_rewind_trailing_history_resets_only_replay_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self._adapter(os.path.join(tmp, "eth-live.sqlite3"))
+            now = int(time.time())
+            with adapter._conn() as conn:
+                conn.execute(
+                    """INSERT INTO mexc_live_trades
+                       (setup_time,symbol,direction,status,external_oid,position_id,
+                        entry_price,entry_time,initial_sl,current_sl,max_r,min_r,trail_r,
+                        last_m1_candle,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (now, "ETH_USDT", "LONG", "OPEN", "test-trail-replay",
+                     "12345", 3000.0, now - 7200, 2980.0, 2990.0,
+                     0.8, -0.2, 0.4, now - 60, now, now),
+                )
+            adapter.rewind_trailing_history(now)
+            trade = adapter.open_trades()[0]
+            self.assertEqual(trade["current_sl"], 2990.0)
+            self.assertEqual(trade["initial_sl"], 2980.0)
+            self.assertEqual(trade["max_r"], 0.0)
+            self.assertEqual(trade["min_r"], 0.0)
+            self.assertIsNone(trade["trail_r"])
+            self.assertIsNone(trade["last_m1_candle"])
+
     def test_eth_adapter_blocks_below_half_percent_before_exchange_calls(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = self._adapter(os.path.join(tmp, "eth-live.sqlite3"))
