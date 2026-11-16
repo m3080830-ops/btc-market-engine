@@ -53,12 +53,20 @@ class VariantCTests(unittest.TestCase):
             for t in (100, 200, 300, 400, 500, 600)
         ]
 
-        def only_previous_candle_triggers(candle, prev, direction):
-            return {"ok": direction == "SHORT" and candle["time"] == 500, "signals": []}
+        def previous_triggers_but_latest_is_opposed(candle, prev, direction):
+            # The previous candle has a same-direction PA trigger, while the
+            # newest candle has a clear opposing PA signal and must veto entry.
+            return {
+                "ok": (
+                    (direction == "SHORT" and candle["time"] == 500)
+                    or (direction == "LONG" and candle["time"] == 600)
+                ),
+                "signals": [],
+            }
 
         with patch.object(strategy, "_ema_state", return_value=(
             [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6
-        )), patch.object(strategy, "price_action", side_effect=only_previous_candle_triggers):
+        )), patch.object(strategy, "price_action", side_effect=previous_triggers_but_latest_is_opposed):
             trigger = strategy._m15_trigger(rows, "SHORT", 50, max_bars=4)
         self.assertIsNone(trigger)
 
