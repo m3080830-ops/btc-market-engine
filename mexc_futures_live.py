@@ -1707,6 +1707,26 @@ class MexcFuturesLive:
             )
             raise
 
+    def rewind_trailing_history(self, setup_time):
+        """Reset only the M1 replay cursor/metrics before a complete one-time backfill."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT status FROM mexc_live_trades
+                   WHERE setup_time=? AND symbol=?""",
+                (int(setup_time), self.symbol),
+            ).fetchone()
+        if row is None or row["status"] != "OPEN":
+            raise MexcLiveError("Cannot rebuild trailing history for a non-OPEN position")
+        self._store(
+            int(setup_time), max_r=0.0, min_r=0.0,
+            trail_r=None, last_m1_candle=None,
+        )
+        self._log(
+            "TRAIL_HISTORY_REPLAY_RESET",
+            symbol=self.symbol, setup_time=int(setup_time),
+            reason="M1_BACKFILL_COVERS_EXCHANGE_ENTRY",
+        )
+
     def update_metrics(self, setup_time, **fields):
         self._store(int(setup_time), **fields)
 
