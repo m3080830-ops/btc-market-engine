@@ -913,6 +913,7 @@ class MexcFuturesLive:
         if not math.isfinite(entry_price) or not math.isfinite(initial_sl) or entry_price <= 0:
             return False
         setup_time = int(setup.get("signal_time", 0) or 0)
+        entry_started = time.monotonic()
         try:
             entry_time = int(entry["time"])
             now = int(now_ts)
@@ -1106,6 +1107,7 @@ class MexcFuturesLive:
                     "ENTRY_FAILED", setup_time=setup_time,
                     error=type(exc).__name__, detail=str(exc)[:220],
                     outcome="REJECTED" if exc.rejected else "UNKNOWN",
+                    order_submit_ms=int((time.monotonic() - order_submit_started) * 1000),
                 )
                 return False
 
@@ -1129,6 +1131,7 @@ class MexcFuturesLive:
                 leverage=sizing["leverage"],
                 margin_est_usdt=round(sizing["estimated_initial_margin_usdt"], 4),
                 reserve_est_usdt=round(sizing["reserve_after_entry_usdt"], 4),
+                entry_pre_submit_ms=int((order_submit_started - entry_started) * 1000),
                 order_submit_ms=int((time.perf_counter() - order_submit_started) * 1000),
             )
             self.sync_positions()
@@ -1139,6 +1142,7 @@ class MexcFuturesLive:
                 setup_time=setup_time,
                 error=type(exc).__name__,
                 detail=str(exc)[:180],
+                elapsed_ms=int((time.monotonic() - entry_started) * 1000),
             )
             return False
 
