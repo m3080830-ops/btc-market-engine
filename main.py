@@ -2314,8 +2314,26 @@ def _live_refresh_impl():
 
 def live_refresh():
     """Serialize REST refreshes shared by the 30s manager and M15 WebSocket."""
-    with LIVE_REFRESH_LOCK:
+    waiting_since = time.monotonic()
+    LIVE_REFRESH_LOCK.acquire()
+    lock_wait_ms = int((time.monotonic() - waiting_since) * 1000)
+    refresh_started = time.monotonic()
+    try:
+        if lock_wait_ms >= 500:
+            print(
+                f"LIVE_REFRESH lock_wait_ms={lock_wait_ms}",
+                flush=True,
+            )
         return _live_refresh_impl()
+    finally:
+        elapsed_ms = int((time.monotonic() - refresh_started) * 1000)
+        if elapsed_ms >= 1000:
+            print(
+                f"LIVE_REFRESH completed elapsed_ms={elapsed_ms} "
+                f"lock_wait_ms={lock_wait_ms}",
+                flush=True,
+            )
+        LIVE_REFRESH_LOCK.release()
 
 
 def mexc_m15_websocket_loop():
