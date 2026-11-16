@@ -62,8 +62,8 @@ class MultiSymbolLiveTests(unittest.TestCase):
                         stop_order_id,entry_price,entry_time,initial_sl,current_sl,
                         max_r,min_r,created_at,updated_at)
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (now, "ETH_USDT", "LONG", "OPEN", "test-stop-update",
-                     "12345", "777", 100.0, now - 600, 90.0, 99.0,
+                    (now, "ETH_USDT", "SHORT", "OPEN", "test-stop-update",
+                     "12345", "777", 100.0, now - 600, 110.0, 99.0,
                      1.0, 0.0, now, now),
                 )
             active_stop = {
@@ -78,7 +78,7 @@ class MultiSymbolLiveTests(unittest.TestCase):
                  patch.object(adapter, "_stop_orders", return_value=[active_stop]), \
                  patch.object(adapter, "_request", return_value={"success": True}) as request, \
                  patch.object(adapter, "_confirm_stop_order", return_value=confirmed_stop):
-                self.assertTrue(adapter.update_stop(now, "LONG", 98.0))
+                self.assertTrue(adapter.update_stop(now, "SHORT", 98.0))
             request.assert_called_once_with(
                 "POST", "/api/v1/private/stoporder/change_plan_price",
                 {"stopPlanOrderId": 777, "stopLossPrice": 98.0},
