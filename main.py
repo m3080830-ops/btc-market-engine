@@ -30,6 +30,9 @@ else:
 LIVE_EXECUTORS = {}
 LIVE_REFRESH_LOCK = threading.Lock()
 M15_WS_LAST_CANDLE = {}
+# One-time per position: deep M1 recovery when the position predates the
+# normal 2,000-candle window and its recorded max-R never reached protection.
+M1_TRAIL_BACKFILL_DONE = set()
 
 
 # ============================================================
@@ -2043,6 +2046,54 @@ def _live_refresh_impl():
             d1 = get_klines(symbol, "Day1", D1_HISTORY)
             m15 = get_klines(symbol, "Min15", 500)
             m1 = get_klines(symbol, "Min1", 2000)
+
+            # The normal M1 window is ~33 hours. If an exchange position is
+            # older than that and its stored max-R is still below +0.5R, the
+            # original activation move may have fallen outside the fetched
+            # window. Recover M1 candles from the actual exchange entry once,
+            # replay them through the unchanged protection/trailing rules.
+            live_executor = LIVE_EXECUTORS.get(symbol)
+            if live_executor is not None and m1:
+                oldest_m1 = int(m1[0]["time"])
+                for trade in live_executor.open_trades():
+                    entry_ts = int(trade.get("entry_time") or 0)
+                    position_id = str(trade.get("position_id") or "")
+                    backfill_key = (symbol, position_id or str(trade.get("setup_time")))
+                    max_r_seen = float(trade.get("max_r") or 0.0)
+                    if (
+                        trade.get("status") == "OPEN"
+                        and entry_ts > 0
+                        and entry_ts < oldest_m1
+                        and max_r_seen < SL_PROTECT_ACTIVATION_R
+                        and backfill_key not in M1_TRAIL_BACKFILL_DONE
+                    ):
+                        required = min(
+                            M1_HISTORY,
+                            max(2000, ((now_ts() - entry_ts) // 60) + 5),
+                        )
+                        recovered_m1 = get_klines(symbol, "Min1", required)
+                        if recovered_m1 and int(recovered_m1[0]["time"]) <= entry_ts:
+                            live_executor.rewind_trailing_history(int(trade["setup_time"]))
+                            m1 = recovered_m1
+                            M1_TRAIL_BACKFILL_DONE.add(backfill_key)
+                            live_executor._log(
+                                "TRAIL_M1_HISTORY_RECOVERED",
+                                symbol=symbol, position_id=position_id,
+                                entry_time=entry_ts, candles=len(m1),
+                                first_candle=m1[0]["time"], last_candle=m1[-1]["time"],
+                                previous_max_r=round(max_r_seen, 5),
+                            )
+                        else:
+                            M1_TRAIL_BACKFILL_DONE.add(backfill_key)
+                            live_executor._log(
+                                "TRAIL_M1_HISTORY_INCOMPLETE",
+                                symbol=symbol, position_id=position_id,
+                                entry_time=entry_ts,
+                                first_available=(recovered_m1[0]["time"] if recovered_m1 else "none"),
+                                candles=len(recovered_m1 or []),
+                                max_supported_candles=M1_HISTORY,
+                            )
+                        break
 
             if not h4 or not h1 or not m15 or not m1:
                 print(
