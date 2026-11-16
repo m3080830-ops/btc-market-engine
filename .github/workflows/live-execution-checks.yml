@@ -1,0 +1,20 @@
+name: Live execution safety checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, optimize-live-entry-latency]
+
+jobs:
+  python-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile Python modules
+        run: python -m compileall -q main.py mexc_futures_live.py strategy.py
+      - name: Run focused live adapter tests
+        run: python -m unittest discover -s tests -v
