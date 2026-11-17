@@ -86,5 +86,7 @@
 ## Current status
 
 - Batch 0 workspace created on `multi-account-foundation`.
-- No application code changed.
+- Batch 1 added `tests/test_strategy_contract.py` with 8 compatibility checks for next-candle entry selection, existing target/RR calculations, structural SL calculation, trend-before-range selection, and Variant C veto behavior.
+- GitHub Actions Safe code checks run #139 is executing on the feature branch. Syntax/import, full offline unittest discovery, public BTC/ETH Futures connectivity, and optional authenticated read-only connectivity steps have reported success; final job completion is still pending.
+- No runtime application code changed.
 - No production branch, Cloud Run service, credentials, database, or live positions changed.
