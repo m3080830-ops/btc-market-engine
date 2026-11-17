@@ -344,18 +344,39 @@ def build_market_open_payload(*, direction, volume, leverage, position_mode, ext
 
 
 class MexcFuturesLive:
-    def __init__(self, db_file, symbol=SYMBOL):
+    def __init__(self, db_file, symbol=SYMBOL, *, account_context=None, enabled=None):
         self.symbol = str(symbol).upper()
         if self.symbol not in SUPPORTED_SYMBOLS:
             raise MexcLiveError("Unsupported MEXC Futures symbol")
         self.db_file = db_file
-        self.access_key = os.getenv("MEXC_ACCESS_KEY", "").strip()
-        self.secret_key = os.getenv("MEXC_SECRET_KEY", "").strip()
+
+        if account_context is None:
+            if enabled is not None:
+                raise MexcLiveError(
+                    "Explicit enabled flag requires an account execution context"
+                )
+            # Backward-compatible single-account path: retain existing ENV behavior.
+            self.access_key = os.getenv("MEXC_ACCESS_KEY", "").strip()
+            self.secret_key = os.getenv("MEXC_SECRET_KEY", "").strip()
+            trading_enabled = (
+                os.getenv("MEXC_LIVE_TRADING_ENABLED", "false").strip().lower()
+                in ("1", "true", "yes", "on")
+            )
+        else:
+            # Multi-account path: credentials are injected for this exact account.
+            if (
+                getattr(account_context, "symbol", None) != self.symbol
+                or not getattr(account_context, "account_id", None)
+                or not getattr(account_context, "access_key", None)
+                or not getattr(account_context, "secret_key", None)
+            ):
+                raise MexcLiveError("Invalid account execution context for symbol")
+            self.access_key = str(account_context.access_key).strip()
+            self.secret_key = str(account_context.secret_key).strip()
+            trading_enabled = enabled is True
+
         self.enabled = (
-            os.getenv("MEXC_LIVE_TRADING_ENABLED", "false").strip().lower()
-            in ("1", "true", "yes", "on")
-            and bool(self.access_key)
-            and bool(self.secret_key)
+            trading_enabled and bool(self.access_key) and bool(self.secret_key)
         )
         self._last_entry_attempt = {}
         # Read-only exchange metadata is cached briefly; live account state,
