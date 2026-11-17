@@ -88,6 +88,7 @@
 - Batch 0 workspace created on `multi-account-foundation`.
 - Batch 1 added `tests/test_strategy_contract.py` with 8 compatibility checks for next-candle entry selection, existing target/RR calculations, structural SL calculation, trend-before-range selection, and Variant C veto behavior. GitHub Actions run #139 completed successfully.
 - Batch 2 added the isolated account/symbol context and executor registry in `account_execution.py`, plus 8 tests in `tests/test_account_execution.py`. These primitives are standalone and not connected to live execution.
-- A new GitHub Actions run has been triggered for the account-scope tests; its result will be checked before further refactoring.
-- No production runtime path, strategy, adapter, database, Cloud Run service, credentials, or live positions changed.
+- GitHub Actions run for the account-scope tests completed successfully.
+- The MEXC adapter now supports explicit per-account credential context on the feature branch; the legacy ENV path remains unchanged. The new path is not wired into main.py and does not isolate SQLite persistence.
+- No production runtime path, strategy, database, Cloud Run service, credentials, or live positions changed.
 - No production branch, Cloud Run service, credentials, database, or live positions changed.
