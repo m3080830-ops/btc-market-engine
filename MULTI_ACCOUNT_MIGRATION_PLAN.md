@@ -42,11 +42,11 @@
 - Test-only changes; no runtime behavior changes.
 
 ### Batch 2 — Account-aware execution boundary
-- Introduce an explicit account configuration/context passed into the adapter instead of reading a single global credential pair.
-- Preserve the existing single-account constructor path through a compatibility adapter during transition.
-- Scope executor identity and idempotency by account and symbol.
-- Add fake-exchange tests proving credentials and order/SL operations cannot cross account boundaries.
-- No production wiring or live customer credentials.
+- [x] Add a standalone `account_execution.py` module with validated `ExecutionScope(account_id, symbol)`, immutable runtime-only `AccountExecutionContext`, and a thread-safe exact-scope `AccountExecutorRegistry`.
+- [x] Add 8 offline tests for account/symbol separation, unsupported symbols, missing credentials, safe credential repr, no cross-account fallback, duplicate registration, and exact-scope removal.
+- [ ] Next: add a compatibility wrapper around the existing MEXC adapter, with explicit credential injection and no changes to sizing, order payloads, entry timing, SL, or trailing calculations.
+- [ ] Add fake-exchange tests proving account-specific order/SL operations cannot cross account boundaries.
+- This first slice is not wired into `main.py`; no production wiring or live customer credentials.
 
 ### Batch 3 — Persistence isolation
 - Introduce tenant-aware repository interfaces and a migration plan to PostgreSQL.
@@ -86,7 +86,8 @@
 ## Current status
 
 - Batch 0 workspace created on `multi-account-foundation`.
-- Batch 1 added `tests/test_strategy_contract.py` with 8 compatibility checks for next-candle entry selection, existing target/RR calculations, structural SL calculation, trend-before-range selection, and Variant C veto behavior.
-- GitHub Actions Safe code checks run #139 is executing on the feature branch. Syntax/import, full offline unittest discovery, public BTC/ETH Futures connectivity, and optional authenticated read-only connectivity steps have reported success; final job completion is still pending.
-- No runtime application code changed.
+- Batch 1 added `tests/test_strategy_contract.py` with 8 compatibility checks for next-candle entry selection, existing target/RR calculations, structural SL calculation, trend-before-range selection, and Variant C veto behavior. GitHub Actions run #139 completed successfully.
+- Batch 2 added the isolated account/symbol context and executor registry in `account_execution.py`, plus 8 tests in `tests/test_account_execution.py`. These primitives are standalone and not connected to live execution.
+- A new GitHub Actions run has been triggered for the account-scope tests; its result will be checked before further refactoring.
+- No production runtime path, strategy, adapter, database, Cloud Run service, credentials, or live positions changed.
 - No production branch, Cloud Run service, credentials, database, or live positions changed.
