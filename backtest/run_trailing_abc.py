@@ -33,7 +33,7 @@ def confirmed_m15_swings(rows):
 def simulate(m1,m15,setup,entry,sl,variant):
     activation=main.TRAIL_ACTIVATION_R; swing_fn=main.confirmed_m1_swings
     try:
-        main.TRAIL_ACTIVATION_R=1.0 if variant=="B_start_1R" else 0.7
+        main.TRAIL_ACTIVATION_R={"A_current":0.7,"B_start_0_8R":0.8,"C_start_0_6R":0.6}[variant]
         main.confirmed_m1_swings=(lambda _rows: confirmed_m15_swings(m15)) if variant=="C_M15_swings" else swing_fn
         return main.simulate_position(m1,m15,setup,entry,sl)
     finally:
@@ -44,7 +44,7 @@ def run_symbol(symbol):
     m15=load(symbol,"Min15"); m1=load(symbol,"Min1")
     setups=[s for s in strategy.find_historical_setups(h4,h1,m15,d1) if START <= int(s["signal_time"]) < END]
     summaries=[]; all_trades=[]
-    for variant in ("A_current","B_start_1R","C_M15_swings"):
+    for variant in ("A_current","B_start_0_8R","C_start_0_6R"):
         trades=[]; rejected={"no_entry":0,"no_sl":0,"minimum_stop":0,"rr_below_1":0,"overlap":0,"no_m1_coverage":0,"simulation_invalid":0}
         active_until=None
         for setup in setups:
@@ -97,7 +97,7 @@ def main_run():
             w=csv.DictWriter(f,fieldnames=list(trades[0])); w.writeheader(); w.writerows(trades)
     with (OUT/"REPORT.md").open("w",encoding="utf-8") as f:
         f.write("# Trailing A/B/C comparison — offline only\n\n")
-        f.write("Start: 2026-10-16 00:00 UTC. Requested exclusive end: 2026-11-08 00:00 UTC (2026-11-07 inclusive). A=current M1 swing trailing from +0.7R. B=M1 swing trailing from +1.0R. C=M15 swing trailing from +0.7R. All keep the +0.5R protection locking -0.5R, entry, initial SL, TP and setup filters unchanged. M15 swings use two bars left/right and become available only after the two right bars close. Fees: taker/taker 0.08% per side. Public-candle offline simulation, not exchange fills.\n\n")
+        f.write("Start: 2026-10-16 00:00 UTC. Requested exclusive end: 2026-11-08 00:00 UTC (2026-11-07 inclusive). A=current M1 swing trailing from +0.7R. B=M1 swing trailing from +0.8R. C=M1 swing trailing from +0.6R. All keep the +0.5R protection locking -0.5R, entry, initial SL, TP and setup filters unchanged. M15 swings use two bars left/right and become available only after the two right bars close. Fees: taker/taker 0.08% per side. Public-candle offline simulation, not exchange fills.\n\n")
         f.write("| Instrument | Variant | Closed | Wins | Losses | Win rate | Gross R | Fees T/T | Net T/T | Net M/T | Net M/M | PF | Max DD | Open | Rejected |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
         for x in summaries:
             pf=f"{x['profit_factor']:.2f}" if x["profit_factor"] is not None else "—"
