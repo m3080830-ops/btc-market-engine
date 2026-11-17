@@ -914,6 +914,15 @@ class MexcFuturesLive:
             return False
         setup_time = int(setup.get("signal_time", 0) or 0)
         entry_started = time.monotonic()
+        stage_ms = {}
+
+        def timed_stage(name, operation):
+            started = time.perf_counter()
+            try:
+                return operation()
+            finally:
+                stage_ms[name] = int((time.perf_counter() - started) * 1000)
+
         try:
             entry_time = int(entry["time"])
             now = int(now_ts)
@@ -964,24 +973,25 @@ class MexcFuturesLive:
                     )
                     return False
 
-            if self._positions():
+            positions = timed_stage("exchange_positions_read", self._positions)
+            if positions:
                 self._log(
                     "ENTRY_SKIPPED", setup_time=setup_time,
                     reason=f"{self.symbol}_position_already_exists"
                 )
                 return False
 
-            mode = self._position_mode()
+            mode = timed_stage("position_mode_read", self._position_mode)
             if mode != 1:
                 raise MexcLiveError(f"{self.symbol} Futures account is not in the verified Hedge Mode")
 
-            available = self._usdt_available()
+            available = timed_stage("available_balance_read", self._usdt_available)
             if available <= 0:
                 raise MexcLiveError("No available USDT in Futures account")
 
             # Use the current executable side of the order book, not the previous
             # M15 candle close, for entry price and stop distance.
-            price = self._market_price(direction)
+            price = timed_stage("executable_market_price_read", lambda: self._market_price(direction))
             sl = float(initial_sl)
             if not math.isfinite(sl) or sl <= 0:
                 raise MexcLiveError("Initial stop price is invalid")
@@ -1022,10 +1032,10 @@ class MexcFuturesLive:
                 self._log("ENTRY_SKIPPED", reason="short_stop_not_above_live_bid", setup_time=setup_time)
                 return False
 
-            meta = self._contract()
-            fees = self._fee_info()
-            leverage_info = self._leverage_info(position_type)
-            risk_limits = self._risk_limits()
+            meta = timed_stage("contract_metadata", self._contract)
+            fees = timed_stage("fee_metadata", self._fee_info)
+            leverage_info = timed_stage("leverage_read", lambda: self._leverage_info(position_type))
+            risk_limits = timed_stage("risk_limits_read", self._risk_limits)
             matching_limits = [
                 row for row in risk_limits
                 if int(row.get("positionType", 0)) == position_type
@@ -1038,7 +1048,7 @@ class MexcFuturesLive:
             if contract_max_vol <= 0:
                 contract_max_vol = max(float(row.get("maxVol", 0) or 0) for row in matching_limits)
 
-            sizing = calculate_position_sizing(
+            sizing = timed_stage("position_sizing", lambda: calculate_position_sizing(
                 entry_price=price,
                 stop_price=sl,
                 available_balance=available,
@@ -1059,13 +1069,15 @@ class MexcFuturesLive:
                 risk_limit_rows=matching_limits,
                 position_type=position_type,
                 open_type=1,
-            )
+            ))
 
             # MEXC change_leverage is documented for a symbol/side before entry.
             # Leverage is read live above. Avoid a redundant write + verification
             # round-trip when the account already has the exact required value.
             if int(leverage_info["leverage"]) != int(sizing["leverage"]):
-                self._set_leverage(position_type, sizing["leverage"])
+                timed_stage("leverage_update", lambda: self._set_leverage(position_type, sizing["leverage"]))
+            else:
+                stage_ms["leverage_update"] = 0
 
             external_oid = f"BTCM{self.symbol.replace('_', '')}{setup_time}"
             created_at = int(time.time())
@@ -1133,6 +1145,7 @@ class MexcFuturesLive:
                 reserve_est_usdt=round(sizing["reserve_after_entry_usdt"], 4),
                 entry_pre_submit_ms=int((order_submit_started - entry_started) * 1000),
                 order_submit_ms=int((time.perf_counter() - order_submit_started) * 1000),
+                entry_stages_ms=stage_ms,
             )
             self.sync_positions()
             return True
@@ -1143,6 +1156,7 @@ class MexcFuturesLive:
                 error=type(exc).__name__,
                 detail=str(exc)[:180],
                 elapsed_ms=int((time.monotonic() - entry_started) * 1000),
+                entry_stages_ms=stage_ms,
             )
             return False
 
