@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   compare:
@@ -25,8 +26,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Download public MEXC Futures candles
-        run: python backtest/download_mexc_klines.py
+      - name: Reuse verified MEXC candles from successful run #3
+        uses: actions/download-artifact@v4
+        with:
+          name: mexc-trailing-abc-43420155982
+          path: data/mexc
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: m3080830-ops/btc-market-engine
+          run-id: 43420155982
       - name: Validate dataset
         run: python backtest/validate_dataset.py
       - name: Run trailing A-B-C comparison (offline only)
