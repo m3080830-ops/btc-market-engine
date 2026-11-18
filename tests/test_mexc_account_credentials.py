@@ -1,6 +1,8 @@
 import contextlib
 import io
 import os
+import sqlite3
+import tempfile
 import unittest
 from unittest import mock
 
@@ -61,6 +63,49 @@ class MexcAccountCredentialTests(unittest.TestCase):
             adapter = self.make_adapter(account_context=context, enabled=True)
         self.assertEqual(adapter.access_key, "account-key")
         self.assertEqual(adapter.secret_key, "account-secret")
+
+
+    def test_account_context_uses_separate_scoped_ledger_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy_path = os.path.join(tmp, "legacy.sqlite3")
+            root = os.path.join(tmp, "accounts")
+            context_a = AccountExecutionContext("account-a", "BTC_USDT", "key-a", "secret-a")
+            context_b = AccountExecutionContext("account-b", "BTC_USDT", "key-b", "secret-b")
+            adapter_a = MexcFuturesLive(
+                legacy_path, account_context=context_a, enabled=False,
+                account_db_root=root,
+            )
+            adapter_b = MexcFuturesLive(
+                legacy_path, account_context=context_b, enabled=False,
+                account_db_root=root,
+            )
+
+            self.assertNotEqual(adapter_a.db_file, adapter_b.db_file)
+            self.assertFalse(os.path.exists(legacy_path))
+            self.assertEqual(adapter_a.account_repository.scope, context_a.scope)
+            self.assertEqual(adapter_b.account_repository.scope, context_b.scope)
+
+            for adapter, stop in ((adapter_a, 101.0), (adapter_b, 202.0)):
+                with adapter._conn() as conn:
+                    conn.execute(
+                        "INSERT INTO mexc_live_trades "
+                        "(setup_time,symbol,direction,status,external_oid,created_at,updated_at) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (12345, "BTC_USDT", "LONG", "OPEN",
+                         f"OID-{stop}", 1, 1),
+                    )
+                adapter._store(12345, current_sl=stop)
+
+            with adapter_a._conn() as conn:
+                value_a = conn.execute(
+                    "SELECT current_sl FROM mexc_live_trades WHERE setup_time=12345"
+                ).fetchone()[0]
+            with adapter_b._conn() as conn:
+                value_b = conn.execute(
+                    "SELECT current_sl FROM mexc_live_trades WHERE setup_time=12345"
+                ).fetchone()[0]
+            self.assertEqual(value_a, 101.0)
+            self.assertEqual(value_b, 202.0)
 
     def test_adapter_initialization_does_not_print_credentials(self):
         context = AccountExecutionContext(
