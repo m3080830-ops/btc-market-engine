@@ -90,9 +90,10 @@ def run_symbol(symbol):
                 if not main.passes_minimum_stop_distance(symbol,float(entry["price"]),float(sl)): rejected["min_stop"]+=1; continue
                 plan=strategy.planned_trade(h1,m15,s,entry["price"],sl)
                 if plan is None or plan["rr"] < main.MIN_SETUP_RR: rejected["rr"]+=1; continue
-                future_m1=[x for x in m1 if int(x["time"]) >= int(entry["time"])-60]
-                if not future_m1 or int(future_m1[0]["time"]) > int(entry["time"]): rejected["m1_coverage"]+=1; continue
-                sim=main.simulate_position(future_m1,m15,s,entry,sl)
+                if not m1 or int(m1[0]["time"]) > int(entry["time"]): rejected["m1_coverage"]+=1; continue
+                # Pass pre-entry M1 candles too: confirmed pivots need left-side context.
+                # The simulator itself starts processing at entry.time and only uses confirmed pivots.
+                sim=main.simulate_position(m1,m15,s,entry,sl)
                 if sim is None: rejected["simulation"]+=1; continue
                 is_closed=sim["exit_time"] is not None
                 last=[x for x in future_m1 if int(x["time"]) < END]
