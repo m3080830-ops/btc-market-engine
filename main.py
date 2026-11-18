@@ -81,12 +81,18 @@ PORT = int(
 # BASIC HELPERS
 # ============================================================
 
+BTC_MIN_STOP_DISTANCE_PCT = 0.004
 ETH_MIN_STOP_DISTANCE_PCT = 0.005
+MIN_STOP_DISTANCE_PCT_BY_SYMBOL = {
+    "BTC_USDT": BTC_MIN_STOP_DISTANCE_PCT,
+    "ETH_USDT": ETH_MIN_STOP_DISTANCE_PCT,
+}
 
 
 def passes_minimum_stop_distance(symbol, entry_price, stop_price):
-    """Apply the 0.5% initial Entry-to-SL minimum to ETH only."""
-    if symbol != "ETH_USDT":
+    """Apply the configured initial Entry-to-SL minimum to BTC and ETH."""
+    min_distance_pct = MIN_STOP_DISTANCE_PCT_BY_SYMBOL.get(symbol)
+    if min_distance_pct is None:
         return True
     try:
         entry = float(entry_price)
@@ -95,7 +101,7 @@ def passes_minimum_stop_distance(symbol, entry_price, stop_price):
         return False
     if entry <= 0:
         return False
-    return abs(entry - stop) >= entry * ETH_MIN_STOP_DISTANCE_PCT
+    return abs(entry - stop) >= entry * min_distance_pct
 
 
 def now_ts():
@@ -2188,9 +2194,9 @@ def _live_refresh_impl():
                             flush=True,
                         )
                         sl = choose_structural_sl(h1, m15, setup)
-                        # LIVE validates ETH's minimum stop distance against the
-                        # executable MEXC quote inside maybe_open(), not this
-                        # indicative next-candle open. PAPER keeps its old rule.
+                        # LIVE validates the per-symbol minimum stop distance against
+                        # the executable MEXC quote inside maybe_open(), not this
+                        # indicative next-candle open. PAPER keeps its candle-open check.
                         stop_ok = sl is not None and (
                             symbol in LIVE_EXECUTORS
                             or passes_minimum_stop_distance(symbol, entry["price"], sl)
