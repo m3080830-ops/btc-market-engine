@@ -2,6 +2,12 @@ name: MEXC M15 consolidation filter comparison
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "backtest/m15-consolidation-filter"
+    paths:
+      - "backtest/run_m15_consolidation.py"
+      - ".github/workflows/mexc-m15-consolidation.yml"
 
 permissions:
   contents: read
