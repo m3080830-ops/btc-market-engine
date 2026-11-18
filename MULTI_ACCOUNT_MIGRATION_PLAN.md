@@ -104,3 +104,15 @@
 - The MEXC adapter now supports explicit per-account credential context on the feature branch; the legacy ENV path remains unchanged. The new path is not wired into main.py and does not isolate SQLite persistence.
 - No production runtime path, strategy, database, Cloud Run service, credentials, or live positions changed.
 - No production branch, Cloud Run service, credentials, database, or live positions changed.
+
+
+### Batch 3 — Account-scoped MEXC ledger adapter bridge (initial slice)
+- [x] When an explicit `AccountExecutionContext` is supplied, resolve a deterministic SQLite ledger path for exactly that `(account_id, symbol)` scope.
+- [x] Bind the per-account ledger file to its scope using `AccountRepositoryFactory` / `repository_identity`; reject a mismatched scope.
+- [x] Keep the legacy ENV-only constructor and legacy DB path unchanged when no account context is supplied.
+- [x] Add an offline test that creates two account adapters for the same symbol, verifies different DB files, and proves equal setup timestamps / ledger updates remain isolated.
+- [ ] The adapter still uses its existing SQLite SQL schema and queries. This is a storage-isolation bridge, not yet a backend-neutral repository or PostgreSQL implementation.
+- [ ] Do not connect this account adapter to `main.py` until signal fanout, per-account dashboard projections, balance ownership, and account-scoped position management are implemented and tested.
+- [ ] The shared strategy and global PAPER/history tables remain unchanged; no live account context is constructed by the production engine.
+
+- GitHub Actions run #44292961980 passed on code commit `84202f003004395c82d2765d2544eb5d11006eb2`; syntax/imports, offline safeguards, full unittest discovery, and read-only MEXC checks completed successfully.
