@@ -1,0 +1,47 @@
+name: MEXC M15 consolidation filter comparison
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "backtest/m15-consolidation-filter"
+    paths:
+      - "backtest/run_m15_consolidation.py"
+      - ".github/workflows/mexc-m15-consolidation.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      START_UTC: "2026-10-16T00:00:00+00:00"
+      END_UTC: "2026-11-08T00:00:00+00:00"
+      WARMUP_UTC: "2026-06-01T00:00:00+00:00"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Reuse verified MEXC candles from successful run #5
+        uses: actions/download-artifact@v4
+        with:
+          name: mexc-trailing-abc-44062852537
+          path: data/mexc
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: m3080830-ops/btc-market-engine
+          run-id: 44062852537
+      - name: Validate dataset
+        run: python backtest/validate_dataset.py
+      - name: Run M15 consolidation comparison (offline only)
+        run: python backtest/run_m15_consolidation.py
+      - name: Upload candles and report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mexc-m15-consolidation-${{ github.run_id }}
+          path: data/mexc/
+          if-no-files-found: error
+          retention-days: 30
