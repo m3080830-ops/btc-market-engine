@@ -1,7 +1,6 @@
 import contextlib
 import io
 import os
-import sqlite3
 import tempfile
 import unittest
 from unittest import mock
