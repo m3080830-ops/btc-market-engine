@@ -83,6 +83,18 @@
 - 100 simulated accounts pass load and recovery tests.
 - Production rollback restores the existing single-account service without database rollback or loss of exchange state.
 
+
+
+### Batch 3 — Tenant-isolated persistence foundation (initial slice)
+- [x] Add standalone `account_persistence.py` with a separate SQLite file per validated `(account_id, symbol)` scope.
+- [x] Bind each database file permanently to its first account/symbol identity; reject attempts to open it under another scope.
+- [x] Separate account state, execution records (trades, orders, positions, stops, balance snapshots, audit), and immutable idempotent events.
+- [x] Reject credential-like fields from persisted payloads and apply restrictive POSIX file permissions where supported.
+- [x] Add offline tests for same-symbol cross-account isolation, duplicate exchange IDs across tenants, state/history isolation, database identity binding, event replay, credential rejection, and file permissions.
+- [ ] This is a foundation only: the existing live adapter and main.py still use their legacy databases. Do not connect runtime until the full repository migration and data ownership design are reviewed.
+- [ ] PostgreSQL remains the intended shared production datastore for a later deployment stage; this SQLite implementation is for isolated development/tests, not a claim of production scalability.
+
+
 ## Current status
 
 - Batch 0 workspace created on `multi-account-foundation`.
