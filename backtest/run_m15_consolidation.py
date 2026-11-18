@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Reproducible offline MEXC backtest: Nov 1-18 2026, BTC/ETH."""
-import csv, json, os
+import csv, json, os, sys
 from pathlib import Path
 from datetime import datetime, timezone
+
+# Make repository-root modules importable when this file is run as a script.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
 import main, strategy
 
 START = int(datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp())
