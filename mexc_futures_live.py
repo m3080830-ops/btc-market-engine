@@ -16,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from account_persistence import AccountRepositoryFactory
 
 BASE_URL = "https://api.mexc.com"
 SYMBOL = "BTC_USDT"
@@ -349,17 +350,20 @@ def build_market_open_payload(*, direction, volume, leverage, position_mode, ext
 
 
 class MexcFuturesLive:
-    def __init__(self, db_file, symbol=SYMBOL, *, account_context=None, enabled=None):
+    def __init__(self, db_file, symbol=SYMBOL, *, account_context=None, enabled=None, account_db_root=None):
         self.symbol = str(symbol).upper()
         if self.symbol not in SUPPORTED_SYMBOLS:
             raise MexcLiveError("Unsupported MEXC Futures symbol")
         self.db_file = db_file
+        self.account_repository = None
 
         if account_context is None:
             if enabled is not None:
                 raise MexcLiveError(
                     "Explicit enabled flag requires an account execution context"
                 )
+            if account_db_root is not None:
+                raise MexcLiveError("Account database root requires an account execution context")
             # Backward-compatible single-account path: retain existing ENV behavior.
             self.access_key = os.getenv("MEXC_ACCESS_KEY", "").strip()
             self.secret_key = os.getenv("MEXC_SECRET_KEY", "").strip()
@@ -368,14 +372,26 @@ class MexcFuturesLive:
                 in ("1", "true", "yes", "on")
             )
         else:
-            # Multi-account path: credentials are injected for this exact account.
+            # Multi-account path: credentials and the SQLite ledger are bound to
+            # this exact (account_id, symbol) scope. Never reuse the legacy DB_FILE.
+            scope = getattr(account_context, "scope", None)
             if (
                 getattr(account_context, "symbol", None) != self.symbol
                 or not getattr(account_context, "account_id", None)
                 or not getattr(account_context, "access_key", None)
                 or not getattr(account_context, "secret_key", None)
+                or scope is None
             ):
                 raise MexcLiveError("Invalid account execution context for symbol")
+            root = (
+                account_db_root
+                or os.getenv("MEXC_ACCOUNT_DB_DIR", "").strip()
+                or f"{os.path.abspath(os.fspath(db_file))}.accounts"
+            )
+            self.account_repository = AccountRepositoryFactory(root).for_scope(scope)
+            # The existing SQL trade ledger is retained for compatibility, but
+            # now resides in the repository's scope-bound, permission-restricted DB.
+            self.db_file = self.account_repository.db_path
             self.access_key = str(account_context.access_key).strip()
             self.secret_key = str(account_context.secret_key).strip()
             trading_enabled = enabled is True
