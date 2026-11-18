@@ -34,11 +34,31 @@ def save_rows(symbol, interval, rows):
     return path
 
 def fetch(symbol, interval, count):
-    rows = main.get_klines(symbol, interval, count, end_ts=END)
+    # MEXC currently returns at most 1,000 rows per request. main.get_klines
+    # requests 2,000 and stops early when the API returns 1,000, so paginate
+    # explicitly here to obtain the full M1 history required for trailing.
+    rows = []
+    end = END
+    pages = 0
+    while len(rows) < count and pages < 35:
+        limit = min(1000, count - len(rows))
+        qs = __import__("urllib.parse", fromlist=["urlencode"]).urlencode({
+            "interval": interval, "limit": limit, "end": end
+        })
+        url = f"{main.BASE_URL}/{symbol}?{qs}"
+        page = main.parse_klines(main.api_get(url))
+        if not page:
+            break
+        rows.extend(page)
+        oldest = min(int(x["time"]) for x in page)
+        if len(page) < limit:
+            break
+        end = oldest - 1
+        pages += 1
+    rows = sorted({int(x["time"]): x for x in rows}.values(), key=lambda x: int(x["time"]))
+    rows = [r for r in rows if int(r["time"]) < END]
     if not rows:
         raise RuntimeError(f"No MEXC candles: {symbol} {interval}")
-    # Discard the candle that opens at/after the exclusive end; retain only closed bars.
-    rows = [r for r in rows if int(r["time"]) < END]
     save_rows(symbol, interval, rows)
     return rows
 
@@ -101,7 +121,7 @@ def run_symbol(symbol):
                 sim=main.simulate_position(m1,m15,s,entry,sl)
                 if sim is None: rejected["simulation"]+=1; continue
                 is_closed=sim["exit_time"] is not None
-                last=[x for x in future_m1 if int(x["time"]) < END]
+                last=[x for x in m1 if int(x["time"]) >= int(entry["time"]) and int(x["time"]) < END]
                 mark=float(sim["exit_price"]) if is_closed else float(last[-1]["close"])
                 gross=float(sim["exit_r"]) if is_closed else main.r_value(s["direction"],entry["price"],sl,mark)
                 costs=fee_r(float(entry["price"]),mark,float(sl))
