@@ -10,7 +10,7 @@ ROOT=Path("data/mexc"); OUT=ROOT/"m15_consolidation"
 START=1792108800
 END=1794096000  # 2026-11-08 00:00 UTC, exclusive
 TAKER=0.0008; MAKER=0.0006
-TRAIL_START_R=1.0
+TRAIL_START_R=0.7
 VARIANTS={
     "V1_current_no_filter": None,
     "V2_strict_2.5ATR_0.15EMA": (2.5,0.15),
@@ -66,7 +66,9 @@ def historical_setups_with_filter(h4,h1,m15,d1,thresholds):
         else:
             signal=strategy._range_signal(h4_at,h1_at,prefix)
         if signal is None: continue
-        out.append(signal); last_signal=i
+        if START <= int(signal["signal_time"]) < END:
+            out.append(signal)
+        last_signal=i
     return out,blocked,trend_count
 
 def fee_r(entry,exit_price,sl,er,xr):
@@ -139,7 +141,7 @@ def main_run():
             w=csv.DictWriter(f,fieldnames=list(trades[0])); w.writeheader(); w.writerows(trades)
     with (OUT/"REPORT.md").open("w",encoding="utf-8") as f:
         f.write("# M15 consolidation filter comparison — offline only\\n\\n")
-        f.write("Period: 2026-10-16 through 2026-11-07 UTC. All variants use identical entry logic, initial SL, risk/filters and M1 swing trailing activated at +1.0R; +0.5R protection still locks -0.5R. V1 no new filter. V2 blocks TREND only when both 8-candle range <=2.5x ATR14 and absolute EMA50 change over 4 candles <=0.15x ATR14. V3 uses 3.0x and 0.20x. RANGE is unchanged. Fees T/T 0.08% per side. Offline public-candle simulation, not exchange fills.\\n\\n")
+        f.write("Period: 2026-10-16 through 2026-11-07 UTC. All variants use identical entry logic, initial SL, risk/filters and M1 swing trailing activated at +0.7R; +0.5R protection still locks -0.5R. V1 no new filter. V2 blocks TREND only when both 8-candle range <=2.5x ATR14 and absolute EMA50 change over 4 candles <=0.15x ATR14. V3 uses 3.0x and 0.20x. RANGE is unchanged. Fees T/T 0.08% per side. Offline public-candle simulation, not exchange fills.\\n\\n")
         f.write("| Instrument | Variant | Setups | Trend blocked | Closed | Wins | Losses | Win % | Gross R | Fees T/T | Net T/T | PF | Max DD |\\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\\n")
         for x in summaries:
             pf=f"{x['profit_factor']:.2f}" if x["profit_factor"] is not None else "—"
