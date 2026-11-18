@@ -21,6 +21,10 @@ VARIANTS = {
     "V2_strict_2.5ATR_0.15EMA": (2.5, 0.15),
     "V3_relaxed_3.0ATR_0.20EMA": (3.0, 0.20),
     "V4_BTC_min_1R_0.4pct": None,
+    "V5_BTC_min_1R_0.3pct": None,
+    "V6_BTC_min_1R_0.35pct": None,
+    "V7_BTC_min_1R_0.45pct": None,
+    "V8_BTC_min_1R_0.5pct": None,
 }
 INTERVALS = {"Day1": 120, "Hour4": 400, "Min60": 1600, "Min15": 7000, "Min1": 30000}
 
@@ -112,7 +116,8 @@ def run_symbol(symbol):
                 if sl is None: rejected["no_sl"]+=1; continue
                 if not main.passes_minimum_stop_distance(symbol,float(entry["price"]),float(sl)): rejected["min_stop"]+=1; continue
                 # Experimental BTC-only minimum 1R distance: initial SL must be >= 0.40% of entry price.
-                if name == "V4_BTC_min_1R_0.4pct" and symbol == "BTC_USDT" and abs(float(entry["price"])-float(sl))/float(entry["price"]) < 0.004:
+                btc_min_risk = {"V4_BTC_min_1R_0.4pct":0.004,"V5_BTC_min_1R_0.3pct":0.003,"V6_BTC_min_1R_0.35pct":0.0035,"V7_BTC_min_1R_0.45pct":0.0045,"V8_BTC_min_1R_0.5pct":0.005}
+                if name in btc_min_risk and symbol == "BTC_USDT" and abs(float(entry["price"])-float(sl))/float(entry["price"]) < btc_min_risk[name]:
                     rejected["min_stop"]+=1; continue
                 plan=strategy.planned_trade(h1,m15,s,entry["price"],sl)
                 if plan is None or plan["rr"] < main.MIN_SETUP_RR: rejected["rr"]+=1; continue
