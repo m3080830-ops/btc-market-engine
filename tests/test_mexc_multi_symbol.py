@@ -31,23 +31,23 @@ class MultiSymbolLiveTests(unittest.TestCase):
                 symbol="SOL_USDT",
             )
 
-    def _adapter(self, db_path):
+    def _adapter(self, db_path, symbol="ETH_USDT"):
         env = {
             "MEXC_LIVE_TRADING_ENABLED": "true",
             "MEXC_ACCESS_KEY": "unit-test-key",
             "MEXC_SECRET_KEY": "unit-test-secret",
         }
         with patch.dict(os.environ, env):
-            return MexcFuturesLive(db_path, symbol="ETH_USDT")
+            return MexcFuturesLive(db_path, symbol=symbol)
 
-    def _setup_and_entry(self, entry_price, stop_price):
+    def _setup_and_entry(self, entry_price, stop_price, symbol="ETH_USDT", target_price=None):
         now = int(time.time())
         return (
-            {"symbol": "ETH_USDT", "signal_time": now - 900, "direction": "LONG"},
+            {"symbol": symbol, "signal_time": now - 900, "direction": "LONG"},
             {"time": (now // 900) * 900, "price": entry_price},
             stop_price,
             1.5,
-            entry_price,
+            entry_price if target_price is None else target_price,
             now,
         )
 
@@ -123,13 +123,44 @@ class MultiSymbolLiveTests(unittest.TestCase):
                 market_price.assert_called_once_with("LONG")
                 request.assert_not_called()
 
-    def test_eth_adapter_allows_exact_half_percent_to_reach_preflight(self):
+    def test_eth_adapter_allows_exact_half_percent_to_reach_contract_preflight(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = self._adapter(os.path.join(tmp, "eth-live.sqlite3"))
-            args = self._setup_and_entry(3000, 2985)
-            with patch.object(adapter, "_positions", side_effect=RuntimeError("stop after filter")) as positions:
+            args = self._setup_and_entry(3000, 2985, target_price=3015)
+            with patch.object(adapter, "_positions", return_value=[]), \
+                 patch.object(adapter, "_position_mode", return_value=1), \
+                 patch.object(adapter, "_usdt_available", return_value=10.0), \
+                 patch.object(adapter, "_market_price", return_value=3000.0), \
+                 patch.object(adapter, "_contract", side_effect=RuntimeError("stop after filter")) as contract:
+                self.assertFalse(adapter.maybe_open(*args))
+                contract.assert_called_once()
+
+    def test_btc_adapter_blocks_below_0_4_percent_before_contract_or_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self._adapter(os.path.join(tmp, "btc-live.sqlite3"), symbol="BTC_USDT")
+            args = self._setup_and_entry(80000, 79700, symbol="BTC_USDT", target_price=80300)
+            with patch.object(adapter, "_positions", return_value=[]) as positions, \
+                 patch.object(adapter, "_position_mode", return_value=1), \
+                 patch.object(adapter, "_usdt_available", return_value=10.0), \
+                 patch.object(adapter, "_market_price", return_value=80000.0), \
+                 patch.object(adapter, "_contract") as contract, \
+                 patch.object(adapter, "_request") as request:
                 self.assertFalse(adapter.maybe_open(*args))
                 positions.assert_called_once()
+                contract.assert_not_called()
+                request.assert_not_called()
+
+    def test_btc_adapter_allows_exact_0_4_percent_to_reach_contract_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = self._adapter(os.path.join(tmp, "btc-live.sqlite3"), symbol="BTC_USDT")
+            args = self._setup_and_entry(80000, 79680, symbol="BTC_USDT", target_price=80320)
+            with patch.object(adapter, "_positions", return_value=[]), \
+                 patch.object(adapter, "_position_mode", return_value=1), \
+                 patch.object(adapter, "_usdt_available", return_value=10.0), \
+                 patch.object(adapter, "_market_price", return_value=80000.0), \
+                 patch.object(adapter, "_contract", side_effect=RuntimeError("stop after filter")) as contract:
+                self.assertFalse(adapter.maybe_open(*args))
+                contract.assert_called_once()
 
 
 if __name__ == "__main__":
