@@ -34,27 +34,24 @@ def save_rows(symbol, interval, rows):
     return path
 
 def fetch(symbol, interval, count):
-    # MEXC currently returns at most 1,000 rows per request. main.get_klines
-    # requests 2,000 and stops early when the API returns 1,000, so paginate
-    # explicitly here to obtain the full M1 history required for trailing.
+    # MEXC Futures K-line endpoint has no limit parameter; each request returns
+    # at most 2,000 bars for the requested start/end window. Fetch consecutive
+    # windows to cover the full requested history (especially M1 trailing).
+    seconds = {"Min1":60,"Min15":900,"Min60":3600,"Hour4":14400,"Day1":86400}[interval]
+    earliest = END - count * seconds
+    chunk = 2000 * seconds
     rows = []
-    end = END
-    pages = 0
-    while len(rows) < count and pages < 35:
-        limit = min(1000, count - len(rows))
+    cursor = earliest
+    while cursor < END:
+        window_end = min(END, cursor + chunk)
         qs = __import__("urllib.parse", fromlist=["urlencode"]).urlencode({
-            "interval": interval, "limit": limit, "end": end
+            "interval": interval, "start": cursor, "end": window_end - 1
         })
         url = f"{main.BASE_URL}/{symbol}?{qs}"
         page = main.parse_klines(main.api_get(url))
-        if not page:
-            break
-        rows.extend(page)
-        oldest = min(int(x["time"]) for x in page)
-        if len(page) < limit:
-            break
-        end = oldest - 1
-        pages += 1
+        if page:
+            rows.extend(page)
+        cursor = window_end
     rows = sorted({int(x["time"]): x for x in rows}.values(), key=lambda x: int(x["time"]))
     rows = [r for r in rows if int(r["time"]) < END]
     if not rows:
