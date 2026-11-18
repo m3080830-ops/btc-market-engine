@@ -20,7 +20,12 @@ from datetime import datetime, timezone
 BASE_URL = "https://api.mexc.com"
 SYMBOL = "BTC_USDT"
 SUPPORTED_SYMBOLS = frozenset({"BTC_USDT", "ETH_USDT"})
+BTC_MIN_STOP_DISTANCE_PCT = 0.004
 ETH_MIN_STOP_DISTANCE_PCT = 0.005
+MIN_STOP_DISTANCE_PCT_BY_SYMBOL = {
+    "BTC_USDT": BTC_MIN_STOP_DISTANCE_PCT,
+    "ETH_USDT": ETH_MIN_STOP_DISTANCE_PCT,
+}
 RISK_FRACTION = float(os.getenv("MEXC_RISK_FRACTION", "0.10"))
 MARGIN_USE_CAP = 0.20  # Maximum initial margin is 20% of available Futures USDT.
 MAX_LEVERAGE = 500
@@ -1016,11 +1021,16 @@ class MexcFuturesLive:
             sl = float(initial_sl)
             if not math.isfinite(sl) or sl <= 0:
                 raise MexcLiveError("Initial stop price is invalid")
-            if self.symbol == "ETH_USDT" and abs(price - sl) < price * ETH_MIN_STOP_DISTANCE_PCT:
+            min_stop_distance_pct = MIN_STOP_DISTANCE_PCT_BY_SYMBOL.get(self.symbol)
+            if (
+                min_stop_distance_pct is not None
+                and abs(price - sl) < price * min_stop_distance_pct
+            ):
                 self._log(
                     "ENTRY_SKIPPED", symbol=self.symbol,
-                    reason="minimum_stop_distance_0.5pct",
+                    reason=f"minimum_stop_distance_{min_stop_distance_pct * 100:g}pct",
                     market_price=price, sl=sl,
+                    minimum_pct=min_stop_distance_pct * 100,
                 )
                 return False
             if planned_target is None:
