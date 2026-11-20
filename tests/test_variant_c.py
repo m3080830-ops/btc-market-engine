@@ -65,6 +65,46 @@ class VariantCTests(unittest.TestCase):
         self.assertIsNotNone(reaction)
         self.assertEqual(reaction["signal_time"], 59)
 
+    def test_find_h1_setup_before_keeps_latest_closed_h1_candle(self):
+        rows = [
+            {"time": i, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
+            for i in range(62)
+        ]
+        with patch.object(strategy, "_ema_state", return_value=(
+            [99.0] * 61, [99.0] * 61, [100.0] * 61,
+            [101.0] * 61, [2.0] * 61
+        )), patch.object(strategy, "price_action", return_value={
+            "ok": True, "signals": ["test"]
+        }):
+            reaction = strategy._find_h1_setup_before(rows, 1000, "LONG")
+        self.assertIsNotNone(reaction)
+        self.assertEqual(reaction["signal_time"], 60)
+
+    def test_range_signal_keeps_latest_closed_h1_candle(self):
+        h1_rows = [
+            {"time": i, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
+            for i in range(62)
+        ]
+        m15_rows = [
+            {"time": i, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
+            for i in range(120)
+        ]
+        with patch.object(strategy, "_h4_context", return_value={
+            "regime": "NEUTRAL", "bias": None, "strength": "NEUTRAL"
+        }), patch.object(strategy, "_ema_state", return_value=(
+            [99.0] * 61, [99.0] * 61, [100.0] * 61,
+            [101.0] * 61, [2.0] * 61
+        )), patch.object(strategy, "_swing_levels", return_value=([], [102.0])), \
+             patch.object(strategy, "price_action", return_value={
+                 "ok": True, "signals": ["test"]
+             }), patch.object(strategy, "_m15_trigger", return_value={
+                 "signal_time": 119, "direction": "SHORT", "price": 101.0,
+                 "model": "M15_TRIGGER", "pa": ["test"]
+             }):
+            signal = strategy._range_signal([], h1_rows, m15_rows)
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal["h1_signal_time"], 60)
+
     def test_m15_trigger_uses_only_latest_window_and_prefers_newest(self):
         rows = [
             {"time": t, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
