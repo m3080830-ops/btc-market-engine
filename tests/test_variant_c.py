@@ -34,6 +34,37 @@ class VariantCTests(unittest.TestCase):
         with patch.object(strategy, "_m15_trend_structure_opposes", return_value=True):
             self.assertFalse(strategy._variant_c_allows(setup, []))
 
+    def test_h1_reaction_uses_latest_already_closed_candle(self):
+        rows = [
+            {"time": i, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
+            for i in range(60)
+        ]
+        with patch.object(strategy, "_ema_state", return_value=(
+            [99.0] * 60, [99.0] * 60, [100.0] * 60,
+            [101.0] * 60, [2.0] * 60
+        )), patch.object(strategy, "price_action", return_value={
+            "ok": True, "signals": ["test"]
+        }):
+            reaction = strategy._h1_reaction(rows, "LONG")
+        self.assertIsNotNone(reaction)
+        self.assertEqual(reaction["signal_time"], 59)
+
+    def test_h1_range_reaction_uses_latest_already_closed_candle(self):
+        rows = [
+            {"time": i, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
+            for i in range(60)
+        ]
+        with patch.object(strategy, "_ema_state", return_value=(
+            [99.0] * 60, [99.0] * 60, [100.0] * 60,
+            [101.0] * 60, [2.0] * 60
+        )), patch.object(strategy, "_swing_levels", return_value=([], [102.0])), \
+             patch.object(strategy, "price_action", return_value={
+                 "ok": True, "signals": ["test"]
+             }):
+            reaction = strategy._h1_range_reaction(rows)
+        self.assertIsNotNone(reaction)
+        self.assertEqual(reaction["signal_time"], 59)
+
     def test_m15_trigger_uses_only_latest_window_and_prefers_newest(self):
         rows = [
             {"time": t, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
