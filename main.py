@@ -2416,10 +2416,20 @@ def mexc_m15_websocket_loop():
     def on_close(ws, status_code, message):
         print(f"MEXC_WS status=CLOSED code={status_code} detail={str(message)[:100]}", flush=True)
 
+    # MEXC's public Futures WS endpoint is documented at /edge. Send
+    # normal browser identification headers to avoid edge/WAF rejection of
+    # a bare library handshake from cloud-hosted runtimes.
+    ws_headers = [
+        "Origin: https://www.mexc.com",
+        "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    ]
+    reconnect_delay = 5
     while True:
         try:
             app = websocket.WebSocketApp(
                 "wss://contract.mexc.com/edge",
+                header=ws_headers,
                 on_open=on_open,
                 on_message=on_message,
                 on_error=on_error,
@@ -2428,7 +2438,8 @@ def mexc_m15_websocket_loop():
             app.run_forever()
         except Exception as exc:
             print(f"MEXC_WS status=RECONNECTING error={type(exc).__name__} detail={str(exc)[:140]}", flush=True)
-        time.sleep(5)
+        time.sleep(reconnect_delay)
+        reconnect_delay = min(reconnect_delay * 2, 60)
 
 
 # ============================================================
