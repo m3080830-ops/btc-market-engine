@@ -262,7 +262,8 @@ def price_action(candle, prev_rows, direction):
 
 
 def _h1_reaction(h1_rows, direction):
-    r = _closed(h1_rows)
+    # Callers pass closed H1 candles; preserve the newest completed retest.
+    r = list(h1_rows)
     if len(r) < 60:
         return None
 
@@ -316,7 +317,8 @@ def _h1_reaction(h1_rows, direction):
 
 
 def _h1_range_reaction(h1_rows):
-    r = _closed(h1_rows)
+    # Callers pass closed H1 candles; preserve the newest completed reaction.
+    r = list(h1_rows)
     if len(r) < 60:
         return None
 
