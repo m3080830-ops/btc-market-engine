@@ -16,9 +16,9 @@ TRADES=[
  {"id":"BTC-1","asset":"BTC","entry_local":"2026-11-20 16:15:05","entry_price":60874.8},
  {"id":"BTC-2","asset":"BTC","entry_local":"2026-11-22 05:15:05","entry_price":59418.4},
  {"id":"ETH-1","asset":"ETH","entry_local":"2026-11-22 13:45:06","entry_price":1705.43},
- {"id":"BTC-3","asset":"BTC","entry_local":"2026-11-21 09:30:05","entry_price":57670.3},
- {"id":"ETH-2","asset":"ETH","entry_local":"2026-11-20 16:15:11","entry_price":1713.24},
- {"id":"ETH-3","asset":"ETH","entry_local":"2026-11-22 05:15:11","entry_price":1663.87},
+ {"id":"BTC-3","asset":"BTC","entry_local":None,"entry_price":57670.3},
+ {"id":"ETH-2","asset":"ETH","entry_local":None,"entry_price":1713.24},
+ {"id":"ETH-3","asset":"ETH","entry_local":None,"entry_price":1663.87},
 ]
 def stamp(s):
  return int(datetime.strptime(s,"%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ).timestamp())
@@ -34,6 +34,9 @@ def main():
  os.makedirs("audit-output",exist_ok=True)
  results=[]
  for trade in TRADES:
+  if not trade["entry_local"]:
+   results.append({"trade_id":trade["id"],"asset":trade["asset"],"entry_local":None,"actual_fill_price":trade["entry_price"],"match_count":None,"note":"Exact entry timestamp not visible; excluded from replay"})
+   continue
   prefix="audit-output/"+trade["id"]+"_"
   m1=load(prefix+"Min1.csv"); m15=load(prefix+"Min15.csv")
   h1=load(prefix+"Min60.csv"); h4=load(prefix+"Hour4.csv")
