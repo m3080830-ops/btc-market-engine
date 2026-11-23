@@ -4,7 +4,9 @@
 Read-only: imports strategy.py and calls its historical signal functions.
 No exchange account endpoints, credentials, order placement, or live code changes.
 """
-import csv, json, os
+import csv, json, os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from strategy import find_historical_setups, build_entry, choose_structural_sl, planned_trade
