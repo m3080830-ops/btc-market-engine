@@ -22,7 +22,9 @@ jobs:
           python-version: "3.12"
       - name: Download timestamp-anchored public MEXC Futures candles
         run: python tools/audit_six_positions.py
-      - name: Upload candle windows and timestamp context
+      - name: Replay exact strategy signals against downloaded candles
+        run: python tools/replay_six_positions.py
+      - name: Upload candles, trigger replay and timestamp context
         uses: actions/upload-artifact@v4
         with:
           name: six-position-mexc-audit
