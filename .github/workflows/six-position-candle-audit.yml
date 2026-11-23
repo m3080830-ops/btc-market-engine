@@ -5,6 +5,7 @@ on:
     branches: ["main"]
     paths:
       - "tools/audit_six_positions.py"
+      - "tools/replay_six_positions.py"
       - ".github/workflows/six-position-candle-audit.yml"
   workflow_dispatch:
 
