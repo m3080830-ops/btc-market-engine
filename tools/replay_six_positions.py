@@ -80,6 +80,6 @@ def main():
    if r.get("matched_strategy_signals"):
     for m in r["matched_strategy_signals"]:
      w.writerow({k:v for k,v in {"trade_id":r["trade_id"],"asset":r["asset"],"entry_local":r["entry_local"],"entry_time_utc":r["entry_time_utc"],"match_count":r["match_count"],**m}.items() if k in fields})
-   else: w.writerow({"trade_id":r["trade_id"],"asset":r["asset"],"entry_local":r["entry_local"],"entry_time_utc":r["entry_time_utc"],"match_count":0})
+   else: w.writerow({"trade_id":r["trade_id"],"asset":r["asset"],"entry_local":r["entry_local"],"entry_time_utc":r.get("entry_time_utc"),"match_count":r.get("match_count")})
  print("Saved strategy_replay.json and strategy_replay.csv")
 if __name__=="__main__": main()
