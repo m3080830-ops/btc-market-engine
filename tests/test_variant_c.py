@@ -111,7 +111,7 @@ class VariantCTests(unittest.TestCase):
             for t in (100, 200, 300, 400, 500, 600)
         ]
         with patch.object(strategy, "_ema_state", return_value=(
-            [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6
+            [102.0] * 6, [102.0] * 6, [102.0] * 6, [102.0] * 6, [1.0] * 6
         )), patch.object(strategy, "price_action", side_effect=lambda candle, prev, direction: {
             "ok": direction == "SHORT", "signals": []
         }):
@@ -136,7 +136,7 @@ class VariantCTests(unittest.TestCase):
             }
 
         with patch.object(strategy, "_ema_state", return_value=(
-            [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6
+            [102.0] * 6, [102.0] * 6, [102.0] * 6, [102.0] * 6, [1.0] * 6
         )), patch.object(strategy, "price_action", side_effect=previous_triggers_but_latest_is_opposed):
             trigger = strategy._m15_trigger(rows, "SHORT", 50, max_bars=4)
         self.assertIsNone(trigger)
@@ -147,7 +147,7 @@ class VariantCTests(unittest.TestCase):
             for t in (100, 200, 300, 400, 500, 600)
         ]
         with patch.object(strategy, "_ema_state", return_value=(
-            [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6, [1.0] * 6
+            [102.0] * 6, [102.0] * 6, [102.0] * 6, [102.0] * 6, [1.0] * 6
         )), patch.object(strategy, "price_action", side_effect=lambda candle, prev, direction: {
             "ok": direction == "SHORT", "signals": []
         }):

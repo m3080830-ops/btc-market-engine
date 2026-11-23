@@ -181,6 +181,26 @@ def _ema_state(rows):
     )
 
 
+def _m15_fast_ema_confirms(candle, direction, ema9_value, ema18_value):
+    """
+    Require a completed M15 close beyond BOTH fast EMAs in trade direction.
+    Wicks through the averages are not confirmation; the candle must close
+    on the correct side of EMA9 and EMA18. This is shared by TREND and RANGE.
+    """
+    try:
+        close = float(candle["close"])
+        ema9 = float(ema9_value)
+        ema18 = float(ema18_value)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    if direction == "SHORT":
+        return close < ema9 and close < ema18
+    if direction == "LONG":
+        return close > ema9 and close > ema18
+    return False
+
+
 def _swing_levels(rows, lookback=50):
     r = rows[-lookback:]
     supports = []
@@ -376,11 +396,13 @@ def _m15_trigger(
     max_bars=4
 ):
     """
-    M15 is a veto check, not a second setup filter.
+    M15 is a directional confirmation after the H1 reaction.
 
-    It must happen after the H1 reaction and remain close to the H1 zone.
-    Do not demand a bullish/bearish pattern or a candle in trade direction.
-    Reject only when the closed M15 candle shows a clear opposing signal.
+    The newest closed M15 candle must close beyond both fast EMAs (EMA9 and
+    EMA18) in the setup direction and remain close to the H1 zone. Wicks alone
+    do not count. A separate same-direction PA pattern is not required, so
+    neutral/small candles remain eligible when the close confirms direction.
+    A clear opposing PA signal still vetoes the trigger.
     """
     # Callers pass the already-closed M15 series. Do not apply _closed()
     # again here: that would silently discard another candle and, more
@@ -415,9 +437,13 @@ def _m15_trigger(
             if not touches_zone:
                 continue
 
-        # Veto only a clear signal in the opposite direction. A neutral,
-        # small, or same-direction candle is sufficient; no positive PA
-        # pattern or matching candle colour is required.
+        # Require the M15 close to clear both fast averages in the setup
+        # direction. This is a close-based confirmation, not a wick touch.
+        if not _m15_fast_ema_confirms(c, direction, e9[i], e18[i]):
+            continue
+
+        # Veto only a clear signal in the opposite direction. A separate
+        # same-direction PA pattern is not mandatory after EMA confirmation.
         opposite = "SHORT" if direction == "LONG" else "LONG"
         opposing_pa = price_action(c, prev, opposite)
         if opposing_pa["ok"]:
