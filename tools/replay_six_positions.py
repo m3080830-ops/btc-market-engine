@@ -33,6 +33,7 @@ def iso(t):
 def main():
  os.makedirs("audit-output",exist_ok=True)
  results=[]
+ all_entries={}
  for trade in TRADES:
   if not trade["entry_local"]:
    results.append({"trade_id":trade["id"],"asset":trade["asset"],"entry_local":"2026-11-21 09:30:05","actual_fill_price":trade["entry_price"],"match_count":None,"note":"Exact entry timestamp not visible; excluded from replay"})
@@ -44,6 +45,20 @@ def main():
   entry_ts=stamp(trade["entry_local"])
   entry_bar=(entry_ts//900)*900
   signals=find_historical_setups(h4,h1,m15,d1)
+  # Collect every strategy-approved entry in this trade's downloaded M15
+  # window. Multiple trade windows overlap, so deduplicate below by asset/time.
+  for sig in signals:
+   candidate=build_entry(sig,m15)
+   if candidate:
+    entry_time=int(candidate["time"])
+    key=(trade["asset"],entry_time,sig.get("direction"),sig.get("model"))
+    all_entries[key]={
+     "asset":trade["asset"],"entry_time_utc":iso(entry_time),
+     "entry_time":entry_time,"direction":sig.get("direction"),
+     "model":sig.get("model"),"h4_bias":sig.get("h4_bias"),
+     "h1_signal_time_utc":iso(sig["h1_signal_time"]) if sig.get("h1_signal_time") else None,
+     "entry_price":candidate.get("price")
+    }
   matches=[]
   for sig in signals:
    entry=build_entry(sig,m15)
@@ -81,5 +96,19 @@ def main():
     for m in r["matched_strategy_signals"]:
      w.writerow({k:v for k,v in {"trade_id":r["trade_id"],"asset":r["asset"],"entry_local":r["entry_local"],"entry_time_utc":r["entry_time_utc"],"match_count":r["match_count"],**m}.items() if k in fields})
    else: w.writerow({"trade_id":r["trade_id"],"asset":r["asset"],"entry_local":r["entry_local"],"entry_time_utc":r.get("entry_time_utc"),"match_count":r.get("match_count")})
- print("Saved strategy_replay.json and strategy_replay.csv")
+ # Consolidated unique approved entries across all six downloaded windows.
+ entries=sorted(all_entries.values(),key=lambda x:(x["asset"],x["entry_time"]))
+ summary={"method":"Current main strategy.py, including M15 EMA9/EMA18 close confirmation",
+          "window_count":len(TRADES),"unique_entry_count":len(entries),
+          "by_asset":{a:sum(1 for x in entries if x["asset"]==a) for a in ("BTC","ETH")},
+          "by_direction":{d:sum(1 for x in entries if x["direction"]==d) for d in ("LONG","SHORT")},
+          "entries":entries}
+ with open("audit-output/quick_backtest_entries.json","w") as f: json.dump(summary,f,indent=2)
+ with open("audit-output/quick_backtest_entries.csv","w",newline="") as f:
+  fields=["asset","entry_time_utc","direction","model","h4_bias","h1_signal_time_utc","entry_price"]
+  w=csv.DictWriter(f,fieldnames=fields); w.writeheader()
+  for row in entries: w.writerow({k:row.get(k) for k in fields})
+ print("QUICK BACKTEST unique entries:",len(entries),"BTC:",summary["by_asset"]["BTC"],"ETH:",summary["by_asset"]["ETH"])
+ print("Saved quick_backtest_entries.json and quick_backtest_entries.csv")
+
 if __name__=="__main__": main()
