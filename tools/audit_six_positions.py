@@ -1,101 +1,123 @@
 #!/usr/bin/env python3
-"""Read-only MEXC Futures candle collector for the six-position audit.
+"""Timestamp-anchored, read-only MEXC Futures candle extraction for six trades.
 
-Downloads public M1 candles only. No API keys, account endpoints, or orders.
-It also locates M1 candles whose range contains the screenshot entry/exit
-prices, which helps recover approximate timestamps for cards with cropped times.
+The entry candle is selected by the recorded position-open timestamp, NEVER by
+matching the fill price to a candle open/close. Public market data only.
 """
 import csv, json, os, time, urllib.parse, urllib.request
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
-START = os.getenv("START_UTC", "2026-11-20T00:00:00Z")
-END = os.getenv("END_UTC", "2026-11-24T00:00:00Z")
+LOCAL_TZ = ZoneInfo(os.getenv("TRADE_TIMEZONE", "Europe/Warsaw"))
 PAGE = 2000
+BEFORE_MINUTES = 360
+AFTER_MINUTES = 360
 BASES = [
     "https://api.mexc.com/api/v1/contract/kline",
     "https://contract.mexc.com/api/v1/contract/kline",
 ]
-# Screenshot values; times for three cropped cards are intentionally not guessed.
-TARGETS = [
-    ("BTC", "entry", 60874.8, "2026-11-20", "2026-11-21"),
-    ("BTC", "exit", 59535.1, "2026-11-20", "2026-11-21"),
-    ("BTC", "entry", 59418.4, "2026-11-22", "2026-11-23"),
-    ("BTC", "exit", 58859.9, "2026-11-22", "2026-11-23"),
-    ("ETH", "entry", 1705.43, "2026-11-22", "2026-11-23"),
-    ("ETH", "exit", 1715.45, "2026-11-22", "2026-11-23"),
-    ("BTC", "entry", 57670.3, "2026-11-20", "2026-11-24"),
-    ("BTC", "exit", 58762.2, "2026-11-20", "2026-11-24"),
-    ("ETH", "entry", 1713.24, "2026-11-20", "2026-11-24"),
-    ("ETH", "exit", 1652.72, "2026-11-20", "2026-11-24"),
-    ("ETH", "entry", 1663.87, "2026-11-20", "2026-11-24"),
-    ("ETH", "exit", 1676.08, "2026-11-20", "2026-11-24"),
+
+# Times copied from the visible position cards. They are local device times.
+# Add the remaining three exact open times here when available; do not infer them
+# from fill prices or candle OHLC.
+TRADES = [
+    {"id":"BTC-1","asset":"BTC","direction":"SHORT","entry_local":"2026-11-20 16:15:05","entry_price":60874.8,"exit_price":59535.1},
+    {"id":"BTC-2","asset":"BTC","direction":"SHORT","entry_local":"2026-11-22 05:15:05","entry_price":59418.4,"exit_price":58859.9},
+    {"id":"ETH-1","asset":"ETH","direction":"SHORT","entry_local":"2026-11-22 13:45:06","entry_price":1705.43,"exit_price":1715.45},
+    {"id":"BTC-3","asset":"BTC","direction":"SHORT","entry_local":None,"entry_price":57670.3,"exit_price":58762.2},
+    {"id":"ETH-2","asset":"ETH","direction":"SHORT","entry_local":None,"entry_price":1713.24,"exit_price":1652.72},
+    {"id":"ETH-3","asset":"ETH","direction":"SHORT","entry_local":None,"entry_price":1663.87,"exit_price":1676.08},
 ]
 
-def ts(s):
-    return int(datetime.fromisoformat(s.replace("Z","+00:00")).timestamp())
+def epoch(dt):
+    return int(dt.timestamp())
 
-def get_page(symbol, end):
+def parse_time(value):
+    if not value:
+        return None
+    return epoch(datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=LOCAL_TZ))
+
+def request_page(symbol, interval, end_ts):
+    step={"Min1":60,"Min5":300,"Min15":900,"Min60":3600,"Hour4":14400,"Day1":86400}[interval]
     errors=[]
     for base in BASES:
-        for end_value in (end, end*1000):
+        for end_value in (end_ts, end_ts*1000):
             try:
-                url=base+"/"+symbol+"?"+urllib.parse.urlencode({"interval":"Min1","limit":PAGE,"end":end_value})
-                req=urllib.request.Request(url, headers={"User-Agent":"BTC-Market-Engine-Audit/1.0"})
-                with urllib.request.urlopen(req, timeout=25) as r:
-                    p=json.loads(r.read().decode())
-                d=p.get("data",p) if isinstance(p,dict) else p
-                if not isinstance(d,dict) or not all(k in d for k in ("time","open","close","high","low")):
-                    raise ValueError("unknown K-line response shape")
-                out=[]
-                n=min(len(d[k]) for k in ("time","open","close","high","low"))
+                url=base+"/"+symbol+"?"+urllib.parse.urlencode({"interval":interval,"limit":PAGE,"end":end_value})
+                req=urllib.request.Request(url,headers={"User-Agent":"BTC-Market-Engine-Audit/1.0"})
+                with urllib.request.urlopen(req,timeout=25) as response:
+                    payload=json.loads(response.read().decode())
+                data=payload.get("data",payload) if isinstance(payload,dict) else payload
+                if not isinstance(data,dict) or not all(k in data for k in ("time","open","close","high","low")):
+                    raise ValueError("unexpected K-line response")
+                n=min(len(data[k]) for k in ("time","open","close","high","low"))
+                rows=[]
                 for i in range(n):
-                    t=int(float(d["time"][i])); t=t//1000 if t>10_000_000_000 else t
-                    out.append({"time":t,"open":float(d["open"][i]),"high":float(d["high"][i]),"low":float(d["low"][i]),"close":float(d["close"][i]),"volume":float(d.get("vol",[0]*n)[i])})
-                if not out: raise ValueError("empty candles")
-                if max(x["time"] for x in out)>end+60: raise ValueError("time unit mismatch")
-                return out
-            except Exception as e: errors.append(str(e))
-    raise RuntimeError("MEXC kline request failed: "+"; ".join(errors))
+                    t=int(float(data["time"][i])); t=t//1000 if t>10_000_000_000 else t
+                    rows.append({"time":t,"open":float(data["open"][i]),"high":float(data["high"][i]),"low":float(data["low"][i]),"close":float(data["close"][i]),"volume":float(data.get("vol",[0]*n)[i])})
+                if rows and max(x["time"] for x in rows)<=end_ts+step:
+                    return sorted(rows,key=lambda x:x["time"])
+            except Exception as exc:
+                errors.append(str(exc))
+    raise RuntimeError(f"{symbol} {interval}: "+"; ".join(errors))
 
-def fetch(symbol, start, end):
-    rows=[]; cursor=end; seen=set()
-    while cursor>start:
-        page=get_page(symbol,cursor)
-        fresh=[x for x in page if start<=x["time"]<end and x["time"] not in seen]
-        for x in fresh: seen.add(x["time"])
-        rows.extend(fresh)
+def fetch_window(symbol, interval, start_ts, end_ts):
+    rows=[]; cursor=end_ts; seen=set()
+    while cursor>=start_ts:
+        page=request_page(symbol,interval,cursor)
+        for row in page:
+            if start_ts<=row["time"]<=end_ts and row["time"] not in seen:
+                rows.append(row); seen.add(row["time"])
         oldest=min(x["time"] for x in page)
-        if oldest>=cursor or not fresh and oldest<=start: break
+        if oldest>=cursor or oldest<=start_ts:
+            break
         cursor=oldest-1
         time.sleep(0.12)
     return sorted(rows,key=lambda x:x["time"])
 
-def main():
-    start,end=ts(START),ts(END)
-    os.makedirs("audit-output",exist_ok=True)
-    all_rows={}
-    for asset,symbol in (("BTC","BTC_USDT"),("ETH","ETH_USDT")):
-        rows=fetch(symbol,start,end); all_rows[asset]=rows
-        path=f"audit-output/{asset}_M1.csv"
-        with open(path,"w",newline="") as f:
-            w=csv.DictWriter(f,fieldnames=["time","utc","open","high","low","close","volume"]); w.writeheader()
-            for x in rows:
-                w.writerow({**x,"utc":datetime.fromtimestamp(x["time"],timezone.utc).isoformat()})
-        print(f"{asset}: {len(rows)} M1 candles -> {path}")
-    matches=[]
-    for asset,kind,price,d1,d2 in TARGETS:
-        lo,hi=ts(d1+"T00:00:00Z"),ts(d2+"T00:00:00Z")
-        tol=max(price*0.00012,0.05 if asset=="BTC" else 0.01)
-        candidates=[]
-        for c in all_rows[asset]:
-            if lo<=c["time"]<hi and c["low"]-tol<=price<=c["high"]+tol:
-                candidates.append((abs(c["close"]-price),c))
-        for _,c in sorted(candidates,key=lambda z:z[0])[:20]:
-            matches.append({"asset":asset,"type":kind,"target_price":price,"candle_time":c["time"],"utc":datetime.fromtimestamp(c["time"],timezone.utc).isoformat(),"open":c["open"],"high":c["high"],"low":c["low"],"close":c["close"],"close_diff":round(c["close"]-price,8)})
-    with open("audit-output/price_time_candidates.csv","w",newline="") as f:
-        fields=list(matches[0]) if matches else ["asset","type","target_price","candle_time","utc","open","high","low","close","close_diff"]
-        w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(matches)
-    print(f"Candidate matches: {len(matches)} -> audit-output/price_time_candidates.csv")
-    print("NOTE: candle-range matches are candidates, not proof of exact fill timestamps.")
+def write_csv(path, rows):
+    if not rows: return
+    fields=list(rows[0])
+    with open(path,"w",newline="") as f:
+        w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(rows)
 
-if __name__=="__main__": main()
+def main():
+    os.makedirs("audit-output",exist_ok=True)
+    known=[t for t in TRADES if t["entry_local"]]
+    missing=[t["id"] for t in TRADES if not t["entry_local"]]
+    if not known:
+        raise SystemExit("No exact entry timestamps configured.")
+    contexts=[]
+    for trade in known:
+        entry_ts=parse_time(trade["entry_local"])
+        symbol=trade["asset"]+"_USDT"
+        start=entry_ts-BEFORE_MINUTES*60
+        end=entry_ts+AFTER_MINUTES*60
+        print(f'{trade["id"]}: entry {trade["entry_local"]} {LOCAL_TZ.key}; candle selected by timestamp')
+        for interval in ("Min1","Min15","Min60","Hour4","Day1"):
+            rows=fetch_window(symbol,interval,start,end)
+            write_csv(f'audit-output/{trade["id"]}_{interval}.csv',rows)
+            step={"Min1":60,"Min15":900,"Min60":3600,"Hour4":14400,"Day1":86400}[interval]
+            candle_start=(entry_ts//step)*step
+            selected=next((r for r in rows if r["time"]==candle_start),None)
+            contexts.append({
+                "trade_id":trade["id"],"asset":trade["asset"],"direction":trade["direction"],
+                "entry_local":trade["entry_local"],"timezone":LOCAL_TZ.key,
+                "interval":interval,"entry_candle_start_utc":datetime.fromtimestamp(candle_start,timezone.utc).isoformat(),
+                "entry_candle_found":bool(selected),
+                "candle_open":selected["open"] if selected else None,
+                "candle_high":selected["high"] if selected else None,
+                "candle_low":selected["low"] if selected else None,
+                "candle_close":selected["close"] if selected else None,
+                "actual_fill_price":trade["entry_price"],
+                "fill_minus_candle_open":round(trade["entry_price"]-selected["open"],8) if selected else None,
+            })
+    write_csv("audit-output/entry_timestamp_context.csv",contexts)
+    with open("audit-output/missing_entry_times.json","w") as f:
+        json.dump({"missing_trade_ids":missing,"note":"Exact open timestamps required; no price-based guessing."},f,indent=2)
+    print("Timestamp-based candle windows saved. Entry candles are selected by flooring the exact open timestamp to each timeframe.")
+    if missing:
+        print("Still missing exact open times for: "+", ".join(missing))
+
+if __name__=="__main__":
+    main()
