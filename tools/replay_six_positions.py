@@ -51,13 +51,21 @@ def main():
    candidate=build_entry(sig,m15)
    if candidate:
     entry_time=int(candidate["time"])
+    entry_price=float(candidate["price"])
+    sl=choose_structural_sl(h1,m15,sig)
+    min_pct=0.004 if trade["asset"]=="BTC" else 0.005
+    stop_ok=sl is not None and abs(entry_price-float(sl)) >= entry_price*min_pct
+    plan=planned_trade(h1,m15,sig,entry_price,sl) if stop_ok else None
+    if not stop_ok or plan is None or float(plan["rr"]) < 1.0:
+     continue
     key=(trade["asset"],entry_time,sig.get("direction"),sig.get("model"))
     all_entries[key]={
      "asset":trade["asset"],"entry_time_utc":iso(entry_time),
      "entry_time":entry_time,"direction":sig.get("direction"),
      "model":sig.get("model"),"h4_bias":sig.get("h4_bias"),
      "h1_signal_time_utc":iso(sig["h1_signal_time"]) if sig.get("h1_signal_time") else None,
-     "entry_price":candidate.get("price")
+     "entry_price":entry_price,"structural_sl":sl,
+     "planned_target":plan.get("target"),"planned_rr":plan.get("rr")
     }
   matches=[]
   for sig in signals:
@@ -98,7 +106,7 @@ def main():
    else: w.writerow({"trade_id":r["trade_id"],"asset":r["asset"],"entry_local":r["entry_local"],"entry_time_utc":r.get("entry_time_utc"),"match_count":r.get("match_count")})
  # Consolidated unique approved entries across all six downloaded windows.
  entries=sorted(all_entries.values(),key=lambda x:(x["asset"],x["entry_time"]))
- summary={"method":"Current main strategy.py, including M15 EMA9/EMA18 close confirmation",
+ summary={"method":"Current main strategy.py + SL minimum (BTC 0.4%, ETH 0.5%) + RR >= 1.0",
           "window_count":len(TRADES),"unique_entry_count":len(entries),
           "by_asset":{a:sum(1 for x in entries if x["asset"]==a) for a in ("BTC","ETH")},
           "by_direction":{d:sum(1 for x in entries if x["direction"]==d) for d in ("LONG","SHORT")},
