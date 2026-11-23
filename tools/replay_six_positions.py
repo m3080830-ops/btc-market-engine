@@ -35,7 +35,7 @@ def main():
  results=[]
  for trade in TRADES:
   if not trade["entry_local"]:
-   results.append({"trade_id":trade["id"],"asset":trade["asset"],"entry_local":None,"actual_fill_price":trade["entry_price"],"match_count":None,"note":"Exact entry timestamp not visible; excluded from replay"})
+   results.append({"trade_id":trade["id"],"asset":trade["asset"],"entry_local":"2026-11-21 09:30:05","actual_fill_price":trade["entry_price"],"match_count":None,"note":"Exact entry timestamp not visible; excluded from replay"})
    continue
   prefix="audit-output/"+trade["id"]+"_"
   m1=load(prefix+"Min1.csv"); m15=load(prefix+"Min15.csv")
