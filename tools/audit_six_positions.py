@@ -134,3 +134,5 @@ if __name__=="__main__":
 # Only screenshot-verified entry timestamps are replayed; cropped cards are excluded.
 
 # Trigger replay after handling excluded timestamp rows.
+
+# Trigger replay after CSV serialization fix.
