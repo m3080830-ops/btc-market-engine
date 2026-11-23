@@ -21,12 +21,12 @@ BASES = [
 # Add the remaining three exact open times here when available; do not infer them
 # from fill prices or candle OHLC.
 TRADES = [
-    {"id":"BTC-1","asset":"BTC","direction":"SHORT","entry_local":"2026-11-20 16:15:05","entry_price":60874.8,"exit_price":59535.1},
-    {"id":"BTC-2","asset":"BTC","direction":"SHORT","entry_local":"2026-11-22 05:15:05","entry_price":59418.4,"exit_price":58859.9},
-    {"id":"ETH-1","asset":"ETH","direction":"SHORT","entry_local":"2026-11-22 13:45:06","entry_price":1705.43,"exit_price":1715.45},
-    {"id":"BTC-3","asset":"BTC","direction":"SHORT","entry_local":"2026-11-21 09:30:05","entry_price":57670.3,"exit_price":58762.2},
-    {"id":"ETH-2","asset":"ETH","direction":"SHORT","entry_local":"2026-11-20 16:15:11","entry_price":1713.24,"exit_price":1652.72},
-    {"id":"ETH-3","asset":"ETH","direction":"SHORT","entry_local":"2026-11-22 05:15:11","entry_price":1663.87,"exit_price":1676.08},
+    {"id":"BTC-1","asset":"BTC","direction":"SHORT","entry_local":"2026-11-20 16:15:05","exit_local":"2026-11-20 17:12:15","entry_price":60874.8,"exit_price":59535.1},
+    {"id":"BTC-2","asset":"BTC","direction":"SHORT","entry_local":"2026-11-22 05:15:05","exit_local":"2026-11-22 06:46:50","entry_price":59418.4,"exit_price":58859.9},
+    {"id":"ETH-1","asset":"ETH","direction":"SHORT","entry_local":"2026-11-22 13:45:06","exit_local":"2026-11-22 15:44:46","entry_price":1705.43,"exit_price":1715.45},
+    {"id":"BTC-3","asset":"BTC","direction":"SHORT","entry_local":"2026-11-21 09:30:05","exit_local":"2026-11-21 13:35:20","entry_price":57670.3,"exit_price":58762.2},
+    {"id":"ETH-2","asset":"ETH","direction":"SHORT","entry_local":"2026-11-20 16:15:11","exit_local":"2026-11-20 17:12:06","entry_price":1713.24,"exit_price":1652.72},
+    {"id":"ETH-3","asset":"ETH","direction":"SHORT","entry_local":"2026-11-22 05:15:11","exit_local":"2026-11-22 09:14:44","entry_price":1663.87,"exit_price":1676.08},
 ]
 
 def epoch(dt):
@@ -91,10 +91,17 @@ def main():
     for trade in known:
         entry_ts=parse_time(trade["entry_local"])
         symbol=trade["asset"]+"_USDT"
-        start=entry_ts-BEFORE_MINUTES*60
-        end=entry_ts+AFTER_MINUTES*60
-        print(f'{trade["id"]}: entry {trade["entry_local"]} {LOCAL_TZ.key}; candle selected by timestamp')
+        exit_ts=parse_time(trade.get("exit_local")) or entry_ts
+        print(f'{trade["id"]}: entry {trade["entry_local"]} {LOCAL_TZ.key}; selecting candles by timestamp')
+        windows={
+            "Min1": (entry_ts-3600, exit_ts+3600),
+            "Min15": (entry_ts-48*3600, entry_ts+3600),
+            "Min60": (entry_ts-8*86400, entry_ts+3600),
+            "Hour4": (entry_ts-26*86400, entry_ts+3600),
+            "Day1": (entry_ts-70*86400, entry_ts+86400),
+        }
         for interval in ("Min1","Min15","Min60","Hour4","Day1"):
+            start,end=windows[interval]
             rows=fetch_window(symbol,interval,start,end)
             write_csv(f'audit-output/{trade["id"]}_{interval}.csv',rows)
             step={"Min1":60,"Min15":900,"Min60":3600,"Hour4":14400,"Day1":86400}[interval]
@@ -102,7 +109,7 @@ def main():
             selected=next((r for r in rows if r["time"]==candle_start),None)
             contexts.append({
                 "trade_id":trade["id"],"asset":trade["asset"],"direction":trade["direction"],
-                "entry_local":trade["entry_local"],"timezone":LOCAL_TZ.key,
+                "entry_local":trade["entry_local"],"exit_local":trade.get("exit_local"),"timezone":LOCAL_TZ.key,
                 "interval":interval,"entry_candle_start_utc":datetime.fromtimestamp(candle_start,timezone.utc).isoformat(),
                 "entry_candle_found":bool(selected),
                 "candle_open":selected["open"] if selected else None,
