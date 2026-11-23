@@ -132,3 +132,5 @@ if __name__=="__main__":
 # Replay workflow trigger: CSV output schema fix committed 2026-11-23.
 
 # Only screenshot-verified entry timestamps are replayed; cropped cards are excluded.
+
+# Trigger replay after handling excluded timestamp rows.
