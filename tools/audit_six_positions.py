@@ -128,3 +128,5 @@ def main():
 
 if __name__=="__main__":
     main()
+
+# Replay workflow trigger: CSV output schema fix committed 2026-11-23.
