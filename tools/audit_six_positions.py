@@ -24,9 +24,9 @@ TRADES = [
     {"id":"BTC-1","asset":"BTC","direction":"SHORT","entry_local":"2026-11-20 16:15:05","exit_local":"2026-11-20 17:12:15","entry_price":60874.8,"exit_price":59535.1},
     {"id":"BTC-2","asset":"BTC","direction":"SHORT","entry_local":"2026-11-22 05:15:05","exit_local":"2026-11-22 06:46:50","entry_price":59418.4,"exit_price":58859.9},
     {"id":"ETH-1","asset":"ETH","direction":"SHORT","entry_local":"2026-11-22 13:45:06","exit_local":"2026-11-22 15:44:46","entry_price":1705.43,"exit_price":1715.45},
-    {"id":"BTC-3","asset":"BTC","direction":"SHORT","entry_local":null,"exit_local":null,"entry_price":57670.3,"exit_price":58762.2},
-    {"id":"ETH-2","asset":"ETH","direction":"SHORT","entry_local":null,"exit_local":null,"entry_price":1713.24,"exit_price":1652.72},
-    {"id":"ETH-3","asset":"ETH","direction":"SHORT","entry_local":null,"exit_local":null,"entry_price":1663.87,"exit_price":1676.08},
+    {"id":"BTC-3","asset":"BTC","direction":"SHORT","entry_local":None,"exit_local":None,"entry_price":57670.3,"exit_price":58762.2},
+    {"id":"ETH-2","asset":"ETH","direction":"SHORT","entry_local":None,"exit_local":None,"entry_price":1713.24,"exit_price":1652.72},
+    {"id":"ETH-3","asset":"ETH","direction":"SHORT","entry_local":None,"exit_local":None,"entry_price":1663.87,"exit_price":1676.08},
 ]
 
 def epoch(dt):
