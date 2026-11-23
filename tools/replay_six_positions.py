@@ -77,7 +77,7 @@ def main():
   fields=["trade_id","asset","entry_local","entry_time_utc","match_count","direction","model","h4_bias","h4_strength","h1_signal_time_utc","h1_level_type","h1_pa","m15_pa","signal_price","next_m15_open","actual_fill_price","fill_minus_m15_open","reconstructed_structural_sl","planned_target","planned_rr"]
   w=csv.DictWriter(f,fieldnames=fields); w.writeheader()
   for r in results:
-   if r["matched_strategy_signals"]:
+   if r.get("matched_strategy_signals"):
     for m in r["matched_strategy_signals"]:
      w.writerow({k:v for k,v in {"trade_id":r["trade_id"],"asset":r["asset"],"entry_local":r["entry_local"],"entry_time_utc":r["entry_time_utc"],"match_count":r["match_count"],**m}.items() if k in fields})
    else: w.writerow({"trade_id":r["trade_id"],"asset":r["asset"],"entry_local":r["entry_local"],"entry_time_utc":r["entry_time_utc"],"match_count":0})
