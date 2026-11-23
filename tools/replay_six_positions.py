@@ -16,9 +16,9 @@ TRADES=[
  {"id":"BTC-1","asset":"BTC","entry_local":"2026-11-20 16:15:05","entry_price":60874.8},
  {"id":"BTC-2","asset":"BTC","entry_local":"2026-11-22 05:15:05","entry_price":59418.4},
  {"id":"ETH-1","asset":"ETH","entry_local":"2026-11-22 13:45:06","entry_price":1705.43},
- {"id":"BTC-3","asset":"BTC","entry_local":None,"entry_price":57670.3},
- {"id":"ETH-2","asset":"ETH","entry_local":None,"entry_price":1713.24},
- {"id":"ETH-3","asset":"ETH","entry_local":None,"entry_price":1663.87},
+ {"id":"BTC-3","asset":"BTC","entry_local":"2026-11-21 09:30:05","entry_price":57670.3},
+ {"id":"ETH-2","asset":"ETH","entry_local":"2026-11-20 16:15:11","entry_price":1713.24},
+ {"id":"ETH-3","asset":"ETH","entry_local":"2026-11-22 05:15:11","entry_price":1663.87},
 ]
 def stamp(s):
  return int(datetime.strptime(s,"%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ).timestamp())
