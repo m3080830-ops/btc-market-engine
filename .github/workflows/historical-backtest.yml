@@ -1,5 +1,11 @@
 name: Historical strategy backtest (read-only)
 on:
+  push:
+    branches:
+      - "audit/backtest-h4-m15-guardrails"
+    paths:
+      - "tools/historical_backtest_compare.py"
+      - ".github/workflows/historical-backtest.yml"
   workflow_dispatch:
     inputs:
       start_utc:
