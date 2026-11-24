@@ -11,11 +11,11 @@ class M15FastEmaConfirmationTests(unittest.TestCase):
                   "high": close if high is None else high,
                   "low": close if low is None else low, "close": close}
         with patch.object(strategy, "_ema_state",
-            return_value=([ema9], [ema18], [ema9], [ema18], [1.0])),
-             patch.object(strategy, "price_action",
-            return_value={"ok": False, "signals": []}):
-            return strategy._m15_trigger([candle], direction, after_time=0,
-                require_fast_ema=require_fast_ema)
+                          return_value=([ema9], [ema18], [ema9], [ema18], [1.0])):
+            with patch.object(strategy, "price_action",
+                              return_value={"ok": False, "signals": []}):
+                return strategy._m15_trigger([candle], direction, after_time=0,
+                                             require_fast_ema=require_fast_ema)
 
     def test_trend_short_requires_close_below_both_emas(self):
         self.assertIsNotNone(self.run_trigger(98.0, 99.0, 100.0, "SHORT"))
