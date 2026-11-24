@@ -36,7 +36,7 @@ class PlannedTradeStructureTests(unittest.TestCase):
     def test_target_is_independent_of_nearby_m15_micro_pivots(self):
         setup = {"direction": "SHORT", "signal_time": 100}
         plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 120.0)
-        self.assertGreater(plan["target"], 99.0)
+        self.assertNotAlmostEqual(plan["target"], 99.0)
         self.assertAlmostEqual(plan["target"], 70.0)
 
     def test_invalid_direction_and_zero_risk_are_rejected(self):
