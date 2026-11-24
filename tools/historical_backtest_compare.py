@@ -213,6 +213,64 @@ def main():
                 "rejected_min_sl_distance":rejected,"rejected_rr":rr_rejected,"open_at_end_excluded":open_at_end,
                 "trades":trades}
             csvrows.extend([{"version":label,**t} for t in trades])
+    # Per-setup diagnostics: retain every generated signal, including those rejected
+    # by minimum SL distance or RR. This is audit output only; it does not alter
+    # signal generation, entry selection, position sizing, or live strategy.
+    diagnostics=[]
+    for asset,data in all_data.items():
+        h4,h1,m15,d1,m1=(data[k] for k in ("Hour4","Min60","Min15","Day1","Min1"))
+        signals=current.find_historical_setups(h4,h1,m15,d1)
+        for sig in signals:
+            entry=current.build_entry(sig,m15)
+            if not entry or int(entry["time"])<START or int(entry["time"])>=END:
+                continue
+            price=float(entry["price"]); direction=sig["direction"]
+            sl=current.choose_structural_sl(h1,m15,sig)
+            if sl is None or abs(price-float(sl))<=0:
+                diagnostics.append({"asset":asset,"signal_time":sig.get("signal_time"),"entry_time":entry["time"],
+                    "direction":direction,"model":sig.get("model"),"status":"NO_VALID_SL"})
+                continue
+            sl=float(sl); risk=abs(price-sl)
+            min_pct=.004 if asset=="BTC" else .005
+            min_sl_ok=risk >= price*min_pct
+            old_plan=old_tp(h1,m15,sig,price,sl)
+            new_plan=current.planned_trade(h1,m15,sig,price,sl)
+            sim=simulate_position(m1,direction,entry,sl)
+            if sim and sim["exit_time"] is not None:
+                exit_price=float(sim["exit_price"])
+                gross=sim["exit_r"]
+                fees=(price*FEE+exit_price*FEE)/risk
+                net=gross-fees
+                outcome="WIN" if net>0 else "LOSS"
+            else:
+                gross=fees=net=None
+                outcome="OPEN_OR_UNRESOLVED"
+            diagnostics.append({
+                "asset":asset,"signal_time":sig.get("signal_time"),"entry_time":entry["time"],
+                "direction":direction,"model":sig.get("model"),
+                "h4_bias":sig.get("h4_bias"),"h4_strength":sig.get("h4_strength"),
+                "h1_signal_time":sig.get("h1_signal_time"),
+                "h1_level_type":sig.get("h1_level_type"),
+                "h1_level":sig.get("h1_level",sig.get("level")),
+                "h1_pa":";".join(sig.get("h1_pa",[]) or []),
+                "m15_pa":";".join(sig.get("pa",[]) or []),
+                "entry":price,"initial_sl":sl,"sl_distance_pct":risk/price*100,
+                "min_sl_required_pct":min_pct*100,"min_sl_pass":min_sl_ok,
+                "old_m15_rr":old_plan.get("rr") if old_plan else None,
+                "old_m15_tp":old_plan.get("target") if old_plan else None,
+                "old_m15_rr_pass":bool(old_plan and old_plan.get("rr",0)>=1.0),
+                "new_h1_rr":new_plan.get("rr") if new_plan else None,
+                "new_h1_tp":new_plan.get("target") if new_plan else None,
+                "new_h1_rr_pass":bool(new_plan and new_plan.get("rr",0)>=1.0),
+                "m1_outcome":outcome,"gross_R":gross,"fees_R":fees,"net_R":net,
+                "max_R":sim.get("max_r") if sim else None,"min_R":sim.get("min_r") if sim else None,
+                "exit_time":sim.get("exit_time") if sim else None,"exit_price":sim.get("exit_price") if sim else None,
+                "exit_reason":sim.get("reason") if sim else None,
+            })
+    with open("backtest-output/setups_diagnostics.csv","w",newline="") as f:
+        fields=list(dict.fromkeys(k for row in diagnostics for k in row))
+        w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(diagnostics)
+    print(f"Wrote {len(diagnostics)} per-setup diagnostic rows")
     with open("backtest-output/report.json","w") as f: json.dump(report,f,indent=2)
     with open("backtest-output/trades.csv","w",newline="") as f:
         fields=["version","asset","entry_time","direction","model","entry","initial_sl","planned_tp","planned_rr",
