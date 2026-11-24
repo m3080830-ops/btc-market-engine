@@ -11,7 +11,7 @@ on:
       start_utc:
         description: "Start UTC (inclusive)"
         required: true
-        default: "2026-11-18T00:00:00+00:00"
+        default: "2026-11-10T00:00:00+00:00"
       end_utc:
         description: "End UTC (exclusive)"
         required: true
@@ -37,7 +37,7 @@ jobs:
           git show faf509c38e800ade3d0102145bf6235d6909e646^:strategy.py > backtest-input/strategy_tp_old.py
       - name: Run identical-data BTC and ETH comparison
         env:
-          START_UTC: ${{ inputs.start_utc || '2026-11-18T00:00:00+00:00' }}
+          START_UTC: ${{ inputs.start_utc || '2026-11-10T00:00:00+00:00' }}
           END_UTC: ${{ inputs.end_utc || '2026-11-24T00:00:00+00:00' }}
         run: python tools/historical_backtest_compare.py
       - name: Upload report and candle data
