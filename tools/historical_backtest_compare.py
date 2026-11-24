@@ -6,8 +6,8 @@ import csv, importlib.util, json, os, time, urllib.parse, urllib.request
 from pathlib import Path
 from datetime import datetime, timezone
 
-START = int(datetime.fromisoformat(os.getenv("START_UTC", "2026-11-01T00:00:00+00:00")).timestamp())
-END = int(datetime.fromisoformat(os.getenv("END_UTC", "2026-11-19T00:00:00+00:00")).timestamp())
+START = int(datetime.fromisoformat(os.getenv("START_UTC") or "2026-11-01T00:00:00+00:00").timestamp())
+END = int(datetime.fromisoformat(os.getenv("END_UTC") or "2026-11-19T00:00:00+00:00").timestamp())
 WARMUP_DAYS = {"Min15":30, "Min60":30, "Hour4":30, "Day1":75}
 FEE = 0.0008  # conservative taker fee per side; maker fee is not assumed
 BASES = ["https://contract.mexc.com/api/v1/contract/kline", "https://api.mexc.com/api/v1/contract/kline"]
@@ -104,9 +104,9 @@ def main():
             with open(f"backtest-output/{asset}_{interval}.csv","w",newline="") as f:
                 w=csv.DictWriter(f,fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
             print(f"Downloaded {asset} {interval}: {len(rows)} candles")
-    report={"period_utc":{"start":datetime.fromtimestamp(START,timezone.utc).isoformat(),"end_exclusive":datetime.fromtimestamp(END,timezone.utc).isoformat()},"fees":{"taker_per_side_pct":FEE*100,"maker_per_side_pct":0.06,"assumption":"taker on entry and exit"},"method":"Same downloaded candles for both revisions. Entry at next M15 open. Static structural SL and planned H1 TP; if both touched in one M15 candle, SL is counted first. No trailing/M1 stop simulation. Open trades without SL/TP hit by data end are excluded from closed-trade R.","versions":{}}
+    report={"period_utc":{"start":datetime.fromtimestamp(START,timezone.utc).isoformat(),"end_exclusive":datetime.fromtimestamp(END,timezone.utc).isoformat()},"fees":{"taker_per_side_pct":FEE*100,"maker_per_side_pct":0.06,"assumption":"taker on entry and exit"},"method":"Current strategy only. Entry at next M15 open. Static structural SL and planned H1 TP; if both touched in one M15 candle, SL is counted first. No trailing/M1 stop simulation. Open trades without SL/TP hit by data end are excluded from closed-trade R.","versions":{}}
     csvrows=[]
-    for label,mod in (("before_guardrails",old),("after_guardrails",new)):
+    for label,mod in (("current",current),):
         report["versions"][label]={}
         for asset,data in all_data.items():
             trades,rejected,signal_count=replay(mod,data,asset)
