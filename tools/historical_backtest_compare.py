@@ -2,7 +2,7 @@
 """Replay current BTC/ETH strategy with the exact live M1 stop-protection rules.
 Read-only historical replay. No exchange credentials or orders are used.
 """
-import csv, importlib.util, json, os, time, urllib.parse, urllib.request
+import csv, importlib.util, json, os, time, urllib.parse, urllib.request, types
 from datetime import datetime, timezone
 
 START = int(datetime.fromisoformat(os.getenv("START_UTC") or "2026-11-01T00:00:00+00:00").timestamp())
@@ -20,6 +20,18 @@ M1_SWING_RIGHT = 2
 def load_module(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); return mod
+
+def load_trigger_variant():
+    source = open("strategy.py", encoding="utf-8").read()
+    old_block = "    # A live trigger is valid only on the newest fully closed M15 candle,\n    # and only while it is within max_bars closed M15 candles of the H1\n    # reaction. The H1 reaction candle itself is the anchor, not a trigger.\n    # Counting the subsequent closed candles prevents a stale H1 setup from\n    # being reused after its M15 confirmation window has expired.\n    bars_after_reaction = [c for c in r if c[\"time\"] > after_time]\n    candidates = (\n        [r[-1]]\n        if bars_after_reaction\n        and len(bars_after_reaction) <= max_bars\n        and r[-1][\"time\"] > after_time\n        else []\n    )"
+    new_block = "    # CONTROL VARIANT: reproduce the pre-13-Nov recent-window search.\n    # All other current rules remain identical.\n    recent = r[-max(1, int(max_bars)):]\n    candidates = [x for x in recent if x[\"time\"] > after_time]"
+    if old_block not in source:
+        raise RuntimeError("Could not locate current M15 trigger policy block")
+    source = source.replace(old_block, new_block, 1)
+    module = types.ModuleType("strategy_pre_nov13_trigger")
+    module.__file__ = "strategy.py"
+    exec(compile(source, "strategy_pre_nov13_trigger.py", "exec"), module.__dict__)
+    return module
 
 def fetch(symbol, interval, start, end):
     # MEXC documents start/end in Unix seconds and caps each response at 2000
@@ -177,6 +189,7 @@ def stats(trades):
 def main():
     os.makedirs("backtest-output",exist_ok=True)
     current=load_module("strategy.py","strategy_current")
+    pre_nov13_trigger=load_trigger_variant()
     all_data={}
     for asset in ("BTC","ETH"):
         all_data[asset]={}
@@ -192,15 +205,16 @@ def main():
         "fees":{"taker_per_side_pct":FEE*100,"assumption":"taker on entry and exit"},
         "trailing":{"protect_activation_R":SL_PROTECT_ACTIVATION_R,"protect_lock_R":SL_PROTECT_LOCK_R,
             "swing_activation_R":TRAIL_ACTIVATION_R,"swing_left":M1_SWING_LEFT,"swing_right":M1_SWING_RIGHT},
-        "method":"Current strategy. Entry at next M15 open. Exact main.py M1 closed-candle SL protection and confirmed 2-left/2-right swing trailing. Existing stop is checked before stop updates within each M1 candle. Planned H1 RR is an entry filter; the engine's position simulator exits by SL, not automatic TP. Fees: taker both sides. Trades still open at data end excluded from closed R.",
-        "versions":{"current":{}}}
+        "method":"Paired isolated M15 trigger-policy replay. Both variants use identical current strategy code and EMA confirmation, H1 setup logic, SL/TP calculation, entry timing, fees, and exact main.py M1 closed-candle protection plus confirmed 2-left/2-right swing trailing. Only trigger selection differs: newest-only with max_bars expiry versus pre-13-Nov recent-window search. Planned H1 RR remains an entry filter; actual position exit is by M1 SL management, not automatic TP. Open trades at data end excluded.",
+        "versions":{"current_latest_only":{},"pre_nov13_recent_window":{}}}
     csvrows=[]
     for asset,data in all_data.items():
-        trades,rejected,rr_rejected,signal_count,open_at_end=replay(current,data,asset)
-        report["versions"]["current"][asset]={**stats(trades),"raw_signals_in_period":signal_count,
-            "rejected_min_sl_distance":rejected,"rejected_rr":rr_rejected,"open_at_end_excluded":open_at_end,
-            "trades":trades}
-        csvrows.extend([{"version":"current",**t} for t in trades])
+        for label,mod in (("current_latest_only",current),("pre_nov13_recent_window",pre_nov13_trigger)):
+            trades,rejected,rr_rejected,signal_count,open_at_end=replay(mod,data,asset)
+            report["versions"][label][asset]={**stats(trades),"raw_signals_in_period":signal_count,
+                "rejected_min_sl_distance":rejected,"rejected_rr":rr_rejected,"open_at_end_excluded":open_at_end,
+                "trades":trades}
+            csvrows.extend([{"version":label,**t} for t in trades])
     with open("backtest-output/report.json","w") as f: json.dump(report,f,indent=2)
     with open("backtest-output/trades.csv","w",newline="") as f:
         fields=["version","asset","entry_time","direction","model","entry","initial_sl","planned_tp","planned_rr",
