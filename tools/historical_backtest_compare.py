@@ -21,17 +21,14 @@ def load_module(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); return mod
 
-def load_trigger_variant():
-    source = open("strategy.py", encoding="utf-8").read()
-    old_block = "    # A live trigger is valid only on the newest fully closed M15 candle,\n    # and only while it is within max_bars closed M15 candles of the H1\n    # reaction. The H1 reaction candle itself is the anchor, not a trigger.\n    # Counting the subsequent closed candles prevents a stale H1 setup from\n    # being reused after its M15 confirmation window has expired.\n    bars_after_reaction = [c for c in r if c[\"time\"] > after_time]\n    candidates = (\n        [r[-1]]\n        if bars_after_reaction\n        and len(bars_after_reaction) <= max_bars\n        and r[-1][\"time\"] > after_time\n        else []\n    )"
-    new_block = "    # CONTROL VARIANT: reproduce the pre-13-Nov recent-window search.\n    # All other current rules remain identical.\n    recent = r[-max(1, int(max_bars)):]\n    candidates = [x for x in recent if x[\"time\"] > after_time]"
-    if old_block not in source:
-        raise RuntimeError("Could not locate current M15 trigger policy block")
-    source = source.replace(old_block, new_block, 1)
-    module = types.ModuleType("strategy_pre_nov13_trigger")
-    module.__file__ = "strategy.py"
-    exec(compile(source, "strategy_pre_nov13_trigger.py", "exec"), module.__dict__)
-    return module
+def load_old_tp_function(current):
+    old = load_module("backtest-input/strategy_tp_old.py", "strategy_tp_old")
+    # Rebind the historical function to CURRENT strategy globals. This isolates
+    # only planned_trade() while keeping every other current rule identical.
+    fn = types.FunctionType(old.planned_trade.__code__, current.__dict__,
+        "planned_trade_old_tp", old.planned_trade.__defaults__,
+        old.planned_trade.__closure__)
+    return fn
 
 def fetch(symbol, interval, start, end):
     # MEXC documents start/end in Unix seconds and caps each response at 2000
@@ -138,7 +135,7 @@ def simulate_position(m1_rows, direction, entry, initial_sl):
             "max_r":max_r,"min_r":min_r,"final_sl":sl,"trail_time":trail_time,
             "trail_price":trail_price,"last_m1_candle":processed}
 
-def replay(mod, data, asset):
+def replay(mod, data, asset, planned_trade_fn=None):
     h4,h1,m15,d1,m1=(data[k] for k in ("Hour4","Min60","Min15","Day1","Min1"))
     signals=mod.find_historical_setups(h4,h1,m15,d1)
     bytime={x["time"]:i for i,x in enumerate(m15)}
@@ -155,7 +152,7 @@ def replay(mod, data, asset):
         min_pct=.004 if asset=="BTC" else .005
         if initial_sl is None or abs(price-float(initial_sl))<price*min_pct:
             rejected+=1; continue
-        plan=mod.planned_trade(h1,m15,sig,price,initial_sl)
+        plan=(planned_trade_fn or mod.planned_trade)(h1,m15,sig,price,initial_sl)
         if not plan or float(plan.get("rr",0))<1.0:
             rr_rejected+=1; continue
         # The production engine uses planned H1 RR as an entry filter; its
@@ -189,7 +186,7 @@ def stats(trades):
 def main():
     os.makedirs("backtest-output",exist_ok=True)
     current=load_module("strategy.py","strategy_current")
-    pre_nov13_trigger=load_trigger_variant()
+    old_tp=load_old_tp_function(current)
     all_data={}
     for asset in ("BTC","ETH"):
         all_data[asset]={}
@@ -205,12 +202,13 @@ def main():
         "fees":{"taker_per_side_pct":FEE*100,"assumption":"taker on entry and exit"},
         "trailing":{"protect_activation_R":SL_PROTECT_ACTIVATION_R,"protect_lock_R":SL_PROTECT_LOCK_R,
             "swing_activation_R":TRAIL_ACTIVATION_R,"swing_left":M1_SWING_LEFT,"swing_right":M1_SWING_RIGHT},
-        "method":"Paired isolated M15 trigger-policy replay. Both variants use identical current strategy code and EMA confirmation, H1 setup logic, SL/TP calculation, entry timing, fees, and exact main.py M1 closed-candle protection plus confirmed 2-left/2-right swing trailing. Only trigger selection differs: newest-only with max_bars expiry versus pre-13-Nov recent-window search. Planned H1 RR remains an entry filter; actual position exit is by M1 SL management, not automatic TP. Open trades at data end excluded.",
-        "versions":{"current_latest_only":{},"pre_nov13_recent_window":{}}}
+        "method":"Isolated TP-model replay. Both variants use the exact same current strategy for H4/H1/M15 signals, EMA confirmation, entry, SL, fees, and exact M1 protection/trailing. Only planned_trade() differs: historical pre-24-Nov nearest M15 structural swing TP versus current 24-Nov H1 10-candle range projection. TP is an RR entry filter only; actual exits are by M1 SL management, not automatic TP. Open trades at data end excluded.",
+        "versions":{"old_m15_structural_tp":{},"new_h1_10_range_tp":{}}}
     csvrows=[]
     for asset,data in all_data.items():
-        for label,mod in (("current_latest_only",current),("pre_nov13_recent_window",pre_nov13_trigger)):
-            trades,rejected,rr_rejected,signal_count,open_at_end=replay(mod,data,asset)
+        signals=current.find_historical_setups(data["Hour4"],data["Min60"],data["Min15"],data["Day1"])
+        for label,fn in (("old_m15_structural_tp",old_tp),("new_h1_10_range_tp",current.planned_trade)):
+            trades,rejected,rr_rejected,signal_count,open_at_end=replay(current,data,asset,fn)
             report["versions"][label][asset]={**stats(trades),"raw_signals_in_period":signal_count,
                 "rejected_min_sl_distance":rejected,"rejected_rr":rr_rejected,"open_at_end_excluded":open_at_end,
                 "trades":trades}
@@ -220,6 +218,6 @@ def main():
         fields=["version","asset","entry_time","direction","model","entry","initial_sl","planned_tp","planned_rr",
             "exit_time","exit","exit_reason","gross_R","fees_R","net_R","max_R","min_R","final_sl","trail_time","trail_price"]
         w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(csvrows)
-    print(json.dumps({a:{k:v for k,v in data.items() if k!="trades"} for a,data in report["versions"]["current"].items()},indent=2))
+    print(json.dumps({v:{a:{k:x for k,x in d.items() if k!="trades"} for a,d in assets.items()} for v,assets in report["versions"].items()},indent=2))
 
 if __name__=="__main__": main()
