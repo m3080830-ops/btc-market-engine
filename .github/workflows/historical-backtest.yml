@@ -1,0 +1,41 @@
+name: Historical strategy backtest (read-only)
+on:
+  workflow_dispatch:
+    inputs:
+      start_utc:
+        description: "Start UTC (inclusive)"
+        required: true
+        default: "2026-11-01T00:00:00+00:00"
+      end_utc:
+        description: "End UTC (exclusive)"
+        required: true
+        default: "2026-11-19T00:00:00+00:00"
+permissions:
+  contents: read
+  actions: read
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/backtest-h4-m15-guardrails
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Load pre-guardrail strategy from parent commit
+        run: |
+          mkdir -p backtest-input
+          git show ac7e454dadf7cc49848eb1c3b078b0aecde7f42c^:strategy.py > backtest-input/strategy_old.py
+      - name: Run identical-data BTC and ETH comparison
+        env:
+          START_UTC: ${{ inputs.start_utc }}
+          END_UTC: ${{ inputs.end_utc }}
+        run: python tools/historical_backtest_compare.py
+      - name: Upload report and candle data
+        uses: actions/upload-artifact@v4
+        with:
+          name: btc-market-engine-backtest-${{ github.run_id }}
+          path: backtest-output/
+          if-no-files-found: error
