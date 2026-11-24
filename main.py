@@ -1633,7 +1633,7 @@ def rebuild_history():
                 sl = choose_structural_sl(h1, m15, setup)
                 if sl is None or not passes_minimum_stop_distance(symbol, entry["price"], sl):
                     continue
-                plan = planned_trade(h1, m15, setup, entry["price"], sl)
+                plan = planned_trade(h1, m15, setup, entry["price"], sl, tp_model=os.getenv("TP_MODEL", "M15_SWINGS_80"))
                 if plan is None or plan["rr"] < MIN_SETUP_RR:
                     continue
 
@@ -2202,7 +2202,7 @@ def _live_refresh_impl():
                             or passes_minimum_stop_distance(symbol, entry["price"], sl)
                         )
                         if stop_ok:
-                            plan = planned_trade(h1, m15, setup, entry["price"], sl)
+                            plan = planned_trade(h1, m15, setup, entry["price"], sl, tp_model=os.getenv("TP_MODEL", "M15_SWINGS_80"))
                         else:
                             plan = None
                             print(
