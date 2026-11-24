@@ -22,33 +22,49 @@ def load_module(path, name):
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); return mod
 
 def fetch(symbol, interval, start, end):
-    cursor=end; rows=[]; seen=set()
-    while cursor >= start:
-        page=None; errors=[]
-        for base in BASES:
-            for end_arg in (cursor, cursor*1000):
-                try:
-                    url=base+"/"+symbol+"?"+urllib.parse.urlencode({"interval":interval,"limit":2000,"end":end_arg})
-                    req=urllib.request.Request(url,headers={"User-Agent":"BTC-Market-Engine-Backtest/1.0"})
-                    with urllib.request.urlopen(req,timeout=30) as res: payload=json.loads(res.read().decode())
-                    d=payload.get("data",payload) if isinstance(payload,dict) else payload
-                    if not isinstance(d,dict) or not all(k in d for k in ("time","open","high","low","close")): raise ValueError("unexpected response")
-                    n=min(len(d[k]) for k in ("time","open","high","low","close"))
-                    got=[]
-                    for i in range(n):
-                        t=int(float(d["time"][i])); t=t//1000 if t>10_000_000_000 else t
-                        got.append({"time":t,"open":float(d["open"][i]),"high":float(d["high"][i]),"low":float(d["low"][i]),"close":float(d["close"][i]),"vol":float(d.get("vol",[0]*n)[i])})
-                    if got and min(x["time"] for x in got) < cursor: page=got; break
-                except Exception as e: errors.append(str(e))
-            if page is not None: break
-        if page is None: raise RuntimeError(f"{symbol} {interval} download failed: {'; '.join(errors[-2:])}")
-        for x in page:
-            if start <= x["time"] <= end and x["time"] not in seen: rows.append(x); seen.add(x["time"])
-        oldest=min(x["time"] for x in page)
-        if oldest >= cursor or oldest <= start: break
-        cursor=oldest-1; time.sleep(.12)
-    return sorted(rows,key=lambda x:x["time"])
-
+    # MEXC documents start/end in Unix seconds and caps each response at 2000
+    # candles. Segment the requested history explicitly; end-only pagination
+    # can return a page newer than the cursor and silently stop on Min1.
+    step = INTERVALS[interval]
+    chunk_span = 1999 * step
+    rows = []
+    seen = set()
+    base = "https://api.mexc.com/api/v1/contract/kline"
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(end, chunk_start + chunk_span)
+        params = {"interval": interval, "start": chunk_start, "end": chunk_end}
+        url = base + "/" + symbol + "?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent": "BTC-Market-Engine-Backtest/1.0"})
+        last_error = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as res:
+                    payload = json.loads(res.read().decode())
+                data = payload.get("data", payload) if isinstance(payload, dict) else payload
+                if not isinstance(data, dict) or not all(k in data for k in ("time", "open", "high", "low", "close")):
+                    raise ValueError(f"unexpected MEXC response: {str(payload)[:300]}")
+                n = min(len(data[k]) for k in ("time", "open", "high", "low", "close"))
+                for i in range(n):
+                    t = int(float(data["time"][i]))
+                    if t > 10_000_000_000:
+                        t //= 1000
+                    if start <= t <= end and t not in seen:
+                        rows.append({"time": t, "open": float(data["open"][i]),
+                            "high": float(data["high"][i]), "low": float(data["low"][i]),
+                            "close": float(data["close"][i]),
+                            "vol": float(data.get("vol", [0] * n)[i])})
+                        seen.add(t)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.5 * (attempt + 1))
+        if last_error is not None:
+            raise RuntimeError(f"{symbol} {interval} chunk {chunk_start}-{chunk_end} failed: {last_error}")
+        chunk_start = chunk_end + step
+        time.sleep(0.12)
+    return sorted(rows, key=lambda x: x["time"])
 def closed(rows):
     return rows[:-1] if len(rows)>1 else []
 
