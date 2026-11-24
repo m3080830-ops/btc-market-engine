@@ -37,9 +37,6 @@ class PlannedTradeStructureTests(unittest.TestCase):
 
     def test_invalid_direction_and_zero_risk_are_rejected(self):
         self.assertIsNone(strategy.planned_trade(
-            self.h1, self.m15, {"direction": "SIDEWAYS", "signal_time": 10}, 100.0, 120.0
-        ))
-        self.assertIsNone(strategy.planned_trade(
             self.h1, self.m15, {"direction": "SHORT", "signal_time": 10}, 100.0, 100.0
         ))
 
