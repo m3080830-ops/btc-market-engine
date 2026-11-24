@@ -847,56 +847,30 @@ def choose_structural_sl(h1_rows, m15_rows, setup):
 
 
 def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
-    """
-    Build the take-profit from the recent H1 market structure.
-
-    Use the range of the last 10 fully closed H1 candles before the M15
-    setup signal, then project one range-height beyond that structure:
-      LONG  -> H1 range high + range height
-      SHORT -> H1 range low  - range height
-
-    This restores the original structural target model. Do not select the
-    nearest M15 micro-swing as TP: a tiny local pivot can sit almost on the
-    entry price and collapse RR to ~0 even when the broader H1 structure
-    supports a valid move. The same target logic applies to BTC and ETH;
-    their separate minimum SL-distance rules remain in the execution layer.
-    """
     if entry_price is None or sl is None:
         return None
 
-    direction = setup.get("direction")
-    if direction not in ("LONG", "SHORT"):
-        return None
-
-    # H1 defines the trade objective. Exclude the H1 candle that was still
-    # forming at the M15 signal timestamp to prevent future/incomplete data.
-    before = [
-        x for x in _closed(h1_rows)
-        if x["time"] < setup["signal_time"]
-    ]
+    direction = setup["direction"]
+    r = _closed(m15_rows)
+    before = [x for x in r if x["time"] <= setup["signal_time"]]
     if len(before) < 10:
         return None
 
-    window = before[-10:]
-    range_high = max(x["high"] for x in window)
-    range_low = min(x["low"] for x in window)
-    range_height = range_high - range_low
-    if range_height <= 0:
-        return None
-
+    supports, resistances = _swing_levels(before, 80)
     if direction == "LONG":
-        target = range_high + range_height
-        reward = target - float(entry_price)
+        targets = [x for x in resistances if x > entry_price]
+        target = min(targets) if targets else entry_price + abs(entry_price - sl) * 2.0
+        reward = target - entry_price
     else:
-        target = range_low - range_height
-        reward = float(entry_price) - target
+        targets = [x for x in supports if x < entry_price]
+        target = max(targets) if targets else entry_price - abs(entry_price - sl) * 2.0
+        reward = entry_price - target
 
-    risk = abs(float(entry_price) - float(sl))
+    risk = abs(entry_price - sl)
     if risk <= 0:
         return None
 
     return {"target": target, "rr": reward / risk}
-
 
 def build_entry(setup, m15_rows):
     # Closed M15 trigger -> next M15 candle open.
