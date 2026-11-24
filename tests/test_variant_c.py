@@ -115,7 +115,8 @@ class VariantCTests(unittest.TestCase):
         )), patch.object(strategy, "price_action", side_effect=lambda candle, prev, direction: {
             "ok": direction == "SHORT", "signals": []
         }):
-            trigger = strategy._m15_trigger(rows, "SHORT", 50, max_bars=4)
+            # Exactly four closed M15 candles follow the H1 reaction.
+            trigger = strategy._m15_trigger(rows, "SHORT", 250, max_bars=4)
         self.assertEqual(trigger["signal_time"], 600)
 
     def test_m15_trigger_does_not_fall_back_to_previous_closed_candle(self):
