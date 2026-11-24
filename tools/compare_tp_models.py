@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Read-only paired TP backtest on public MEXC Futures candles."""
-import json, time, urllib.parse, urllib.request
+import json, time, urllib.parse, urllib.request, sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import strategy
 
 SYMBOLS = ("BTC_USDT", "ETH_USDT")
