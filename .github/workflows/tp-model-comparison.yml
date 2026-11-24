@@ -1,0 +1,28 @@
+name: Paired TP model backtest
+on:
+  push:
+    branches: [test/ema-trend-only-h1-structure]
+    paths:
+      - "tools/compare_tp_models.py"
+      - ".github/workflows/tp-model-comparison.yml"
+      - "strategy.py"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  paired-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Paired public-MEXC backtest (BTC and ETH)
+        run: python tools/compare_tp_models.py
+      - name: Publish report
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-tp-model-backtest
+          path: tp_model_comparison.json
+          if-no-files-found: error
