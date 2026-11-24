@@ -396,7 +396,8 @@ def _m15_trigger(
     after_time,
     anchor_low=None,
     anchor_high=None,
-    max_bars=4
+    max_bars=4,
+    require_fast_ema=True
 ):
     """
     M15 is a directional confirmation after the H1 reaction.
@@ -451,7 +452,7 @@ def _m15_trigger(
 
         # Require the M15 close to clear both fast averages in the setup
         # direction. This is a close-based confirmation, not a wick touch.
-        if not _m15_fast_ema_confirms(c, direction, e9[i], e18[i]):
+        if require_fast_ema and not _m15_fast_ema_confirms(c, direction, e9[i], e18[i]):
             continue
 
         # Veto only a clear signal in the opposite direction. A separate
@@ -596,7 +597,8 @@ def _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows=None):
         h1_setup["signal_time"],
         anchor_low=anchor_low,
         anchor_high=anchor_high,
-        max_bars=4
+        max_bars=4,
+        require_fast_ema=True
     )
     if not trigger:
         return None
@@ -648,7 +650,8 @@ def _range_signal(h4_rows, h1_rows, m15_rows):
         h1_reaction["signal_time"],
         anchor_low=level,
         anchor_high=level,
-        max_bars=4
+        max_bars=4,
+        require_fast_ema=False
     )
     if not trigger:
         return None
@@ -846,56 +849,49 @@ def choose_structural_sl(h1_rows, m15_rows, setup):
     return min(candidates)
 
 
-def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
-    """
-    Build the take-profit from the recent H1 market structure.
-
-    Use the range of the last 10 fully closed H1 candles before the M15
-    setup signal, then project one range-height beyond that structure:
-      LONG  -> H1 range high + range height
-      SHORT -> H1 range low  - range height
-
-    This restores the original structural target model. Do not select the
-    nearest M15 micro-swing as TP: a tiny local pivot can sit almost on the
-    entry price and collapse RR to ~0 even when the broader H1 structure
-    supports a valid move. The same target logic applies to BTC and ETH;
-    their separate minimum SL-distance rules remain in the execution layer.
-    """
+def planned_trade(h1_rows, m15_rows, setup, entry_price, sl, tp_model="M15_SWINGS_80"):
+    """Compare the pre-faf509c M15 swing TP with the current H1 range projection."""
     if entry_price is None or sl is None:
         return None
-
     direction = setup.get("direction")
     if direction not in ("LONG", "SHORT"):
         return None
-
-    # H1 defines the trade objective. Exclude the H1 candle that was still
-    # forming at the M15 signal timestamp to prevent future/incomplete data.
-    before = [
-        x for x in _closed(h1_rows)
-        if x["time"] < setup["signal_time"]
-    ]
-    if len(before) < 10:
-        return None
-
-    window = before[-10:]
-    range_high = max(x["high"] for x in window)
-    range_low = min(x["low"] for x in window)
-    range_height = range_high - range_low
-    if range_height <= 0:
-        return None
-
-    if direction == "LONG":
-        target = range_high + range_height
-        reward = target - float(entry_price)
-    else:
-        target = range_low - range_height
-        reward = float(entry_price) - target
-
     risk = abs(float(entry_price) - float(sl))
     if risk <= 0:
         return None
-
-    return {"target": target, "rr": reward / risk}
+    model = str(tp_model).upper()
+    if model == "M15_SWINGS_80":
+        before = [x for x in _closed(m15_rows) if x["time"] <= setup["signal_time"]]
+        if len(before) < 10:
+            return None
+        supports, resistances = _swing_levels(before, 80)
+        if direction == "LONG":
+            targets = [x for x in resistances if x > float(entry_price)]
+            target = min(targets) if targets else float(entry_price) + risk * 2.0
+            reward = target - float(entry_price)
+        else:
+            targets = [x for x in supports if x < float(entry_price)]
+            target = max(targets) if targets else float(entry_price) - risk * 2.0
+            reward = float(entry_price) - target
+    elif model == "H1_RANGE_10":
+        before = [x for x in _closed(h1_rows) if x["time"] < setup["signal_time"]]
+        if len(before) < 10:
+            return None
+        window = before[-10:]
+        range_high = max(x["high"] for x in window)
+        range_low = min(x["low"] for x in window)
+        range_height = range_high - range_low
+        if range_height <= 0:
+            return None
+        if direction == "LONG":
+            target = range_high + range_height
+            reward = target - float(entry_price)
+        else:
+            target = range_low - range_height
+            reward = float(entry_price) - target
+    else:
+        raise ValueError(f"Unsupported TP model: {tp_model}")
+    return {"target": target, "rr": reward / risk, "tp_model": model}
 
 
 def build_entry(setup, m15_rows):
