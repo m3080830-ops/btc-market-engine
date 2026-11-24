@@ -82,10 +82,7 @@ def _context_at(rows, ts):
 def _h4_context(h4_rows):
     r = _closed(h4_rows)
     if len(r) < 120:
-        # Insufficient H4 history is not a neutral market regime. Returning a
-        # distinct state prevents RANGE entries from treating missing context
-        # as a valid sideways market.
-        return {"regime": "INSUFFICIENT_DATA", "bias": None, "strength": "INSUFFICIENT_DATA"}
+        return {"regime": "NEUTRAL", "bias": None}
 
     closes = [x["close"] for x in r]
     e9 = _ema(closes, 9)
@@ -414,19 +411,10 @@ def _m15_trigger(
     if not r:
         return None
 
-    # A live trigger is valid only on the newest fully closed M15 candle,
-    # and only while it is within max_bars closed M15 candles of the H1
-    # reaction. The H1 reaction candle itself is the anchor, not a trigger.
-    # Counting the subsequent closed candles prevents a stale H1 setup from
-    # being reused after its M15 confirmation window has expired.
-    bars_after_reaction = [c for c in r if c["time"] > after_time]
-    candidates = (
-        [r[-1]]
-        if bars_after_reaction
-        and len(bars_after_reaction) <= max_bars
-        and r[-1]["time"] > after_time
-        else []
-    )
+    # A live trigger is valid only on the newest fully closed M15 candle.
+    # Falling back to an earlier candle can replay an expired setup on every
+    # scan; the live executor then rejects it as stale forever.
+    candidates = [r[-1]] if r[-1]["time"] > after_time else []
 
     if not candidates:
         return None
@@ -871,6 +859,7 @@ def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
         return None
 
     return {"target": target, "rr": reward / risk}
+
 
 def build_entry(setup, m15_rows):
     # Closed M15 trigger -> next M15 candle open.
