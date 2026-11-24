@@ -1,50 +1,46 @@
 import unittest
+from unittest.mock import patch
 
 import strategy
 
 
 class PlannedTradeStructureTests(unittest.TestCase):
     def setUp(self):
-        # Ten completed H1 candles spanning 90..110, plus one still-forming
-        # candle which _closed() must exclude.
-        self.h1 = [
-            {"time": i, "open": 100.0, "high": 110.0 if i == 4 else 105.0,
-             "low": 90.0 if i == 5 else 95.0, "close": 100.0}
-            for i in range(11)
-        ]
-        # Deliberately place a tiny M15 pivot almost at entry. TP must come
-        # from H1 structure, not this nearby micro-swing.
-        self.m15 = [
-            {"time": 90, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
-            {"time": 105, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
-        ]
+        self.h1 = [{"time": i, "open": 100.0, "high": 105.0,
+                    "low": 95.0, "close": 100.0} for i in range(20)]
+        self.m15 = [{"time": i, "open": 100.0, "high": 101.0,
+                     "low": 99.0, "close": 100.0} for i in range(20)]
 
-    def test_short_target_projects_below_h1_range(self):
-        setup = {"direction": "SHORT", "signal_time": 100}
-        plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 120.0)
+    def test_short_uses_nearest_m15_structural_support(self):
+        setup = {"direction": "SHORT", "signal_time": 10}
+        with patch.object(strategy, "_swing_levels", return_value=([70.0, 80.0], [120.0])):
+            plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 120.0)
         self.assertIsNotNone(plan)
-        self.assertAlmostEqual(plan["target"], 70.0)
-        self.assertAlmostEqual(plan["rr"], 1.5)
+        self.assertAlmostEqual(plan["target"], 80.0)
+        self.assertAlmostEqual(plan["rr"], 1.0)
 
-    def test_long_target_projects_above_h1_range(self):
-        setup = {"direction": "LONG", "signal_time": 100}
-        plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 80.0)
+    def test_long_uses_nearest_m15_structural_resistance(self):
+        setup = {"direction": "LONG", "signal_time": 10}
+        with patch.object(strategy, "_swing_levels", return_value=([80.0], [120.0, 130.0])):
+            plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 80.0)
         self.assertIsNotNone(plan)
-        self.assertAlmostEqual(plan["target"], 130.0)
-        self.assertAlmostEqual(plan["rr"], 1.5)
+        self.assertAlmostEqual(plan["target"], 120.0)
+        self.assertAlmostEqual(plan["rr"], 1.0)
 
-    def test_target_is_independent_of_nearby_m15_micro_pivots(self):
-        setup = {"direction": "SHORT", "signal_time": 100}
-        plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 120.0)
-        self.assertNotAlmostEqual(plan["target"], 99.0)
-        self.assertAlmostEqual(plan["target"], 70.0)
+    def test_fallback_remains_two_r_when_no_structural_level_exists(self):
+        setup = {"direction": "SHORT", "signal_time": 10}
+        with patch.object(strategy, "_swing_levels", return_value=([], [])):
+            plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 120.0)
+        self.assertIsNotNone(plan)
+        self.assertAlmostEqual(plan["target"], 60.0)
+        self.assertAlmostEqual(plan["rr"], 2.0)
 
     def test_invalid_direction_and_zero_risk_are_rejected(self):
         self.assertIsNone(strategy.planned_trade(
-            self.h1, self.m15, {"direction": "SIDEWAYS", "signal_time": 100}, 100.0, 120.0
+            self.h1, self.m15, {"direction": "SIDEWAYS", "signal_time": 10}, 100.0, 120.0
         ))
         self.assertIsNone(strategy.planned_trade(
-            self.h1, self.m15, {"direction": "SHORT", "signal_time": 100}, 100.0, 100.0
+            self.h1, self.m15, {"direction": "SHORT", "signal_time": 10}, 100.0, 100.0
         ))
 
 
