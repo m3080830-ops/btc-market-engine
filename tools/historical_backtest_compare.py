@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 START = int(datetime.fromisoformat(os.getenv("START_UTC", "2026-11-01T00:00:00+00:00")).timestamp())
 END = int(datetime.fromisoformat(os.getenv("END_UTC", "2026-11-19T00:00:00+00:00")).timestamp())
-WARMUP = 30 * 86400
+WARMUP_DAYS = {"Min15":30, "Min60":30, "Hour4":30, "Day1":75}
 FEE = 0.0008  # conservative taker fee per side; maker fee is not assumed
 BASES = ["https://contract.mexc.com/api/v1/contract/kline", "https://api.mexc.com/api/v1/contract/kline"]
 INTERVALS = {"Min15":900, "Min60":3600, "Hour4":14400, "Day1":86400}
@@ -98,13 +98,13 @@ def main():
     for asset in ("BTC","ETH"):
         all_data[asset]={}
         for interval in INTERVALS:
-            rows=fetch(asset+"_USDT",interval,START-WARMUP,END+2*86400)
+            rows=fetch(asset+"_USDT",interval,START-WARMUP_DAYS[interval]*86400,END+2*86400)
             if not rows: raise RuntimeError(f"No candles: {asset} {interval}")
             all_data[asset][interval]=rows
             with open(f"backtest-output/{asset}_{interval}.csv","w",newline="") as f:
                 w=csv.DictWriter(f,fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
             print(f"Downloaded {asset} {interval}: {len(rows)} candles")
-    report={"period_utc":{"start":datetime.fromtimestamp(START,timezone.utc).isoformat(),"end_exclusive":datetime.fromtimestamp(END,timezone.utc).isoformat()},"fees":{"taker_per_side_pct":FEE*100,"maker_per_side_pct":0.06,"assumption":"taker on entry and exit"},"method":"Same downloaded candles for both revisions. Entry at next M15 open. Static structural SL and planned H1 TP; if both touched in one M15 candle, SL is counted first. No trailing/M1 stop simulation. Open trades without SL/TP hit by data end are excluded from closed-trade R and listed separately.","versions":{}}
+    report={"period_utc":{"start":datetime.fromtimestamp(START,timezone.utc).isoformat(),"end_exclusive":datetime.fromtimestamp(END,timezone.utc).isoformat()},"fees":{"taker_per_side_pct":FEE*100,"maker_per_side_pct":0.06,"assumption":"taker on entry and exit"},"method":"Same downloaded candles for both revisions. Entry at next M15 open. Static structural SL and planned H1 TP; if both touched in one M15 candle, SL is counted first. No trailing/M1 stop simulation. Open trades without SL/TP hit by data end are excluded from closed-trade R.","versions":{}}
     csvrows=[]
     for label,mod in (("before_guardrails",old),("after_guardrails",new)):
         report["versions"][label]={}
