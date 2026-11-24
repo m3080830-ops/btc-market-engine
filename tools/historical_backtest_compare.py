@@ -92,8 +92,7 @@ def stats(trades):
 
 def main():
     os.makedirs("backtest-output",exist_ok=True)
-    old=load_module("backtest-input/strategy_old.py","strategy_old")
-    new=load_module("strategy.py","strategy_new")
+    current=load_module("strategy.py","strategy_current")
     all_data={}
     for asset in ("BTC","ETH"):
         all_data[asset]={}
