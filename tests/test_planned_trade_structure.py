@@ -7,7 +7,7 @@ import strategy
 class PlannedTradeStructureTests(unittest.TestCase):
     def setUp(self):
         self.h1 = [{"time": i, "open": 100.0, "high": 105.0,
-                    "low": 95.0, "close": 100.0} for i in range(20)]
+                    "low": 95.0, "close": 100.0} for i in range(30)]
         self.m15 = [{"time": i, "open": 100.0, "high": 101.0,
                      "low": 99.0, "close": 100.0} for i in range(20)]
 
@@ -37,7 +37,7 @@ class PlannedTradeStructureTests(unittest.TestCase):
 
 
     def test_short_uses_clustered_h1_target_when_m15_target_is_too_close(self):
-        setup = {"direction": "SHORT", "signal_time": 10}
+        setup = {"direction": "SHORT", "signal_time": 29}
         with patch.object(strategy, "_swing_levels",
                           side_effect=[([99.5], []), ([80.0, 80.2], [])]):
             plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 110.0)
@@ -46,7 +46,7 @@ class PlannedTradeStructureTests(unittest.TestCase):
         self.assertGreaterEqual(plan["rr"], 1.0)
 
     def test_low_rr_m15_target_is_not_forced_if_h1_has_no_cluster(self):
-        setup = {"direction": "SHORT", "signal_time": 10}
+        setup = {"direction": "SHORT", "signal_time": 29}
         with patch.object(strategy, "_swing_levels",
                           side_effect=[([99.5], []), ([80.0], [])]):
             plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 110.0)
