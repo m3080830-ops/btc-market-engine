@@ -215,8 +215,8 @@ def stats(trades):
 
 def main():
     os.makedirs("backtest-output",exist_ok=True)
-    current=load_module("strategy.py","strategy_current")
-    nov23=load_module("backtest-input/strategy_nov23.py","strategy_nov23")
+    baseline=load_module("backtest-input/strategy_nov23.py","strategy_nov23")
+    synchronized=load_module("strategy.py","strategy_synchronized")
     all_data={}
     for asset in ("BTC","ETH"):
         all_data[asset]={}
@@ -226,25 +226,27 @@ def main():
             all_data[asset][interval]=rows
             with open(f"backtest-output/{asset}_{interval}.csv","w",newline="") as f:
                 w=csv.DictWriter(f,fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
-            print(f"Downloaded {asset} {interval}: {len(rows)} candles")
+            print(f"Downloaded {asset} {interval}: {len(rows)} candles",flush=True)
     report={"period_utc":{"start":datetime.fromtimestamp(START,timezone.utc).isoformat(),
         "end_exclusive":datetime.fromtimestamp(END,timezone.utc).isoformat()},
         "fees":{"taker_per_side_pct":FEE*100,"assumption":"taker on entry and exit"},
-        "method":"Exact Nov-23 strategy signals, entries, TP/RR rule and M1 stop management. Only initial structural SL buffer varies: 0.15 (baseline), 0.20 and 0.25 x M15 ATR(14).",
-        "sl_buffer_atr":{}}
-    csvrows=[]
+        "method":"Exact Nov-23 strategy vs explicit candle-close synchronization. Same SL/TP rules, risk filters, M1 protection and fees. Only availability of fully closed H1/M15/H4/D1 candles changes.",
+        "comparison":{}}
+    all_trades=[]
     for asset,data in all_data.items():
-        for label,buf in (("baseline_015",0.15),("buffer_020",0.20),("buffer_025",0.25)):
-            trades,rejected,rr_rejected,signal_count,open_at_end=replay(nov23,data,asset,buf)
-            report["sl_buffer_atr"].setdefault(label,{})[asset]={**stats(trades),
-                "raw_signals_in_period":signal_count,"rejected_min_sl_distance":rejected,
+        for label,mod in (("baseline",baseline),("synchronized",synchronized)):
+            signals=mod.find_historical_setups(data["Hour4"],data["Min60"],data["Min15"],data["Day1"])
+            trades,rejected,rr_rejected,signal_count,open_at_end=replay(mod,data,asset)
+            in_period=sum(START<=int(sig.get("signal_time",0))<END for sig in signals)
+            report["comparison"].setdefault(label,{})[asset]={**stats(trades),
+                "raw_signals_in_period":in_period,"rejected_min_sl_distance":rejected,
                 "rejected_rr":rr_rejected,"open_at_end_excluded":open_at_end,"trades":trades}
-            csvrows.extend([{"version":label,**t} for t in trades])
+            all_trades.extend([{"version":label,**t} for t in trades])
     with open("backtest-output/report.json","w") as f: json.dump(report,f,indent=2)
     with open("backtest-output/trades.csv","w",newline="") as f:
         fields=["version","asset","entry_time","direction","model","entry","initial_sl","planned_tp","planned_rr",
             "exit_time","exit","exit_reason","gross_R","fees_R","net_R","max_R","min_R","final_sl","trail_time","trail_price"]
-        w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(csvrows)
-    print(json.dumps({v:{a:{k:x for k,x in d.items() if k!="trades"} for a,d in assets.items()} for v,assets in report["sl_buffer_atr"].items()},indent=2))
+        w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(all_trades)
+    print(json.dumps({v:{a:{k:x for k,x in d.items() if k!="trades"} for a,d in assets.items()} for v,assets in report["comparison"].items()},indent=2),flush=True)
 
 if __name__=="__main__": main()
