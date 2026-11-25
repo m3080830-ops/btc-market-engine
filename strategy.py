@@ -834,6 +834,43 @@ def choose_structural_sl(h1_rows, m15_rows, setup):
     return min(candidates)
 
 
+def _clustered_h1_target(h1_rows, direction, entry_price, risk, signal_time):
+    """Nearest H1 target formed by at least two confirmed, nearby swing levels."""
+    rows = [x for x in _closed(h1_rows) if x["time"] <= signal_time]
+    if len(rows) < 20:
+        return None
+
+    atr = _atr(rows, 14)[-1]
+    if atr <= 0:
+        return None
+    tolerance = atr * 0.10
+    supports, resistances = _swing_levels(rows, min(80, len(rows)))
+    levels = supports if direction == "SHORT" else resistances
+    levels = sorted(x for x in levels if (x < entry_price if direction == "SHORT" else x > entry_price))
+    if len(levels) < 2:
+        return None
+
+    clusters = []
+    current = [levels[0]]
+    for level in levels[1:]:
+        if level - current[-1] <= tolerance:
+            current.append(level)
+        else:
+            if len(current) >= 2:
+                clusters.append(sum(current) / len(current))
+            current = [level]
+    if len(current) >= 2:
+        clusters.append(sum(current) / len(current))
+    if not clusters:
+        return None
+
+    target = max(clusters) if direction == "SHORT" else min(clusters)
+    reward = (entry_price - target) if direction == "SHORT" else (target - entry_price)
+    if reward <= 0 or reward / risk < MIN_RR:
+        return None
+    return target
+
+
 def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
     if entry_price is None or sl is None:
         return None
@@ -857,8 +894,23 @@ def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
     risk = abs(entry_price - sl)
     if risk <= 0:
         return None
+    rr = reward / risk
 
-    return {"target": target, "rr": reward / risk}
+    # Keep the original M15 structural TP whenever it already meets MIN_RR.
+    # Only when that local target is too close, try a confirmed H1 level
+    # supported by at least two nearby swing pivots. Never invent a 2R target
+    # to force acceptance when M15 supplied an inadequate structural target.
+    if rr >= MIN_RR:
+        return {"target": target, "rr": rr}
+
+    h1_target = _clustered_h1_target(
+        h1_rows, direction, entry_price, risk, setup["signal_time"]
+    )
+    if h1_target is None:
+        return {"target": target, "rr": rr}
+
+    h1_reward = (entry_price - h1_target) if direction == "SHORT" else (h1_target - entry_price)
+    return {"target": h1_target, "rr": h1_reward / risk}
 
 
 def build_entry(setup, m15_rows):
