@@ -193,7 +193,10 @@ def replay(mod, data, asset):
         if not plan or float(plan.get("rr",0))<1.0:
             rr_rejected+=1; continue
         # Only candles from the actual entry onward can affect this position.
-        position_rows=[x for x in m1 if int(x["time"])>=ts]
+        # Keep pre-entry M1 history for confirmed swing left-context, but stop
+        # the replay exactly at the requested period boundary. The simulator
+        # itself ignores candles before entry.
+        position_rows=[x for x in m1 if int(x["time"])<END]
         result=simulate_position(position_rows,direction,entry,float(initial_sl))
         if result is None: continue
         if result["exit_time"] is None:
