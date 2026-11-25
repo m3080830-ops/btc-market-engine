@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Load exact Nov 23 baseline strategy
-        run: git show 23196f23b665ddd23cfed1da90be89f643d35dc4:strategy.py > strategy.py
+        run: mkdir -p backtest-input && git show 23196f23b665ddd23cfed1da90be89f643d35dc4:strategy.py > strategy.py && cp strategy.py backtest-input/strategy_nov23.py
       - name: Run isolated SL buffer comparison
         run: python tools/historical_sl_buffer_compare.py
       - uses: actions/upload-artifact@v4
