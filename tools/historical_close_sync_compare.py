@@ -213,7 +213,8 @@ def stats(trades):
 def main():
     os.makedirs("backtest-output",exist_ok=True)
     baseline=load_module("backtest-input/strategy_nov23.py","strategy_nov23")
-    synchronized=load_module("strategy.py","strategy_sync")
+    synchronized=load_module("backtest-input/strategy_sync_before_tp.py","strategy_sync")
+    synchronized_tp=load_module("strategy.py","strategy_sync_tp")
     all_data={}
     for asset in ("BTC","ETH"):
         all_data[asset]={}
@@ -231,7 +232,7 @@ def main():
         "models":{}}
     csvrows=[]
     for asset,data in all_data.items():
-        for label,mod in (("baseline_nov23",baseline),("synchronized",synchronized)):
+        for label,mod in (("baseline_nov23",baseline),("synchronized_old_tp",synchronized),("synchronized_fixed_tp",synchronized_tp)):
             trades,rejected,rr_rejected,signal_count,open_at_end=replay(mod,data,asset)
             report["models"].setdefault(label,{})[asset]={**stats(trades),
                 "raw_signals_in_period":signal_count,"rejected_min_sl_distance":rejected,
