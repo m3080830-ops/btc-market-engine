@@ -773,31 +773,57 @@ def choose_structural_sl(h1_rows, m15_rows, setup):
 
 
 def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
+    """Choose the nearest confirmed structural target; use H1 if M15 target fails RR."""
     if entry_price is None or sl is None:
         return None
 
     direction = setup["direction"]
-    r = _closed(m15_rows)
-    before = [x for x in r if x["time"] <= setup["signal_time"]]
-    if len(before) < 10:
-        return None
-
-    supports, resistances = _swing_levels(before, 80)
-    if direction == "LONG":
-        targets = [x for x in resistances if x > entry_price]
-        target = min(targets) if targets else entry_price + abs(entry_price - sl) * 2.0
-        reward = target - entry_price
-    else:
-        targets = [x for x in supports if x < entry_price]
-        target = max(targets) if targets else entry_price - abs(entry_price - sl) * 2.0
-        reward = entry_price - target
-
-    risk = abs(entry_price - sl)
+    signal_time = int(setup["signal_time"])
+    decision_time = signal_time + 900  # M15 trigger candle close
+    risk = abs(float(entry_price) - float(sl))
     if risk <= 0:
         return None
 
-    return {"target": target, "rr": reward / risk}
+    # M15 pivots are confirmed only after two right-hand candles.
+    m15_before = [
+        x for x in m15_rows
+        if int(x["time"]) + 900 <= decision_time
+    ]
+    if len(m15_before) >= 10:
+        supports15, resistances15 = _swing_levels(m15_before, 80)
+    else:
+        supports15, resistances15 = [], []
 
+    # H1 levels must also be fully closed by the M15 trigger close.
+    h1_before = [
+        x for x in h1_rows
+        if int(x["time"]) + 3600 <= decision_time
+    ]
+    if len(h1_before) >= 10:
+        supports1h, resistances1h = _swing_levels(h1_before, 80)
+    else:
+        supports1h, resistances1h = [], []
+
+    if direction == "LONG":
+        m15_targets = sorted(x for x in resistances15 if x > entry_price)
+        h1_targets = sorted(x for x in resistances1h if x > entry_price)
+        candidates = [(x, "M15") for x in m15_targets] + [(x, "H1") for x in h1_targets]
+        valid = [(x, tf) for x, tf in candidates if (x - entry_price) / risk >= 1.0]
+        if valid:
+            target, target_tf = min(valid, key=lambda item: item[0])
+            return {"target": target, "rr": (target - entry_price) / risk, "target_tf": target_tf}
+        target = entry_price + risk * 2.0
+        return {"target": target, "rr": 2.0, "target_tf": "FALLBACK_2R"}
+
+    m15_targets = sorted((x for x in supports15 if x < entry_price), reverse=True)
+    h1_targets = sorted((x for x in supports1h if x < entry_price), reverse=True)
+    candidates = [(x, "M15") for x in m15_targets] + [(x, "H1") for x in h1_targets]
+    valid = [(x, tf) for x, tf in candidates if (entry_price - x) / risk >= 1.0]
+    if valid:
+        target, target_tf = max(valid, key=lambda item: item[0])
+        return {"target": target, "rr": (entry_price - target) / risk, "target_tf": target_tf}
+    target = entry_price - risk * 2.0
+    return {"target": target, "rr": 2.0, "target_tf": "FALLBACK_2R"}
 
 def build_entry(setup, m15_rows):
     # Closed M15 trigger -> next M15 candle open.
