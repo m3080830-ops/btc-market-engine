@@ -1,0 +1,33 @@
+name: H1 M15 close synchronization backtest (Nov 10-24)
+on:
+  push:
+    branches: [test/h1-m15-close-sync-10-24nov]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      START_UTC: "2026-11-10T00:00:00+00:00"
+      END_UTC: "2026-11-24T00:00:00+00:00"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Load exact Nov 23 baseline strategy
+        run: mkdir -p backtest-input && git show 23196f23b665ddd23cfed1da90be89f643d35dc4:strategy.py > backtest-input/strategy_nov23.py
+      - name: Compile strategy and runner
+        run: python -m py_compile strategy.py backtest-input/strategy_nov23.py tools/historical_sync_compare.py
+      - name: Run baseline and synchronized replay
+        run: python tools/historical_sync_compare.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h1-m15-sync-backtest-${{ github.run_id }}
+          path: backtest-output/
+          if-no-files-found: error
+          retention-days: 90
