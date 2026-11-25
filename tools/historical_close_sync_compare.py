@@ -170,14 +170,20 @@ def choose_sl_buffer(mod, h1_rows, m15_rows, setup, buffer_atr):
     return min(candidates)
 
 def replay(mod, data, asset):
+    """As-of signal discovery plus one-position-per-symbol execution lock."""
     h4,h1,m15,d1,m1=(data[k] for k in ("Hour4","Min60","Min15","Day1","Min1"))
     signals=mod.find_historical_setups(h4,h1,m15,d1)
-    trades=[]; rejected=0; rr_rejected=0; open_at_end=0
-    for sig in signals:
+    trades=[]; rejected=0; rr_rejected=0; open_at_end=0; in_period_signals=0
+    locked_until=0
+    for sig in sorted(signals,key=lambda x:int(x["signal_time"])):
         entry=mod.build_entry(sig,m15)
         if not entry: continue
         ts=int(entry["time"])
         if ts<START or ts>=END: continue
+        in_period_signals += 1
+        # Live engine cannot open another position on this symbol before exit.
+        if ts < locked_until:
+            continue
         price=float(entry["price"]); direction=sig["direction"]
         initial_sl=choose_sl_buffer(mod,h1,m15,sig,0.15)
         min_pct=.004 if asset=="BTC" else .005
@@ -186,11 +192,16 @@ def replay(mod, data, asset):
         plan=mod.planned_trade(h1,m15,sig,price,initial_sl)
         if not plan or float(plan.get("rr",0))<1.0:
             rr_rejected+=1; continue
-        result=simulate_position(m1,direction,entry,float(initial_sl))
+        # Only candles from the actual entry onward can affect this position.
+        position_rows=[x for x in m1 if int(x["time"])>=ts]
+        result=simulate_position(position_rows,direction,entry,float(initial_sl))
         if result is None: continue
         if result["exit_time"] is None:
-            open_at_end+=1; continue
+            open_at_end+=1
+            locked_until=END
+            continue
         exit_price=float(result["exit_price"])
+        locked_until=int(result["exit_time"])+60
         risk=abs(price-float(initial_sl)); gross=result["exit_r"]
         fee_r=(price*FEE+exit_price*FEE)/risk
         trades.append({"asset":asset,"entry_time":ts,"direction":direction,"model":sig.get("model"),
@@ -199,7 +210,7 @@ def replay(mod, data, asset):
             "exit_reason":result["reason"],"gross_R":gross,"fees_R":fee_r,"net_R":gross-fee_r,
             "max_R":result["max_r"],"min_R":result["min_r"],"final_sl":result["final_sl"],
             "trail_time":result["trail_time"],"trail_price":result["trail_price"]})
-    return trades,rejected,rr_rejected,len(signals),open_at_end
+    return trades,rejected,rr_rejected,in_period_signals,open_at_end
 
 def stats(trades):
     eq=peak=maxdd=0.0
@@ -215,6 +226,8 @@ def main():
     baseline=load_module("backtest-input/strategy_nov23.py","strategy_nov23")
     synchronized=load_module("backtest-input/strategy_sync_before_tp.py","strategy_sync")
     synchronized_tp=load_module("strategy.py","strategy_sync_tp")
+    baseline_tp=load_module("backtest-input/strategy_nov23.py","strategy_baseline_tp")
+    baseline_tp.planned_trade=synchronized_tp.planned_trade
     all_data={}
     for asset in ("BTC","ETH"):
         all_data[asset]={}
@@ -228,11 +241,11 @@ def main():
     report={"period_utc":{"start":datetime.fromtimestamp(START,timezone.utc).isoformat(),
         "end_exclusive":datetime.fromtimestamp(END,timezone.utc).isoformat()},
         "fees":{"taker_per_side_pct":FEE*100,"assumption":"taker on entry and exit"},
-        "method":"Exact Nov-23 strategy vs close-time synchronized H1/M15 strategy. Same SL buffer 0.15 ATR, same SL/TP/RR, same entry and M1 management. Only candle-availability timing changes.",
+        "method":"Each strategy independently discovers signals with chronological as-of M15 boundaries. One open position per asset; next entry only after prior position exit. Entry at next M15 open; SL/TP levels use only candles fully closed by signal decision time; M1 management begins at entry. Four variants isolate synchronization and TP changes. Taker fees 0.08% each side.",
         "models":{}}
     csvrows=[]
     for asset,data in all_data.items():
-        for label,mod in (("baseline_nov23",baseline),("synchronized_old_tp",synchronized),("synchronized_fixed_tp",synchronized_tp)):
+        for label,mod in (("baseline_nov23",baseline),("baseline_new_tp",baseline_tp),("synchronized_old_tp",synchronized),("synchronized_fixed_tp",synchronized_tp)):
             trades,rejected,rr_rejected,signal_count,open_at_end=replay(mod,data,asset)
             report["models"].setdefault(label,{})[asset]={**stats(trades),
                 "raw_signals_in_period":signal_count,"rejected_min_sl_distance":rejected,
