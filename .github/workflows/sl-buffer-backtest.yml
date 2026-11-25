@@ -1,0 +1,38 @@
+name: Structural SL buffer comparison (Nov 10-24)
+on:
+  push:
+    branches: [test/sl-buffer-atr-10-24nov]
+  workflow_dispatch:
+    inputs:
+      start_utc:
+        description: Inclusive UTC start
+        required: false
+        default: "2026-11-10T00:00:00+00:00"
+      end_utc:
+        description: Exclusive UTC end
+        required: false
+        default: "2026-11-24T00:00:00+00:00"
+permissions:
+  contents: read
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      START_UTC: ${{ inputs.start_utc || '2026-11-10T00:00:00+00:00' }}
+      END_UTC: ${{ inputs.end_utc || '2026-11-24T00:00:00+00:00' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Load exact Nov 23 baseline strategy
+        run: git show 23196f23b665ddd23cfed1da90be89f643d35dc4:strategy.py > strategy.py
+      - name: Run isolated SL buffer comparison
+        run: python tools/historical_sl_buffer_compare.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: btc-market-engine-sl-buffer-${{ github.run_id }}
+          path: backtest-output/
+          if-no-files-found: error
+          retention-days: 90
