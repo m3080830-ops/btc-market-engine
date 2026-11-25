@@ -55,6 +55,14 @@ def _closed(rows):
     return rows[:-1] if len(rows) > 1 else []
 
 
+def _closed_at(rows, timeframe_seconds, as_of_ts):
+    """Select only candles whose full interval has elapsed by as_of_ts."""
+    if not rows or as_of_ts is None:
+        return []
+    cutoff, step = int(as_of_ts), int(timeframe_seconds)
+    return [row for row in rows if int(row["time"]) + step <= cutoff]
+
+
 def _body(c):
     return abs(c["close"] - c["open"])
 
@@ -79,8 +87,8 @@ def _context_at(rows, ts):
     return [x for x in rows if x["time"] <= ts]
 
 
-def _h4_context(h4_rows):
-    r = _closed(h4_rows)
+def _h4_context(h4_rows, rows_are_closed=False):
+    r = list(h4_rows) if rows_are_closed else _closed(h4_rows)
     if len(r) < 120:
         return {"regime": "NEUTRAL", "bias": None}
 
@@ -465,11 +473,12 @@ def _m15_trigger(
     return None
 
 
-def _find_h1_setup_before(h1_rows, m15_signal_time, direction):
+def _find_h1_setup_before(h1_rows, m15_signal_time, direction, rows_are_closed=False):
     # Look at the latest closed H1 candle before the M15 trigger and a
     # small window before it. This prevents a missed H1 reaction when the
     # M15 trigger arrives later in the hour.
-    r = [x for x in _closed(h1_rows) if x["time"] <= m15_signal_time]
+    source = list(h1_rows) if rows_are_closed else _closed(h1_rows)
+    r = [x for x in source if x["time"] <= m15_signal_time]
     if len(r) < 60:
         return None
 
@@ -519,7 +528,7 @@ def _find_h1_setup_before(h1_rows, m15_signal_time, direction):
     return None
 
 
-def _d1_ema50_conflict(d1_rows, direction, price, signal_time):
+def _d1_ema50_conflict(d1_rows, direction, price, signal_time, rows_are_closed=False):
     """
     Protect trend entries around D1 EMA50.
     Require a completed daily candle to confirm a break through EMA50 before
@@ -528,7 +537,7 @@ def _d1_ema50_conflict(d1_rows, direction, price, signal_time):
     if not d1_rows:
         return False
 
-    daily = [x for x in _closed(_context_at(d1_rows, signal_time))]
+    daily = list(d1_rows) if rows_are_closed else _closed(_context_at(d1_rows, signal_time))
     if len(daily) < 55:
         return False
 
@@ -550,52 +559,29 @@ def _d1_ema50_conflict(d1_rows, direction, price, signal_time):
     return False
 
 
-def _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows=None):
-    h4 = _h4_context(h4_rows)
+def _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows=None, rows_are_closed=False):
+    h4 = _h4_context(h4_rows, rows_are_closed=rows_are_closed)
     if h4["bias"] is None:
         return None
-
     direction = h4["bias"]
-    r15 = _closed(m15_rows)
+    r15 = list(m15_rows) if rows_are_closed else _closed(m15_rows)
     if len(r15) < 110:
         return None
-
-    # IMPORTANT: H1 reaction comes first. Only then may M15 trigger.
-    h1_setup = _find_h1_setup_before(h1_rows, r15[-1]["time"], direction)
+    h1_setup = _find_h1_setup_before(h1_rows, r15[-1]["time"], direction, rows_are_closed=rows_are_closed)
     if not h1_setup:
         return None
-
     if h1_setup.get("level_type") == "EMA9_18":
-        anchor_low = min(h1_setup["ema9"], h1_setup["ema18"])
-        anchor_high = max(h1_setup["ema9"], h1_setup["ema18"])
+        anchor_low, anchor_high = min(h1_setup["ema9"], h1_setup["ema18"]), max(h1_setup["ema9"], h1_setup["ema18"])
     elif h1_setup.get("level_type") == "EMA50":
-        anchor_low = h1_setup["ema50"]
-        anchor_high = h1_setup["ema50"]
+        anchor_low = anchor_high = h1_setup["ema50"]
     else:
         level = h1_setup.get("level")
-        if level is None:
-            return None
-        anchor_low = level
-        anchor_high = level
-
-    trigger = _m15_trigger(
-        r15,
-        direction,
-        h1_setup["signal_time"],
-        anchor_low=anchor_low,
-        anchor_high=anchor_high,
-        max_bars=4
-    )
-    if not trigger:
+        if level is None: return None
+        anchor_low = anchor_high = level
+    trigger = _m15_trigger(r15, direction, h1_setup["signal_time"], anchor_low=anchor_low, anchor_high=anchor_high, max_bars=4)
+    if not trigger: return None
+    if _d1_ema50_conflict(d1_rows, direction, trigger["price"], trigger["signal_time"], rows_are_closed=rows_are_closed):
         return None
-
-    # Do not enter directly into a nearby D1 EMA50 reaction unless the daily
-    # close has confirmed a break through that level in the trade direction.
-    if _d1_ema50_conflict(
-        d1_rows, direction, trigger["price"], trigger["signal_time"]
-    ):
-        return None
-
     trigger["model"] = "TREND_H4_H1_M15"
     trigger["h4_bias"] = direction
     trigger["h4_strength"] = h4["strength"]
@@ -603,54 +589,22 @@ def _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows=None):
     trigger["h1_pa"] = h1_setup["pa"]
     trigger["h1_level_type"] = h1_setup.get("level_type", "EMA9_18")
     return trigger
-
-
-def _range_signal(h4_rows, h1_rows, m15_rows):
-    h4 = _h4_context(h4_rows)
-    # Range entries are reserved for genuinely neutral H4 context.
-    # A soft directional bias belongs to the trend/pullback model, not RANGE.
-    if h4["regime"] != "NEUTRAL" or h4.get("bias") is not None:
-        return None
-
-    h1 = _closed(h1_rows)
-    if len(h1) < 60:
-        return None
-
-    r15 = _closed(m15_rows)
-    if len(r15) < 60:
-        return None
-
-    # H1 identifies the range level; M15 confirms the reaction at that level.
+def _range_signal(h4_rows, h1_rows, m15_rows, rows_are_closed=False):
+    h4 = _h4_context(h4_rows, rows_are_closed=rows_are_closed)
+    if h4["regime"] != "NEUTRAL" or h4.get("bias") is not None: return None
+    h1 = list(h1_rows) if rows_are_closed else _closed(h1_rows)
+    if len(h1) < 60: return None
+    r15 = list(m15_rows) if rows_are_closed else _closed(m15_rows)
+    if len(r15) < 60: return None
     h1_reaction = _h1_range_reaction(h1)
-    if not h1_reaction:
-        return None
-
-    direction = h1_reaction["direction"]
-    level = h1_reaction.get("level")
-    if level is None:
-        return None
-
-    trigger = _m15_trigger(
-        r15,
-        direction,
-        h1_reaction["signal_time"],
-        anchor_low=level,
-        anchor_high=level,
-        max_bars=4
-    )
-    if not trigger:
-        return None
-
-    trigger.update({
-        "model": h1_reaction["model"],
-        "h4_bias": h4.get("bias"),
-        "h4_strength": h4.get("strength"),
-        "h1_signal_time": h1_reaction["signal_time"],
-        "h1_level": level,
-        "h1_pa": h1_reaction["pa"],
-    })
+    if not h1_reaction: return None
+    direction, level = h1_reaction["direction"], h1_reaction.get("level")
+    if level is None: return None
+    trigger = _m15_trigger(r15, direction, h1_reaction["signal_time"], anchor_low=level, anchor_high=level, max_bars=4)
+    if not trigger: return None
+    trigger.update({"model":h1_reaction["model"],"h4_bias":h4.get("bias"),"h4_strength":h4.get("strength"),
+        "h1_signal_time":h1_reaction["signal_time"],"h1_level":level,"h1_pa":h1_reaction["pa"]})
     return trigger
-
 
 
 def _confirmed_structure_swings(rows, side):
@@ -699,58 +653,42 @@ def _variant_c_allows(signal, closed_m15_rows):
         return True
     return not _m15_trend_structure_opposes(closed_m15_rows, signal["direction"])
 
-def find_latest_setup(h4_rows, h1_rows, m15_rows, d1_rows=None):
-    # New hierarchy:
-    # H4 context -> H1 setup -> M15 trigger -> next M15 open.
-    r15 = _closed(m15_rows)
-    if len(r15) < 120:
-        return None
-
-    trend = _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows)
-    if trend:
-        # Variant C: block counter-structure TREND entries, never RANGE entries.
-        return trend if _variant_c_allows(trend, r15) else None
-
-    return _range_signal(h4_rows, h1_rows, m15_rows)
+def find_latest_setup(h4_rows, h1_rows, m15_rows, d1_rows=None, as_of_ts=None):
+    """Evaluate the latest M15 trigger at an explicit close boundary."""
+    if not m15_rows: return None
+    if as_of_ts is None: as_of_ts = int(m15_rows[-1]["time"])
+    h4c = _closed_at(h4_rows, 14400, as_of_ts)
+    h1c = _closed_at(h1_rows, 3600, as_of_ts)
+    m15c = _closed_at(m15_rows, 900, as_of_ts)
+    d1c = _closed_at(d1_rows or [], 86400, as_of_ts)
+    if len(m15c) < 120: return None
+    trend = _trend_signal(h4c,h1c,m15c,d1c,rows_are_closed=True)
+    if trend: return trend if _variant_c_allows(trend,m15c) else None
+    return _range_signal(h4c,h1c,m15c,rows_are_closed=True)
 
 
 def find_historical_setups(h4_rows, h1_rows, m15_rows, d1_rows=None):
-    r15 = _closed(m15_rows)
-    if len(r15) < 120:
-        return []
-
-    out = []
-    last_signal = None
-
-    # Re-evaluate historical M15 closes. For each trigger, use only H1/H4
-    # candles that were already closed at that moment (no future leakage).
-    for i in range(120, len(r15)):
-        signal_time = r15[i]["time"]
-        h4_at = _context_at(h4_rows, signal_time)
-        h1_at = _context_at(h1_rows, signal_time)
-        m15_prefix = r15[:i + 1]
-
-        d1_at = _context_at(d1_rows, signal_time) if d1_rows else None
-        signal = _trend_signal(h4_at, h1_at, m15_prefix, d1_at)
+    """Chronological replay using only candles fully closed at each M15 boundary."""
+    if len(m15_rows) < 121: return []
+    out, last_signal = [], None
+    for i in range(119, len(m15_rows)-1):
+        trigger = m15_rows[i]
+        decision_time = int(m15_rows[i+1]["time"])
+        if decision_time < int(trigger["time"])+900: continue
+        h4c = _closed_at(h4_rows,14400,decision_time)
+        h1c = _closed_at(h1_rows,3600,decision_time)
+        m15c = _closed_at(m15_rows,900,decision_time)
+        d1c = _closed_at(d1_rows or [],86400,decision_time)
+        if len(m15c)<120 or m15c[-1]["time"]!=trigger["time"]: continue
+        signal = _trend_signal(h4c,h1c,m15c,d1c,rows_are_closed=True)
         if signal is not None:
-            # m15_prefix contains only candles closed by signal_time.
-            if not _variant_c_allows(signal, m15_prefix):
-                continue
+            if not _variant_c_allows(signal,m15c): continue
         else:
-            signal = _range_signal(h4_at, h1_at, m15_prefix)
-
-        if signal is None:
-            continue
-
-        if last_signal is not None and i - last_signal < COOLDOWN_CANDLES:
-            continue
-
-        out.append(signal)
-        last_signal = i
-
+            signal = _range_signal(h4c,h1c,m15c,rows_are_closed=True)
+        if signal is None: continue
+        if last_signal is not None and i-last_signal<COOLDOWN_CANDLES: continue
+        out.append(signal); last_signal=i
     return out
-
-
 def choose_structural_sl(h1_rows, m15_rows, setup):
     """
     Structural SL must sit behind a meaningful level, not a tiny micro-swing.
