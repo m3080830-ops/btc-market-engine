@@ -812,8 +812,7 @@ def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
         if valid:
             target, target_tf = min(valid, key=lambda item: item[0])
             return {"target": target, "rr": (target - entry_price) / risk, "target_tf": target_tf}
-        target = entry_price + risk * 2.0
-        return {"target": target, "rr": 2.0, "target_tf": "FALLBACK_2R"}
+        return None
 
     m15_targets = sorted((x for x in supports15 if x < entry_price), reverse=True)
     h1_targets = sorted((x for x in supports1h if x < entry_price), reverse=True)
@@ -822,8 +821,7 @@ def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
     if valid:
         target, target_tf = max(valid, key=lambda item: item[0])
         return {"target": target, "rr": (entry_price - target) / risk, "target_tf": target_tf}
-    target = entry_price - risk * 2.0
-    return {"target": target, "rr": 2.0, "target_tf": "FALLBACK_2R"}
+    return None
 
 def build_entry(setup, m15_rows):
     # Closed M15 trigger -> next M15 candle open.
