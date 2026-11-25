@@ -39,6 +39,7 @@ jobs:
         run: |
           mkdir -p backtest-input
           git show 23196f23b665ddd23cfed1da90be89f643d35dc4:strategy.py > backtest-input/strategy_nov23.py
+          git show 5a6009f4911e6b5d8c779a9a26fd622e72f7b27a:strategy.py > backtest-input/strategy_sync_before_tp.py
       - name: Syntax check
         run: python -m py_compile strategy.py tools/historical_close_sync_compare.py
       - name: Run close-time synchronization comparison
