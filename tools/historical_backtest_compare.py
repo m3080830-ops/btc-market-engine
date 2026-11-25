@@ -186,6 +186,7 @@ def stats(trades):
 def main():
     os.makedirs("backtest-output",exist_ok=True)
     current=load_module("strategy.py","strategy_current")
+    nov23=load_module("backtest-input/strategy_nov23.py","strategy_nov23")
     old_tp=load_old_tp_function(current)
     all_data={}
     for asset in ("BTC","ETH"):
@@ -203,12 +204,16 @@ def main():
         "trailing":{"protect_activation_R":SL_PROTECT_ACTIVATION_R,"protect_lock_R":SL_PROTECT_LOCK_R,
             "swing_activation_R":TRAIL_ACTIVATION_R,"swing_left":M1_SWING_LEFT,"swing_right":M1_SWING_RIGHT},
         "method":"Isolated TP-model replay. Both variants use the exact same current strategy for H4/H1/M15 signals, EMA confirmation, entry, SL, fees, and exact M1 protection/trailing. Only planned_trade() differs: historical pre-24-Nov nearest M15 structural swing TP versus current 24-Nov H1 10-candle range projection. TP is an RR entry filter only; actual exits are by M1 SL management, not automatic TP. Open trades at data end excluded.",
-        "versions":{"old_m15_structural_tp":{},"new_h1_10_range_tp":{}}}
+        "versions":{"nov23_full_strategy":{},"current_strategy":{},"old_m15_tp_on_current_signals":{},"new_h1_10_range_tp":{}}}
     csvrows=[]
     for asset,data in all_data.items():
-        signals=current.find_historical_setups(data["Hour4"],data["Min60"],data["Min15"],data["Day1"])
-        for label,fn in (("old_m15_structural_tp",old_tp),("new_h1_10_range_tp",current.planned_trade)):
-            trades,rejected,rr_rejected,signal_count,open_at_end=replay(current,data,asset,fn)
+        for label,mod,fn in (
+            ("nov23_full_strategy",nov23,nov23.planned_trade),
+            ("current_strategy",current,current.planned_trade),
+            ("old_m15_tp_on_current_signals",current,old_tp),
+            ("new_h1_10_range_tp",current,current.planned_trade),
+        ):
+            trades,rejected,rr_rejected,signal_count,open_at_end=replay(mod,data,asset,fn)
             report["versions"][label][asset]={**stats(trades),"raw_signals_in_period":signal_count,
                 "rejected_min_sl_distance":rejected,"rejected_rr":rr_rejected,"open_at_end_excluded":open_at_end,
                 "trades":trades}
@@ -219,13 +224,13 @@ def main():
     diagnostics=[]
     for asset,data in all_data.items():
         h4,h1,m15,d1,m1=(data[k] for k in ("Hour4","Min60","Min15","Day1","Min1"))
-        signals=current.find_historical_setups(h4,h1,m15,d1)
+        signals=nov23.find_historical_setups(h4,h1,m15,d1)
         for sig in signals:
-            entry=current.build_entry(sig,m15)
+            entry=nov23.build_entry(sig,m15)
             if not entry or int(entry["time"])<START or int(entry["time"])>=END:
                 continue
             price=float(entry["price"]); direction=sig["direction"]
-            sl=current.choose_structural_sl(h1,m15,sig)
+            sl=nov23.choose_structural_sl(h1,m15,sig)
             if sl is None or abs(price-float(sl))<=0:
                 diagnostics.append({"asset":asset,"signal_time":sig.get("signal_time"),"entry_time":entry["time"],
                     "direction":direction,"model":sig.get("model"),"status":"NO_VALID_SL"})
@@ -233,7 +238,7 @@ def main():
             sl=float(sl); risk=abs(price-sl)
             min_pct=.004 if asset=="BTC" else .005
             min_sl_ok=risk >= price*min_pct
-            old_plan=old_tp(h1,m15,sig,price,sl)
+            old_plan=nov23.planned_trade(h1,m15,sig,price,sl)
             new_plan=current.planned_trade(h1,m15,sig,price,sl)
             sim=simulate_position(m1,direction,entry,sl)
             if sim and sim["exit_time"] is not None:
@@ -256,9 +261,9 @@ def main():
                 "m15_pa":";".join(sig.get("pa",[]) or []),
                 "entry":price,"initial_sl":sl,"sl_distance_pct":risk/price*100,
                 "min_sl_required_pct":min_pct*100,"min_sl_pass":min_sl_ok,
-                "old_m15_rr":old_plan.get("rr") if old_plan else None,
-                "old_m15_tp":old_plan.get("target") if old_plan else None,
-                "old_m15_rr_pass":bool(old_plan and old_plan.get("rr",0)>=1.0),
+                "nov23_rr":old_plan.get("rr") if old_plan else None,
+                "nov23_tp":old_plan.get("target") if old_plan else None,
+                "nov23_rr_pass":bool(old_plan and old_plan.get("rr",0)>=1.0),
                 "new_h1_rr":new_plan.get("rr") if new_plan else None,
                 "new_h1_tp":new_plan.get("target") if new_plan else None,
                 "new_h1_rr_pass":bool(new_plan and new_plan.get("rr",0)>=1.0),
