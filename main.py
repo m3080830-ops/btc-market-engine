@@ -2159,7 +2159,10 @@ def _live_refresh_impl():
             # In LIVE mode, PAPER history must never suppress fresh signal detection.
             # The LIVE adapter independently enforces one exchange position per symbol.
             if not active or symbol in LIVE_EXECUTORS:
-                setup = find_latest_setup(h4, h1, m15, d1)
+                decision_ts = M15_WS_LAST_CANDLE.get(symbol)
+                if decision_ts is None:
+                    decision_ts = (now_ts() // 900) * 900
+                setup = find_latest_setup(h4, h1, m15, d1, as_of_ts=int(decision_ts))
                 if not setup:
                     print(
                         f"LIVE_ANALYSIS symbol={symbol} result=NO_SETUP",
