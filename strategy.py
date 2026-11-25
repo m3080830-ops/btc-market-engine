@@ -834,9 +834,9 @@ def choose_structural_sl(h1_rows, m15_rows, setup):
     return min(candidates)
 
 
-def _clustered_h1_target(h1_rows, direction, entry_price, risk):
+def _clustered_h1_target(h1_rows, direction, entry_price, risk, signal_time):
     """Nearest H1 target formed by at least two confirmed, nearby swing levels."""
-    rows = [x for x in _closed(h1_rows) if x["time"] <= h1_rows[-1]["time"]]
+    rows = [x for x in _closed(h1_rows) if x["time"] <= signal_time]
     if len(rows) < 20:
         return None
 
@@ -903,8 +903,9 @@ def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
     if rr >= MIN_RR:
         return {"target": target, "rr": rr}
 
-    h1_rows_at_signal = [x for x in h1_rows if x["time"] <= setup["signal_time"]]
-    h1_target = _clustered_h1_target(h1_rows_at_signal, direction, entry_price, risk)
+    h1_target = _clustered_h1_target(
+        h1_rows, direction, entry_price, risk, setup["signal_time"]
+    )
     if h1_target is None:
         return {"target": target, "rr": rr}
 
