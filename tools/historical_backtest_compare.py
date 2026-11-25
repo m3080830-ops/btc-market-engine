@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay current BTC/ETH strategy with the exact live M1 stop-protection rules.
+"""Replay Nov 23 and current BTC/ETH strategies with the exact live M1 stop-protection rules.
 Read-only historical replay. No exchange credentials or orders are used.
 """
 import csv, importlib.util, json, os, time, urllib.parse, urllib.request, types
