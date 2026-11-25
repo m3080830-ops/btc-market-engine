@@ -31,9 +31,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Load pre-guardrail strategy from parent commit
+      - name: Load exact Nov 23 strategy snapshot
         run: |
           mkdir -p backtest-input
+          git show 23196f23b665ddd23cfed1da90be89f643d35dc4:strategy.py > backtest-input/strategy_nov23.py
           git show faf509c38e800ade3d0102145bf6235d6909e646^:strategy.py > backtest-input/strategy_tp_old.py
       - name: Run identical-data BTC and ETH comparison
         env:
