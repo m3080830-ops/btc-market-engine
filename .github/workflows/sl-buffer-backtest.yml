@@ -22,7 +22,7 @@ jobs:
       START_UTC: ${{ inputs.start_utc || '2026-11-10T00:00:00+00:00' }}
       END_UTC: ${{ inputs.end_utc || '2026-11-24T00:00:00+00:00' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
