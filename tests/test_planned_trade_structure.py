@@ -35,6 +35,25 @@ class PlannedTradeStructureTests(unittest.TestCase):
         self.assertAlmostEqual(plan["target"], 60.0)
         self.assertAlmostEqual(plan["rr"], 2.0)
 
+
+    def test_short_uses_clustered_h1_target_when_m15_target_is_too_close(self):
+        setup = {"direction": "SHORT", "signal_time": 10}
+        with patch.object(strategy, "_swing_levels",
+                          side_effect=[([99.5], []), ([80.0, 80.2], [])]):
+            plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 110.0)
+        self.assertIsNotNone(plan)
+        self.assertAlmostEqual(plan["target"], 80.1)
+        self.assertGreaterEqual(plan["rr"], 1.0)
+
+    def test_low_rr_m15_target_is_not_forced_if_h1_has_no_cluster(self):
+        setup = {"direction": "SHORT", "signal_time": 10}
+        with patch.object(strategy, "_swing_levels",
+                          side_effect=[([99.5], []), ([80.0], [])]):
+            plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 110.0)
+        self.assertIsNotNone(plan)
+        self.assertAlmostEqual(plan["target"], 99.5)
+        self.assertAlmostEqual(plan["rr"], 0.05)
+
     def test_invalid_direction_and_zero_risk_are_rejected(self):
         self.assertIsNone(strategy.planned_trade(
             self.h1, self.m15, {"direction": "SHORT", "signal_time": 10}, 100.0, 100.0
