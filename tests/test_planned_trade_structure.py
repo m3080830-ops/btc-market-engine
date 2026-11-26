@@ -27,13 +27,11 @@ class PlannedTradeStructureTests(unittest.TestCase):
         self.assertAlmostEqual(plan["target"], 120.0)
         self.assertAlmostEqual(plan["rr"], 1.0)
 
-    def test_fallback_remains_two_r_when_no_structural_level_exists(self):
+    def test_no_structural_level_rejects_trade_instead_of_synthetic_two_r(self):
         setup = {"direction": "SHORT", "signal_time": 10}
         with patch.object(strategy, "_swing_levels", return_value=([], [])):
             plan = strategy.planned_trade(self.h1, self.m15, setup, 100.0, 120.0)
-        self.assertIsNotNone(plan)
-        self.assertAlmostEqual(plan["target"], 60.0)
-        self.assertAlmostEqual(plan["rr"], 2.0)
+        self.assertIsNone(plan)
 
     def test_invalid_direction_and_zero_risk_are_rejected(self):
         self.assertIsNone(strategy.planned_trade(
