@@ -947,6 +947,20 @@ class MexcFuturesLive:
                     age_seconds=now - entry_time,
                 )
                 return False
+
+            # Do not chase a signal late in its M15 entry candle. The candle
+            # open is the strategy's reference entry; if execution is delayed
+            # or price has already run, skip instead of entering a different
+            # trade than the one whose SL/TP/RR were calculated.
+            entry_age = now - entry_time
+            if entry_age > 180:
+                self._log(
+                    "ENTRY_SKIPPED", setup_time=setup_time,
+                    reason="entry_candle_too_late",
+                    entry_age_seconds=entry_age, max_age_seconds=180,
+                )
+                return False
+
             self._last_entry_attempt[setup_time] = now
 
             direction = str(setup["direction"]).upper()
@@ -997,6 +1011,16 @@ class MexcFuturesLive:
             # Use the current executable side of the order book, not the previous
             # M15 candle close, for entry price and stop distance.
             price = timed_stage("executable_market_price_read", lambda: self._market_price(direction))
+            entry_deviation = abs(price - entry_price) / entry_price
+            if entry_deviation > 0.002:
+                self._log(
+                    "ENTRY_SKIPPED", symbol=self.symbol,
+                    setup_time=setup_time, reason="entry_price_deviation_too_large",
+                    planned_entry=entry_price, market_price=price,
+                    deviation_pct=round(entry_deviation * 100, 5),
+                    max_deviation_pct=0.20,
+                )
+                return False
             sl = float(initial_sl)
             if not math.isfinite(sl) or sl <= 0:
                 raise MexcLiveError("Initial stop price is invalid")
