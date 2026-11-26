@@ -11,13 +11,13 @@ class StructuralTpAndSynchronizedEntryTests(unittest.TestCase):
     def test_long_uses_nearest_confirmed_level_that_reaches_one_r(self):
         # Entry 100, SL 90 => 1R distance 10. M15 108 is too close;
         # M15 112 is the nearest eligible level, before H1 115.
-        m15 = [self.candle(t) for t in range(0, 20 * 900, 900)]
-        h1 = [self.candle(t) for t in range(0, 8 * 3600, 3600)]
+        m15 = [self.candle(t) for t in range(0, 130 * 900, 900)]
+        h1 = [self.candle(t) for t in range(0, 40 * 3600, 3600)]
         with patch.object(strategy, "_swing_levels", side_effect=[
             ([], [108.0, 112.0]), ([], [115.0])
         ]):
             plan = strategy.planned_trade(
-                h1, m15, {"direction": "LONG", "signal_time": 19 * 900},
+                h1, m15, {"direction": "LONG", "signal_time": 119 * 900},
                 100.0, 90.0
             )
         self.assertEqual(plan["target"], 112.0)
@@ -51,8 +51,8 @@ class StructuralTpAndSynchronizedEntryTests(unittest.TestCase):
         self.assertIsNone(plan)
 
     def test_only_candles_closed_by_trigger_close_are_used_for_tp(self):
-        m15 = [self.candle(t) for t in range(0, 22 * 900, 900)]
-        h1 = [self.candle(t) for t in range(0, 10 * 3600, 3600)]
+        m15 = [self.candle(t) for t in range(0, 132 * 900, 900)]
+        h1 = [self.candle(t) for t in range(0, 42 * 3600, 3600)]
         seen = []
         def levels(rows, lookback):
             seen.append([row["time"] for row in rows])
@@ -62,7 +62,7 @@ class StructuralTpAndSynchronizedEntryTests(unittest.TestCase):
                 h1, m15, {"direction": "LONG", "signal_time": 19 * 900},
                 100.0, 90.0
             )
-        decision = 20 * 900
+        decision = 120 * 900
         self.assertTrue(all(t + 900 <= decision for t in seen[0]))
         self.assertTrue(all(t + 3600 <= decision for t in seen[1]))
 
