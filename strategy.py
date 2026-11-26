@@ -349,26 +349,33 @@ def _h1_reaction(h1_rows, direction):
 
 
 
-def _h1_bullish_reaction_veto(h1_rows):
+def _h1_opposing_reaction_veto(h1_rows, direction):
     """
-    Block SHORT when the latest fully closed H1 candle shows a strong
-    rejection from its low (buyers defended lower prices). Candle colour
-    is deliberately irrelevant: a red candle can still have a strong lower
-    wick. Caller must pass H1 candles closed as of the decision timestamp.
+    Symmetric H1 protection using the latest fully closed candle only.
+    SHORT is vetoed by a strong recovery from the low (buyers defended it).
+    LONG is vetoed by a strong rejection from the high (sellers defended it).
+    Candle colour is irrelevant; wick and close location describe the reaction.
     """
-    if not h1_rows:
+    if not h1_rows or direction not in ("LONG", "SHORT"):
         return False
     c = h1_rows[-1]
     rng = _range(c)
     if rng <= 0:
         return False
     body = _body(c)
-    lower_wick = min(c["open"], c["close"]) - c["low"]
-    recovered_from_low = c["close"] >= c["low"] + rng * 0.40
-    return (
-        lower_wick >= max(body * 1.2, rng * 0.35)
-        and recovered_from_low
-    )
+    if direction == "SHORT":
+        lower_wick = min(c["open"], c["close"]) - c["low"]
+        recovered_from_low = c["close"] >= c["low"] + rng * 0.40
+        return lower_wick >= max(body * 1.2, rng * 0.35) and recovered_from_low
+
+    upper_wick = c["high"] - max(c["open"], c["close"])
+    rejected_from_high = c["close"] <= c["high"] - rng * 0.40
+    return upper_wick >= max(body * 1.2, rng * 0.35) and rejected_from_high
+
+
+def _h1_bullish_reaction_veto(h1_rows):
+    # Backwards-compatible wrapper for existing SHORT-specific tests.
+    return _h1_opposing_reaction_veto(h1_rows, "SHORT")
 
 
 def _h1_range_reaction(h1_rows):
@@ -591,10 +598,11 @@ def _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows=None, rows_are_closed=Fals
     if h4["bias"] is None:
         return None
     direction = h4["bias"]
-    # One strong lower-wick reaction on the latest completed H1 candle is
-    # enough to veto a SHORT. Never inspect the still-forming H1 candle.
+    # One strong H1 reaction against the intended direction vetoes the setup:
+    # lower-wick buyer defence blocks SHORT; upper-wick seller rejection blocks LONG.
+    # Never inspect the still-forming H1 candle.
     h1_closed = list(h1_rows) if rows_are_closed else _closed(h1_rows)
-    if direction == "SHORT" and _h1_bullish_reaction_veto(h1_closed):
+    if _h1_opposing_reaction_veto(h1_closed, direction):
         return None
     r15 = list(m15_rows) if rows_are_closed else _closed(m15_rows)
     if len(r15) < 110:
@@ -631,7 +639,7 @@ def _range_signal(h4_rows, h1_rows, m15_rows, rows_are_closed=False):
     h1_reaction = _h1_range_reaction(h1)
     if not h1_reaction: return None
     direction, level = h1_reaction["direction"], h1_reaction.get("level")
-    if direction == "SHORT" and _h1_bullish_reaction_veto(h1):
+    if _h1_opposing_reaction_veto(h1, direction):
         return None
     if level is None: return None
     trigger = _m15_trigger(r15, direction, h1_reaction["signal_time"], anchor_low=level, anchor_high=level, max_bars=4)
