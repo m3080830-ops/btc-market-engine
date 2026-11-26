@@ -336,6 +336,30 @@ def _h1_reaction(h1_rows, direction):
     }
 
 
+def _h1_opposing_reaction_veto(h1_rows, direction):
+    """
+    Symmetric H1 protection using the latest fully closed candle only.
+    SHORT is vetoed by a strong recovery from the low (buyers defended it).
+    LONG is vetoed by a strong rejection from the high (sellers defended it).
+    Candle colour is irrelevant; wick and close location describe the reaction.
+    """
+    if not h1_rows or direction not in ("LONG", "SHORT"):
+        return False
+    c = h1_rows[-1]
+    rng = _range(c)
+    if rng <= 0:
+        return False
+    body = _body(c)
+    if direction == "SHORT":
+        lower_wick = min(c["open"], c["close"]) - c["low"]
+        recovered_from_low = c["close"] >= c["low"] + rng * 0.40
+        return lower_wick >= max(body * 1.2, rng * 0.35) and recovered_from_low
+
+    upper_wick = c["high"] - max(c["open"], c["close"])
+    rejected_from_high = c["close"] <= c["high"] - rng * 0.40
+    return upper_wick >= max(body * 1.2, rng * 0.35) and rejected_from_high
+
+
 def _h1_range_reaction(h1_rows):
     # Callers pass closed H1 candles; preserve the newest completed reaction.
     r = list(h1_rows)
@@ -556,6 +580,10 @@ def _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows=None):
         return None
 
     direction = h4["bias"]
+    # Reject a setup when the latest completed H1 candle shows a strong
+    # opposing reaction: defended lows block SHORT, rejected highs block LONG.
+    if _h1_opposing_reaction_veto(_closed(h1_rows), direction):
+        return None
     r15 = _closed(m15_rows)
     if len(r15) < 110:
         return None
@@ -626,6 +654,8 @@ def _range_signal(h4_rows, h1_rows, m15_rows):
         return None
 
     direction = h1_reaction["direction"]
+    if _h1_opposing_reaction_veto(h1, direction):
+        return None
     level = h1_reaction.get("level")
     if level is None:
         return None
@@ -835,32 +865,86 @@ def choose_structural_sl(h1_rows, m15_rows, setup):
 
 
 def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
+    """
+    Select the nearest confirmed structural TP on M15 or H1.
+    A target is usable only when it offers at least 1R; never manufacture
+    a fixed 2R target when structure does not provide enough room.
+    All levels are calculated only from candles fully closed by the trigger
+    candle's close time.
+    """
     if entry_price is None or sl is None:
         return None
 
-    direction = setup["direction"]
-    r = _closed(m15_rows)
-    before = [x for x in r if x["time"] <= setup["signal_time"]]
-    if len(before) < 10:
+    direction = str(setup.get("direction", "")).upper()
+    if direction not in ("LONG", "SHORT"):
         return None
-
-    supports, resistances = _swing_levels(before, 80)
-    if direction == "LONG":
-        targets = [x for x in resistances if x > entry_price]
-        target = min(targets) if targets else entry_price + abs(entry_price - sl) * 2.0
-        reward = target - entry_price
-    else:
-        targets = [x for x in supports if x < entry_price]
-        target = max(targets) if targets else entry_price - abs(entry_price - sl) * 2.0
-        reward = entry_price - target
-
+    signal_time = int(setup["signal_time"])
+    decision_time = signal_time + 900
+    entry_price, sl = float(entry_price), float(sl)
     risk = abs(entry_price - sl)
     if risk <= 0:
         return None
 
-    return {"target": target, "rr": reward / risk}
+    m15_before = [
+        x for x in m15_rows
+        if int(x["time"]) + 900 <= decision_time
+    ]
+    h1_before = [
+        x for x in h1_rows
+        if int(x["time"]) + 3600 <= decision_time
+    ]
+    supports15, resistances15 = _swing_levels(m15_before, 80) if len(m15_before) >= 10 else ([], [])
+    supports1h, resistances1h = _swing_levels(h1_before, 80) if len(h1_before) >= 10 else ([], [])
+
+    if direction == "LONG":
+        candidates = (
+            [(x, "M15") for x in resistances15 if x > entry_price]
+            + [(x, "H1") for x in resistances1h if x > entry_price]
+        )
+        valid = [(level, tf) for level, tf in candidates if (level - entry_price) >= risk]
+        if not valid:
+            return None
+        target, target_tf = min(valid, key=lambda item: item[0])
+        return {"target": target, "rr": (target - entry_price) / risk, "target_tf": target_tf}
+
+    candidates = (
+        [(x, "M15") for x in supports15 if x < entry_price]
+        + [(x, "H1") for x in supports1h if x < entry_price]
+    )
+    valid = [(level, tf) for level, tf in candidates if (entry_price - level) >= risk]
+    if not valid:
+        return None
+    target, target_tf = max(valid, key=lambda item: item[0])
+    return {"target": target, "rr": (entry_price - target) / risk, "target_tf": target_tf}
 
 
+def build_entry(setup, m15_rows):
+    """
+    If the H1 setup candle and M15 trigger candle close at the same boundary,
+    the close itself is a valid entry reference. Otherwise use the next M15
+    candle open as before. Live execution still uses the executable market quote.
+    """
+    signal_time = int(setup["signal_time"])
+    h1_signal_time = setup.get("h1_signal_time")
+    if h1_signal_time is not None:
+        h1_close_time = int(h1_signal_time) + 3600
+        m15_close_time = signal_time + 900
+        if h1_close_time == m15_close_time:
+            trigger = next(
+                (c for c in m15_rows if int(c["time"]) == signal_time),
+                None
+            )
+            if trigger is not None:
+                return {
+                    "time": m15_close_time,
+                    "price": trigger["close"],
+                    "entry_mode": "SIMULTANEOUS_H1_M15_CLOSE",
+                }
+
+    for c in sorted(m15_rows, key=lambda x: x["time"]):
+        if int(c["time"]) > signal_time:
+            return {"time": c["time"], "price": c["open"], "entry_mode": "NEXT_M15_OPEN"}
+    return None
 def build_entry(setup, m15_rows):
     # Closed M15 trigger -> next M15 candle open.
     for c in sorted(m15_rows, key=lambda x: x["time"]):
