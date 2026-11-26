@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay Nov 23 and candidate H1 TP fallback BTC/ETH strategies with exact live M1 stop-protection rules.
+"""Chronological BTC/ETH replay with M1 trailing and conservative stop-update latency.
 Read-only historical replay. No exchange credentials or orders are used.
 """
 import csv, importlib.util, json, os, time, urllib.parse, urllib.request, types
@@ -16,6 +16,8 @@ SL_PROTECT_LOCK_R = -0.5
 TRAIL_ACTIVATION_R = 0.7
 M1_SWING_LEFT = 2
 M1_SWING_RIGHT = 2
+# Conservative proxy, not a measured MEXC/API latency.
+SL_UPDATE_DELAY_SECONDS = 60
 
 def load_module(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -83,7 +85,9 @@ def r_value(direction, entry, initial_sl, price):
     return ((price-entry) if direction=="LONG" else (entry-price))/risk
 
 def confirmed_m1_swings(rows):
-    rows=closed(rows); lows=[]; highs=[]
+    # Caller supplies only candles proven closed by the replay cutoff.
+    # Do not drop the final historical candle as the live-feed helper does.
+    rows=list(rows); lows=[]; highs=[]
     for i in range(M1_SWING_LEFT,len(rows)-M1_SWING_RIGHT):
         candle=rows[i]
         neighbours=rows[i-M1_SWING_LEFT:i]+rows[i+1:i+M1_SWING_RIGHT+1]
@@ -95,45 +99,103 @@ def confirmed_m1_swings(rows):
     return lows,highs
 
 def simulate_position(m1_rows, direction, entry, initial_sl):
-    """Same ordering and thresholds as main.py's confirmed M1 swing simulator."""
-    sl=float(initial_sl); entry_price=float(entry["price"]); original_sl=sl
-    if abs(entry_price-original_sl)<=0: return None
-    lows,highs=confirmed_m1_swings(m1_rows)
-    max_r=0.0; min_r=0.0; exit_time=None; exit_price=None; reason=None
-    trail_time=None; trail_price=None; processed=None
-    for candle in closed(m1_rows):
-        if candle["time"]<entry["time"]: continue
-        processed=candle["time"]
-        hi_r=r_value(direction,entry_price,original_sl,candle["high"])
-        lo_r=r_value(direction,entry_price,original_sl,candle["low"])
-        max_r=max(max_r,hi_r,lo_r); min_r=min(min_r,hi_r,lo_r)
-        # Check the stop active before this M1 candle, matching live/PAPER logic.
-        if direction=="LONG" and candle["low"]<=sl:
-            exit_time,exit_price,reason=candle["time"],sl,"SL"; break
-        if direction=="SHORT" and candle["high"]>=sl:
-            exit_time,exit_price,reason=candle["time"],sl,"SL"; break
-        risk=abs(entry_price-original_sl)
-        if max_r>=SL_PROTECT_ACTIVATION_R:
-            protected=entry_price+SL_PROTECT_LOCK_R*risk if direction=="LONG" else entry_price-SL_PROTECT_LOCK_R*risk
-            if (direction=="LONG" and protected>sl) or (direction=="SHORT" and protected<sl):
-                sl=protected; trail_time=candle["time"]; trail_price=sl
-        if max_r>=TRAIL_ACTIVATION_R:
-            if direction=="LONG":
-                valid=[x for x in lows if x["confirmed_at"]<candle["time"] and x["price"]<candle["close"]]
-                if valid and valid[-1]["price"]>sl:
-                    sl=valid[-1]["price"]; trail_time=candle["time"]; trail_price=sl
+    """M1 replay with closed-bar decisions and a conservative SL-update delay."""
+    rows = list(m1_rows)  # Already filtered to candles fully closed by END.
+    sl = float(initial_sl)
+    entry_price = float(entry["price"])
+    original_sl = sl
+    if abs(entry_price - original_sl) <= 0:
+        return None
+
+    lows, highs = confirmed_m1_swings(rows)
+    max_r = 0.0
+    min_r = 0.0
+    exit_time = exit_price = reason = None
+    trail_time = trail_price = processed = None
+    pending_sl = None
+    pending_effective_at = None
+
+    for candle in rows:
+        candle_time = int(candle["time"])
+        if candle_time < int(entry["time"]):
+            continue
+        processed = candle_time
+
+        # Apply a previously confirmed update only after its conservative delay.
+        if pending_sl is not None and pending_effective_at <= candle_time:
+            if ((direction == "LONG" and pending_sl > sl)
+                    or (direction == "SHORT" and pending_sl < sl)):
+                sl = pending_sl
+            pending_sl = pending_effective_at = None
+
+        hi_r = r_value(direction, entry_price, original_sl, candle["high"])
+        lo_r = r_value(direction, entry_price, original_sl, candle["low"])
+        max_r = max(max_r, hi_r, lo_r)
+        min_r = min(min_r, lo_r, hi_r)
+
+        # Check the stop active at the start of this M1 candle.
+        if direction == "LONG" and candle["low"] <= sl:
+            exit_time, exit_price, reason = candle_time, sl, "SL"
+            break
+        if direction == "SHORT" and candle["high"] >= sl:
+            exit_time, exit_price, reason = candle_time, sl, "SL"
+            break
+
+        risk = abs(entry_price - original_sl)
+        candidate = sl
+        if max_r >= SL_PROTECT_ACTIVATION_R:
+            protected = (
+                entry_price + SL_PROTECT_LOCK_R * risk
+                if direction == "LONG"
+                else entry_price - SL_PROTECT_LOCK_R * risk
+            )
+            if ((direction == "LONG" and protected > candidate)
+                    or (direction == "SHORT" and protected < candidate)):
+                candidate = protected
+
+        if max_r >= TRAIL_ACTIVATION_R:
+            if direction == "LONG":
+                valid = [
+                    x for x in lows
+                    if x["confirmed_at"] < candle_time
+                    and x["price"] < candle["close"]
+                ]
+                if valid and valid[-1]["price"] > candidate:
+                    candidate = valid[-1]["price"]
             else:
-                valid=[x for x in highs if x["confirmed_at"]<candle["time"] and x["price"]>candle["close"]]
-                if valid and valid[-1]["price"]<sl:
-                    sl=valid[-1]["price"]; trail_time=candle["time"]; trail_price=sl
+                valid = [
+                    x for x in highs
+                    if x["confirmed_at"] < candle_time
+                    and x["price"] > candle["close"]
+                ]
+                if valid and valid[-1]["price"] < candidate:
+                    candidate = valid[-1]["price"]
+
+        if candidate != sl:
+            # Candle closes at candle_time+60; wait one more full M1 minute
+            # before assuming the exchange has confirmed the updated stop.
+            pending_sl = candidate
+            pending_effective_at = candle_time + 60 + SL_UPDATE_DELAY_SECONDS
+            trail_time = candle_time
+            trail_price = candidate
+
     if exit_time is not None:
-        exit_r=r_value(direction,entry_price,original_sl,exit_price)
+        exit_r = r_value(direction, entry_price, original_sl, exit_price)
     else:
-        rows=closed(m1_rows)
-        exit_r=r_value(direction,entry_price,original_sl,rows[-1]["close"]) if rows else None
-    return {"exit_time":exit_time,"exit_price":exit_price,"reason":reason,"exit_r":exit_r,
-            "max_r":max_r,"min_r":min_r,"final_sl":sl,"trail_time":trail_time,
-            "trail_price":trail_price,"last_m1_candle":processed}
+        exit_r = r_value(direction, entry_price, original_sl, rows[-1]["close"]) if rows else None
+
+    return {
+        "exit_time": exit_time,
+        "exit_price": exit_price,
+        "reason": reason,
+        "exit_r": exit_r,
+        "max_r": max_r,
+        "min_r": min_r,
+        "final_sl": sl,
+        "trail_time": trail_time,
+        "trail_price": trail_price,
+        "last_m1_candle": processed,
+    }
 
 
 def choose_sl_buffer(mod, h1_rows, m15_rows, setup, buffer_atr):
@@ -196,7 +258,7 @@ def replay(mod, data, asset):
         # Keep pre-entry M1 history for confirmed swing left-context, but stop
         # the replay exactly at the requested period boundary. The simulator
         # itself ignores candles before entry.
-        position_rows=[x for x in m1 if int(x["time"])<END]
+        position_rows=[x for x in m1 if int(x["time"])+INTERVALS["Min1"]<=END]
         result=simulate_position(position_rows,direction,entry,float(initial_sl))
         if result is None: continue
         if result["exit_time"] is None:
@@ -253,7 +315,9 @@ def main():
     report={"period_utc":{"start":datetime.fromtimestamp(START,timezone.utc).isoformat(),
         "end_exclusive":datetime.fromtimestamp(END,timezone.utc).isoformat()},
         "fees":{"taker_per_side_pct":FEE*100,"assumption":"taker on entry and exit"},
-        "method":"Each strategy independently discovers signals with chronological as-of M15 boundaries. One open position per asset; next entry only after prior position exit. Entry at next M15 open; SL/TP levels use only candles fully closed by signal decision time; M1 management begins at entry. Four variants isolate synchronization and TP changes. Taker fees 0.08% each side.",
+        "execution_limits":{"m1_sl_update_delay_proxy_seconds":SL_UPDATE_DELAY_SECONDS,"delay_assumption":"candidate SL calculated at M1 close; active only after one additional full M1 minute as a conservative proxy; not measured exchange latency","fill_assumption":"stop fills at stop price when touched; no spread, slippage, partial fills or API rejection modeled","result_type":"historical candle simulation, not actual MEXC execution"},
+        "exit_logic":{"take_profit_closes_position":False,"description":"planned structural target is used only for the entry RR eligibility filter; positions exit only when the active/trailing SL is touched or are excluded as open at period end"},
+        "method":"Chronological as-of signal discovery on closed H4/H1/M15/D1 candles. M1 is used only for position management. One open position per asset; next entry only after prior position exit. Only M1 candles fully closed by END are processed, including the final candle ending exactly at END. SL protection at +0.5R locks -0.5R; M1 swing trailing starts at +0.7R using two-left/two-right confirmed pivots. A stop update is delayed by one additional full M1 candle as a conservative polling/API confirmation proxy. Structural target is an entry RR filter only, never a take-profit exit. Taker fees 0.08% each side.",
         "models":{}}
     csvrows=[]
     for asset,data in all_data.items():
