@@ -360,6 +360,11 @@ def _h1_opposing_reaction_veto(h1_rows, direction):
     return upper_wick >= max(body * 1.2, rng * 0.35) and rejected_from_high
 
 
+def _h1_bullish_reaction_veto(h1_rows):
+    """Backward-compatible SHORT-side wrapper."""
+    return _h1_opposing_reaction_veto(h1_rows, "SHORT")
+
+
 def _h1_range_reaction(h1_rows):
     # Callers pass closed H1 candles; preserve the newest completed reaction.
     r = list(h1_rows)
