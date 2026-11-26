@@ -330,27 +330,9 @@ def _h1_reaction(h1_rows, direction):
     if not pa["ok"]:
         return None
 
-    # Stronger SHORT filter: a bearish H1 reaction must show a real rejection
-    # (dominant upper wick and close near candle low) or a decisive bearish
-    # impulse. A weak red/indecision candle at the EMA is not enough.
-    if direction == "SHORT":
-        body = _body(c)
-        rng = _range(c)
-        upper = c["high"] - max(c["open"], c["close"])
-        lower = min(c["open"], c["close"]) - c["low"]
-        bearish_rejection = (
-            c["close"] < c["open"]
-            and upper >= max(body * 1.2, rng * 0.35)
-            and lower <= upper * 0.60
-            and c["close"] <= c["low"] + rng * 0.40
-        )
-        bearish_impulse = (
-            c["close"] < c["open"]
-            and body / rng >= PA_BODY_RATIO
-            and c["close"] <= c["low"] + rng * 0.20
-        )
-        if not (bearish_rejection or bearish_impulse):
-            return None
+    # Do not require an ideal upper-wick candle for a valid SHORT retest.
+    # The separate H1 bullish-reaction veto below blocks SHORTs when buyers
+    # have clearly defended the low of the latest completed H1 candle.
 
     return {
         "signal_time": c["time"],
@@ -364,6 +346,29 @@ def _h1_reaction(h1_rows, direction):
         "level_type": level_type,
         "level": level,
     }
+
+
+
+def _h1_bullish_reaction_veto(h1_rows):
+    """
+    Block SHORT when the latest fully closed H1 candle shows a strong
+    rejection from its low (buyers defended lower prices). Candle colour
+    is deliberately irrelevant: a red candle can still have a strong lower
+    wick. Caller must pass H1 candles closed as of the decision timestamp.
+    """
+    if not h1_rows:
+        return False
+    c = h1_rows[-1]
+    rng = _range(c)
+    if rng <= 0:
+        return False
+    body = _body(c)
+    lower_wick = min(c["open"], c["close"]) - c["low"]
+    recovered_from_low = c["close"] >= c["low"] + rng * 0.40
+    return (
+        lower_wick >= max(body * 1.2, rng * 0.35)
+        and recovered_from_low
+    )
 
 
 def _h1_range_reaction(h1_rows):
@@ -586,6 +591,11 @@ def _trend_signal(h4_rows, h1_rows, m15_rows, d1_rows=None, rows_are_closed=Fals
     if h4["bias"] is None:
         return None
     direction = h4["bias"]
+    # One strong lower-wick reaction on the latest completed H1 candle is
+    # enough to veto a SHORT. Never inspect the still-forming H1 candle.
+    h1_closed = list(h1_rows) if rows_are_closed else _closed(h1_rows)
+    if direction == "SHORT" and _h1_bullish_reaction_veto(h1_closed):
+        return None
     r15 = list(m15_rows) if rows_are_closed else _closed(m15_rows)
     if len(r15) < 110:
         return None
@@ -621,6 +631,8 @@ def _range_signal(h4_rows, h1_rows, m15_rows, rows_are_closed=False):
     h1_reaction = _h1_range_reaction(h1)
     if not h1_reaction: return None
     direction, level = h1_reaction["direction"], h1_reaction.get("level")
+    if direction == "SHORT" and _h1_bullish_reaction_veto(h1):
+        return None
     if level is None: return None
     trigger = _m15_trigger(r15, direction, h1_reaction["signal_time"], anchor_low=level, anchor_high=level, max_bars=4)
     if not trigger: return None
