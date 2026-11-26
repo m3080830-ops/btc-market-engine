@@ -82,11 +82,11 @@ class VariantCTests(unittest.TestCase):
 
     def test_range_signal_keeps_latest_closed_h1_candle(self):
         h1_rows = [
-            {"time": i, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
+            {"time": i, "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0}
             for i in range(62)
         ]
         m15_rows = [
-            {"time": i, "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
+            {"time": i, "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0}
             for i in range(120)
         ]
         with patch.object(strategy, "_h4_context", return_value={
