@@ -100,7 +100,7 @@ class VariantCTests(unittest.TestCase):
              }), patch.object(strategy, "_m15_trigger", return_value={
                  "signal_time": 119, "direction": "SHORT", "price": 101.0,
                  "model": "M15_TRIGGER", "pa": ["test"]
-             }):
+             }), patch.object(strategy, "_h1_opposing_reaction_veto", return_value=False):
             signal = strategy._range_signal([], h1_rows, m15_rows)
         self.assertIsNotNone(signal)
         self.assertEqual(signal["h1_signal_time"], 60)
