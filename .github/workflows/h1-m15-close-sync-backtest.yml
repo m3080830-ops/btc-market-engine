@@ -1,7 +1,7 @@
-name: H1 M15 close-time synchronization backtest (Nov 10-24)
+name: BTC ETH sync TP and ETH SHORT guard backtest (Nov 10-24)
 on:
   push:
-    branches: [test/h1-m15-close-sync-10-24nov]
+    branches: [test/sync-tp-eth-short-guard]
     paths:
       - "strategy.py"
       - "main.py"
@@ -47,7 +47,7 @@ jobs:
       - name: Upload complete data and results
         uses: actions/upload-artifact@v4
         with:
-          name: btc-market-engine-close-sync-${{ github.run_id }}
+          name: btc-market-engine-sync-tp-eth-guard-${{ github.run_id }}
           path: backtest-output/
           if-no-files-found: error
           retention-days: 90
