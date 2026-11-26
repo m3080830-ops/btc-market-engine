@@ -1,4 +1,4 @@
-name: BTC ETH sync TP and ETH SHORT guard backtest (Nov 10-24)
+name: BTC ETH sync TP and ETH SHORT guard backtest (Nov 19-26, M1 chronological)
 on:
   push:
     branches: [test/sync-tp-eth-short-guard]
@@ -12,11 +12,11 @@ on:
       start_utc:
         description: Inclusive UTC start
         required: false
-        default: "2026-11-10T00:00:00+00:00"
+        default: "2026-11-19T00:00:00+00:00"
       end_utc:
         description: Exclusive UTC end
         required: false
-        default: "2026-11-24T00:00:00+00:00"
+        default: "2026-11-26T00:00:00+00:00"
 permissions:
   contents: read
 jobs:
@@ -24,8 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      START_UTC: ${{ inputs.start_utc || '2026-11-10T00:00:00+00:00' }}
-      END_UTC: ${{ inputs.end_utc || '2026-11-24T00:00:00+00:00' }}
+      START_UTC: ${{ inputs.start_utc || '2026-11-19T00:00:00+00:00' }}
+      END_UTC: ${{ inputs.end_utc || '2026-11-26T00:00:00+00:00' }}
     steps:
       - name: Checkout full history
         uses: actions/checkout@v4
