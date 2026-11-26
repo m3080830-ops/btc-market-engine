@@ -330,6 +330,28 @@ def _h1_reaction(h1_rows, direction):
     if not pa["ok"]:
         return None
 
+    # Stronger SHORT filter: a bearish H1 reaction must show a real rejection
+    # (dominant upper wick and close near candle low) or a decisive bearish
+    # impulse. A weak red/indecision candle at the EMA is not enough.
+    if direction == "SHORT":
+        body = _body(c)
+        rng = _range(c)
+        upper = c["high"] - max(c["open"], c["close"])
+        lower = min(c["open"], c["close"]) - c["low"]
+        bearish_rejection = (
+            c["close"] < c["open"]
+            and upper >= max(body * 1.2, rng * 0.35)
+            and lower <= upper * 0.60
+            and c["close"] <= c["low"] + rng * 0.40
+        )
+        bearish_impulse = (
+            c["close"] < c["open"]
+            and body / rng >= PA_BODY_RATIO
+            and c["close"] <= c["low"] + rng * 0.20
+        )
+        if not (bearish_rejection or bearish_impulse):
+            return None
+
     return {
         "signal_time": c["time"],
         "direction": direction,
