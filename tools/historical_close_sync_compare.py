@@ -213,6 +213,15 @@ def replay(mod, data, asset):
             "exit_reason":result["reason"],"gross_R":gross,"fees_R":fee_r,"net_R":gross-fee_r,
             "max_R":result["max_r"],"min_R":result["min_r"],"final_sl":result["final_sl"],
             "trail_time":result["trail_time"],"trail_price":result["trail_price"]})
+    # Hard safety assertion: the replay must never contain overlapping
+    # positions for the same asset, otherwise its performance is invalid.
+    ordered = sorted(trades, key=lambda x: x["entry_time"])
+    for previous, current in zip(ordered, ordered[1:]):
+        if int(current["entry_time"]) <= int(previous["exit_time"]):
+            raise RuntimeError(
+                f"OVERLAPPING_POSITIONS asset={asset} "
+                f"previous_exit={previous['exit_time']} next_entry={current['entry_time']}"
+            )
     return trades,rejected,rr_rejected,in_period_signals,open_at_end
 
 def stats(trades):
