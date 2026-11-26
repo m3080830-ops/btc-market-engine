@@ -79,6 +79,11 @@ def fetch(symbol, interval, start, end):
 def closed(rows):
     return rows[:-1] if len(rows)>1 else []
 
+def closed_by_end(rows, end_ts):
+    """Keep candles whose full M1 interval has elapsed by the exclusive cutoff."""
+    return [row for row in rows if int(row["time"]) + INTERVALS["Min1"] <= int(end_ts)]
+
+
 def r_value(direction, entry, initial_sl, price):
     risk=abs(entry-initial_sl)
     if risk<=0: return 0.0
@@ -174,8 +179,12 @@ def simulate_position(m1_rows, direction, entry, initial_sl):
         if candidate != sl:
             # Candle closes at candle_time+60; wait one more full M1 minute
             # before assuming the exchange has confirmed the updated stop.
-            pending_sl = candidate
-            pending_effective_at = candle_time + 60 + SL_UPDATE_DELAY_SECONDS
+            if pending_sl is None or (
+                (direction == "LONG" and candidate > pending_sl)
+                or (direction == "SHORT" and candidate < pending_sl)
+            ):
+                pending_sl = candidate
+                pending_effective_at = candle_time + 60 + SL_UPDATE_DELAY_SECONDS
             trail_time = candle_time
             trail_price = candidate
 
@@ -258,7 +267,7 @@ def replay(mod, data, asset):
         # Keep pre-entry M1 history for confirmed swing left-context, but stop
         # the replay exactly at the requested period boundary. The simulator
         # itself ignores candles before entry.
-        position_rows=[x for x in m1 if int(x["time"])+INTERVALS["Min1"]<=END]
+        position_rows=closed_by_end(m1, END)
         result=simulate_position(position_rows,direction,entry,float(initial_sl))
         if result is None: continue
         if result["exit_time"] is None:
@@ -269,7 +278,7 @@ def replay(mod, data, asset):
         locked_until=int(result["exit_time"])+60
         risk=abs(price-float(initial_sl)); gross=result["exit_r"]
         fee_r=(price*FEE+exit_price*FEE)/risk
-        trades.append({"asset":asset,"entry_time":ts,"direction":direction,"model":sig.get("model"),
+        trades.append({"result_type":"HISTORICAL_SIMULATION_NOT_LIVE_EXECUTION","asset":asset,"entry_time":ts,"direction":direction,"model":sig.get("model"),
             "entry":price,"initial_sl":float(initial_sl),"planned_tp":float(plan["target"]),
             "planned_rr":float(plan["rr"]),"exit_time":result["exit_time"],"exit":exit_price,
             "exit_reason":result["reason"],"gross_R":gross,"fees_R":fee_r,"net_R":gross-fee_r,
@@ -329,7 +338,7 @@ def main():
             csvrows.extend([{"version":label,**t} for t in trades])
     with open("backtest-output/report.json","w") as f: json.dump(report,f,indent=2)
     with open("backtest-output/trades.csv","w",newline="") as f:
-        fields=["version","asset","entry_time","direction","model","entry","initial_sl","planned_tp","planned_rr",
+        fields=["version","result_type","asset","entry_time","direction","model","entry","initial_sl","planned_tp","planned_rr",
             "exit_time","exit","exit_reason","gross_R","fees_R","net_R","max_R","min_R","final_sl","trail_time","trail_price"]
         w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(csvrows)
     print(json.dumps({v:{a:{k:x for k,x in d.items() if k!="trades"} for a,d in assets.items()} for v,assets in report["models"].items()},indent=2))
