@@ -950,9 +950,3 @@ def build_entry(setup, m15_rows):
         if int(c["time"]) > signal_time:
             return {"time": c["time"], "price": c["open"], "entry_mode": "NEXT_M15_OPEN"}
     return None
-def build_entry(setup, m15_rows):
-    # Closed M15 trigger -> next M15 candle open.
-    for c in sorted(m15_rows, key=lambda x: x["time"]):
-        if c["time"] > setup["signal_time"]:
-            return {"time": c["time"], "price": c["open"]}
-    return None
