@@ -815,59 +815,83 @@ def choose_structural_sl(h1_rows, m15_rows, setup):
 
 
 def planned_trade(h1_rows, m15_rows, setup, entry_price, sl):
-    """Choose the nearest confirmed structural target; use H1 if M15 target fails RR."""
+    """
+    Select the nearest confirmed structural TP on M15 or H1.
+    A target is usable only when it offers at least 1R; never manufacture
+    a fixed 2R target when structure does not provide enough room.
+    All levels are calculated only from candles fully closed by the trigger
+    candle's close time.
+    """
     if entry_price is None or sl is None:
         return None
 
-    direction = setup["direction"]
+    direction = str(setup.get("direction", "")).upper()
+    if direction not in ("LONG", "SHORT"):
+        return None
     signal_time = int(setup["signal_time"])
-    decision_time = signal_time + 900  # M15 trigger candle close
-    risk = abs(float(entry_price) - float(sl))
+    decision_time = signal_time + 900
+    entry_price, sl = float(entry_price), float(sl)
+    risk = abs(entry_price - sl)
     if risk <= 0:
         return None
 
-    # M15 pivots are confirmed only after two right-hand candles.
     m15_before = [
         x for x in m15_rows
         if int(x["time"]) + 900 <= decision_time
     ]
-    if len(m15_before) >= 10:
-        supports15, resistances15 = _swing_levels(m15_before, 80)
-    else:
-        supports15, resistances15 = [], []
-
-    # H1 levels must also be fully closed by the M15 trigger close.
     h1_before = [
         x for x in h1_rows
         if int(x["time"]) + 3600 <= decision_time
     ]
-    if len(h1_before) >= 10:
-        supports1h, resistances1h = _swing_levels(h1_before, 80)
-    else:
-        supports1h, resistances1h = [], []
+    supports15, resistances15 = _swing_levels(m15_before, 80) if len(m15_before) >= 10 else ([], [])
+    supports1h, resistances1h = _swing_levels(h1_before, 80) if len(h1_before) >= 10 else ([], [])
 
     if direction == "LONG":
-        m15_targets = sorted(x for x in resistances15 if x > entry_price)
-        h1_targets = sorted(x for x in resistances1h if x > entry_price)
-        candidates = [(x, "M15") for x in m15_targets] + [(x, "H1") for x in h1_targets]
-        valid = [(x, tf) for x, tf in candidates if (x - entry_price) / risk >= 1.0]
-        if valid:
-            target, target_tf = min(valid, key=lambda item: item[0])
-            return {"target": target, "rr": (target - entry_price) / risk, "target_tf": target_tf}
-        return None
+        candidates = (
+            [(x, "M15") for x in resistances15 if x > entry_price]
+            + [(x, "H1") for x in resistances1h if x > entry_price]
+        )
+        valid = [(level, tf) for level, tf in candidates if (level - entry_price) >= risk]
+        if not valid:
+            return None
+        target, target_tf = min(valid, key=lambda item: item[0])
+        return {"target": target, "rr": (target - entry_price) / risk, "target_tf": target_tf}
 
-    m15_targets = sorted((x for x in supports15 if x < entry_price), reverse=True)
-    h1_targets = sorted((x for x in supports1h if x < entry_price), reverse=True)
-    candidates = [(x, "M15") for x in m15_targets] + [(x, "H1") for x in h1_targets]
-    valid = [(x, tf) for x, tf in candidates if (entry_price - x) / risk >= 1.0]
-    if valid:
-        target, target_tf = max(valid, key=lambda item: item[0])
-        return {"target": target, "rr": (entry_price - target) / risk, "target_tf": target_tf}
-    return None
+    candidates = (
+        [(x, "M15") for x in supports15 if x < entry_price]
+        + [(x, "H1") for x in supports1h if x < entry_price]
+    )
+    valid = [(level, tf) for level, tf in candidates if (entry_price - level) >= risk]
+    if not valid:
+        return None
+    target, target_tf = max(valid, key=lambda item: item[0])
+    return {"target": target, "rr": (entry_price - target) / risk, "target_tf": target_tf}
+
 
 def build_entry(setup, m15_rows):
-    # Closed M15 trigger -> next M15 candle open.
+    """
+    If the H1 setup candle and M15 trigger candle close at the same boundary,
+    the close itself is a valid entry reference. Otherwise use the next M15
+    candle open as before. Live execution still uses the executable market quote.
+    """
+    signal_time = int(setup["signal_time"])
+    h1_signal_time = setup.get("h1_signal_time")
+    if h1_signal_time is not None:
+        h1_close_time = int(h1_signal_time) + 3600
+        m15_close_time = signal_time + 900
+        if h1_close_time == m15_close_time:
+            trigger = next(
+                (c for c in m15_rows if int(c["time"]) == signal_time),
+                None
+            )
+            if trigger is not None:
+                return {
+                    "time": m15_close_time,
+                    "price": trigger["close"],
+                    "entry_mode": "SIMULTANEOUS_H1_M15_CLOSE",
+                }
+
     for c in sorted(m15_rows, key=lambda x: x["time"]):
-        if c["time"] > setup["signal_time"]:
-            return {"time": c["time"], "price": c["open"]}
+        if int(c["time"]) > signal_time:
+            return {"time": c["time"], "price": c["open"], "entry_mode": "NEXT_M15_OPEN"}
     return None
