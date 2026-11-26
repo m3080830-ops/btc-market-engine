@@ -41,10 +41,14 @@ class MultiSymbolLiveTests(unittest.TestCase):
             return MexcFuturesLive(db_path, symbol=symbol)
 
     def _setup_and_entry(self, entry_price, stop_price, symbol="ETH_USDT", target_price=None):
-        now = int(time.time())
+        # Build a deterministic fresh-entry fixture inside the current M15 candle.
+        # The live adapter intentionally rejects entries more than 180 seconds
+        # after candle open, so wall-clock seconds must not make this test flaky.
+        entry_time = (int(time.time()) // 900) * 900
+        now = entry_time + 30
         return (
-            {"symbol": symbol, "signal_time": now - 900, "direction": "LONG"},
-            {"time": (now // 900) * 900, "price": entry_price},
+            {"symbol": symbol, "signal_time": entry_time - 900, "direction": "LONG"},
+            {"time": entry_time, "price": entry_price},
             stop_price,
             1.5,
             entry_price if target_price is None else target_price,
